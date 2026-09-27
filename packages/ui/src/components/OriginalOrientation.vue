@@ -1,17 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { RectangleHorizontal, RectangleVertical } from '@lucide/vue';
+import { RotateCw } from '@lucide/vue';
 import { originalOrientationLayout } from '../utils/original-orientation';
 
-const props = defineProps<{ image: HTMLImageElement | null; pageKey: string }>();
-const rotated = ref(false);
+const props = defineProps<{ image: HTMLImageElement | null; pageKey: string; initialRotation?: number }>();
+const rotation = ref(props.initialRotation || 0);
 const viewport = ref<HTMLElement | null>(null);
 const size = ref({ width: 0, imageWidth: 0, imageHeight: 0 });
 let observer: ResizeObserver | undefined;
 function measure() {
   size.value = { width: viewport.value?.clientWidth || 0, imageWidth: props.image?.naturalWidth || 0, imageHeight: props.image?.naturalHeight || 0 };
 }
-watch(() => props.pageKey, () => { rotated.value = false; }, { flush: 'sync' });
+watch(() => [props.pageKey, props.initialRotation], () => { rotation.value = props.initialRotation || 0; }, { flush: 'sync' });
 watch(() => props.image, (image, old) => {
   old?.removeEventListener('load', measure);
   image?.addEventListener('load', measure);
@@ -24,21 +24,21 @@ onMounted(() => {
   measure();
 });
 onBeforeUnmount(() => { observer?.disconnect(); props.image?.removeEventListener('load', measure); });
-const layout = computed(() => originalOrientationLayout(size.value.width, size.value.imageWidth, size.value.imageHeight, rotated.value));
+const layout = computed(() => originalOrientationLayout(size.value.width, size.value.imageWidth, size.value.imageHeight, rotation.value % 180 !== 0));
 const contentStyle = computed(() => layout.value ? {
   width: `${layout.value.width}px`, height: `${layout.value.height}px`,
   position: 'absolute' as const, left: '50%', top: '50%',
-  transform: `translate(-50%, -50%) rotate(${rotated.value ? 90 : 0}deg) scale(${layout.value.scale})`
+  transform: `translate(-50%, -50%) rotate(${rotation.value}deg) scale(${layout.value.scale})`
 } : undefined);
 </script>
 
 <template>
   <div class="original-orientation">
     <div class="original-orientation-toolbar">
-      <button class="plain-icon-button" type="button" :disabled="!layout" :aria-pressed="rotated"
-        :title="rotated ? '切换为竖屏' : '切换为横屏'" :aria-label="rotated ? '切换为竖屏' : '切换为横屏'"
-        @click.stop="rotated = !rotated" @keydown.stop>
-        <RectangleVertical v-if="rotated" :size="18" /><RectangleHorizontal v-else :size="18" />
+      <button class="plain-icon-button" type="button" :disabled="!layout"
+        title="顺时针旋转 90°" aria-label="顺时针旋转 90°"
+        @click.stop="rotation = (rotation + 90) % 360" @keydown.stop>
+        <RotateCw :size="18" />
       </button>
     </div>
     <div ref="viewport" class="original-orientation-viewport" :style="layout ? { height: `${layout.stageHeight}px` } : undefined">

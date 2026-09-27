@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   ChevronLeft, ChevronRight, CircleAlert, Crosshair, Download, LoaderCircle, Maximize2,
-  RectangleHorizontal, RectangleVertical, Sparkles, X, ZoomIn, ZoomOut
+  RotateCw, Sparkles, X, ZoomIn, ZoomOut
 } from "@lucide/vue";
 import { useScrollLock } from "../composables/useScrollLock";
 import OcrTextOverlay from "./OcrTextOverlay.vue";
@@ -16,6 +16,8 @@ export type ImageViewerPage = {
   label: string;
   downloadUrl?: string;
   downloadName?: string;
+  rotation?: number;
+  previewRotation?: number;
 };
 
 const props = defineProps<{
@@ -49,6 +51,9 @@ const ocrOn = ref(true);
 
 const viewerPage = computed(() => props.pages[viewerIndex.value] || null);
 const viewerUsingPreview = computed(() => Boolean(viewerPage.value?.previewUrl) && !viewerHighRes.value);
+const viewerDisplayRotation = computed(() =>
+  (viewerRotation.value - (viewerUsingPreview.value ? viewerPage.value?.previewRotation || 0 : 0) + 360) % 360
+);
 const viewerDisplaySrc = computed(() => {
   const page = viewerPage.value;
   if (!page) return "";
@@ -81,6 +86,7 @@ let viewerPreloadSeq = 0;
 function prepareViewerPage(index: number) {
   viewerIndex.value = index;
   resetViewerTransform();
+  viewerRotation.value = viewerPage.value?.rotation || 0;
   resetViewerCanvasScroll();
   ocrOn.value = true;
   viewerHighRes.value = false;
@@ -128,8 +134,8 @@ function zoomViewer(direction: -1 | 1) {
   setViewerScale(viewerScale.value + direction * 0.25);
 }
 
-function toggleViewerOrientation() {
-  viewerRotation.value = viewerRotation.value % 180 === 0 ? 90 : 0;
+function rotateViewer() {
+  viewerRotation.value = (viewerRotation.value + 90) % 360;
   setViewerScale(1);
   resetViewerCanvasScroll();
 }
@@ -217,7 +223,7 @@ const viewerFitSize = computed(() => {
   const cw = viewerCanvasW.value;
   const ch = viewerCanvasH.value;
   if (!nw || !nh || !cw || !ch) return null;
-  const rotated = viewerRotation.value % 180 !== 0;
+  const rotated = viewerDisplayRotation.value % 180 !== 0;
   const effW = rotated ? nh : nw;
   const effH = rotated ? nw : nh;
   const fit = Math.min(cw / effW, ch / effH);
@@ -407,11 +413,11 @@ onBeforeUnmount(() => {
         <button type="button" title="放大" :disabled="viewerScale >= 3" @click="zoomViewer(1)"><ZoomIn :size="18" /></button>
         <button
           type="button"
-          :title="viewerRotation % 180 === 0 ? '切换为横屏' : '切换为竖屏'"
-          @click="toggleViewerOrientation"
+          title="顺时针旋转 90°"
+          aria-label="顺时针旋转 90°"
+          @click="rotateViewer"
         >
-          <RectangleHorizontal v-if="viewerRotation % 180 === 0" :size="18" />
-          <RectangleVertical v-else :size="18" />
+          <RotateCw :size="18" />
         </button>
         <button type="button" title="下载" @click="downloadViewerPage"><Download :size="18" /></button>
       </div>
@@ -440,7 +446,7 @@ onBeforeUnmount(() => {
         <div
           v-if="viewerPage && !viewerLoadFailed"
           class="viewer-image-frame"
-          :style="[viewerFitStyle, { transform: `translate(-50%, -50%) translate3d(${viewerPanX}px, ${viewerPanY}px, 0) scale(${viewerScale}) rotate(${viewerRotation}deg)` }]"
+          :style="[viewerFitStyle, { transform: `translate(-50%, -50%) translate3d(${viewerPanX}px, ${viewerPanY}px, 0) scale(${viewerScale}) rotate(${viewerDisplayRotation}deg)` }]"
         >
           <img
             ref="viewerImgEl"
@@ -473,11 +479,11 @@ onBeforeUnmount(() => {
           v-if="viewerImmersive"
           class="viewer-fullscreen-button viewer-orient-button"
           type="button"
-          :title="viewerRotation % 180 === 0 ? '切换为横屏' : '切换为竖屏'"
-          @click.stop="toggleViewerOrientation"
+          title="顺时针旋转 90°"
+          aria-label="顺时针旋转 90°"
+          @click.stop="rotateViewer"
         >
-          <RectangleHorizontal v-if="viewerRotation % 180 === 0" :size="19" />
-          <RectangleVertical v-else :size="19" />
+          <RotateCw :size="19" />
         </button>
       </div>
       <button v-if="pages.length > 1" class="viewer-nav-button viewer-nav-button--next" type="button" title="下一页" @click="moveViewer(1)">

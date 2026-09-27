@@ -59,6 +59,7 @@ export function processingJobBatchLabel(batch: Pick<ProcessingJobBatch, "kind" |
   if (batch.jobs.some((job) => job.pipelineVersion === "manual-page-v1")) return "页面更新";
   return {
     page_append: "补充报告页",
+    page_orientation: "更新页面方向",
     initial_upload: "首次识别",
     manual_reprocess: "重新识别",
     manual_ai: "手动 AI 整理"

@@ -1,4 +1,5 @@
 import type {DatabaseSync} from "node:sqlite";
+import {createError} from 'h3';
 import { getDatabase, runInTransaction } from '../database/client';
 import { isAdministrator, type RequestUser } from '../domain/request-user';
 import { createId } from '../utils/identifier';
@@ -7,6 +8,15 @@ export type RestoredLocalCredential = {
  username:string; passwordHash:string; passwordSalt:string; mustChangePassword:number;
  accountId:string;
 };
+type SourceLocalAccount = RestoredLocalCredential & {userId:string; isAdmin:number};
+export function findSourceLocalAccount(db:DatabaseSync,username:string):SourceLocalAccount|null {
+ return (db.prepare(`SELECT a.id AS accountId,a.user_id AS userId,a.username,a.password_hash AS passwordHash,
+  a.password_salt AS passwordSalt,a.must_change_password AS mustChangePassword,u.is_gateway_admin AS isAdmin
+  FROM local_accounts a JOIN users u ON u.id=a.user_id WHERE a.username=?`).get(username) as SourceLocalAccount|undefined) || null;
+}
+export function matchesLocalCredential(source:SourceLocalAccount|null,credential:RestoredLocalCredential):boolean {
+ return Boolean(source && source.isAdmin && source.passwordHash===credential.passwordHash && source.passwordSalt===credential.passwordSalt);
+}
 export function captureRestoringAdministratorCredential(user:RequestUser):RestoredLocalCredential|null {
  if(user.provider!=='local') return null;
  const row=getDatabase().prepare(`SELECT id AS accountId,username,password_hash AS passwordHash,password_salt AS passwordSalt,must_change_password AS mustChangePassword
@@ -31,13 +41,19 @@ export function rebindRestoredAdministrator(user:RequestUser,credential:Restored
    targetId=createId('user');
   } else if(credential) {
    const restored=db.prepare('SELECT id FROM local_accounts WHERE user_id=?').get(user.id) as {id:string}|undefined;
-   if(restored && restored.id!==credential.accountId) throw new Error('备份管理员身份不一致，必须重新预检');
-   if(!restored && db.prepare('SELECT 1 FROM users WHERE id=?').get(user.id)) throw new Error('无法确认备份中的管理员身份');
+   const source=findSourceLocalAccount(db,credential.username);
+   if(restored && restored.id!==credential.accountId &&
+    !(source?.userId===user.id && matchesLocalCredential(source,credential))) throw createError({statusCode:409,statusMessage:'备份管理员身份不一致，请重新预检'});
+   if(!restored && db.prepare('SELECT 1 FROM users WHERE id=?').get(user.id)) throw createError({statusCode:409,statusMessage:'无法确认备份中的管理员身份'});
+   if(!restored && source) {
+    if(!matchesLocalCredential(source,credential)) throw createError({statusCode:409,statusMessage:'备份管理员身份不一致，请重新预检'});
+    targetId=source.userId;
+   }
   }
   db.prepare(`INSERT INTO users(id,display_name,is_gateway_admin) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET is_gateway_admin=1`).run(targetId,user.displayName);
   if(credential) {
    const conflict=db.prepare('SELECT user_id FROM local_accounts WHERE username=? AND user_id<>?').get(credential.username,targetId);
-   if(conflict) throw new Error('管理员登录名冲突，请先处理身份映射');
+   if(conflict) throw createError({statusCode:409,statusMessage:'管理员登录名冲突，请先处理身份映射'});
    db.prepare(`INSERT INTO local_accounts(id,user_id,username,password_hash,password_salt,must_change_password) VALUES(?,?,?,?,?,?)
     ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,password_salt=excluded.password_salt,must_change_password=excluded.must_change_password,disabled_at=NULL`).run(strategy==='same'?credential.accountId:createId('account'),targetId,credential.username,credential.passwordHash,credential.passwordSalt,credential.mustChangePassword);
   }

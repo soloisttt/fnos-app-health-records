@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS report_pages (
   width INTEGER,
   height INTEGER,
   rotation INTEGER NOT NULL DEFAULT 0,
+  ocr_rotation INTEGER,
   source_page_number INTEGER,
   source_page_count INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

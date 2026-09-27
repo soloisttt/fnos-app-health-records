@@ -93,6 +93,8 @@ import { enqueueFileGarbage, collectReportFileGarbage, type FileGarbageCandidate
 import { reportNoteFiles } from './report-note.service';
 import {
   captureRestoringAdministratorCredential,
+  findSourceLocalAccount,
+  matchesLocalCredential,
   rebindRestoredAdministrator,
 } from "./restore-identity.service";
 import {
@@ -644,8 +646,8 @@ const pdfPreviewMaxSize = 2800;
 const pdfPreviewQuality = 92;
 const pdfPreviewRenderScale = 3;
 
-function pdfPreviewRelativePath(reportId: string, pageId: string) {
-  return join("previews", reportId, `${pageId}.jpg`);
+function pdfPreviewRelativePath(reportId: string, pageId: string, rotation?: number) {
+  return join("previews", reportId, rotation === undefined ? `${pageId}.jpg` : `${pageId}.r${rotation}.jpg`);
 }
 
 function hasUsableJpegPreview(path: string) {
@@ -1234,6 +1236,7 @@ export function getReportDetail(
       `
     SELECT id, report_id AS reportId, page_number AS pageNumber, original_name AS originalName,
       mime_type AS mimeType, file_size AS fileSize, width, height, rotation,
+      (ocr_rotation IS NOT NULL AND ocr_rotation <> rotation) AS ocrStale,
       source_page_number AS sourcePageNumber, source_page_count AS sourcePageCount,
       thumbnail_path IS NOT NULL AS hasThumbnail
     FROM report_pages WHERE report_id = ? ORDER BY page_number
@@ -1998,7 +2001,7 @@ export async function getReportPagePreviewFile(
     return getReportPageFile(user, reportId, pageId, "original");
   }
 
-  const previewRelativePath = pdfPreviewRelativePath(reportId, pageId);
+  const previewRelativePath = pdfPreviewRelativePath(reportId, pageId, row.rotation);
   const previewPath = storagePath(previewRelativePath);
   if (hasUsableJpegPreview(previewPath)) {
     return {
@@ -2131,6 +2134,7 @@ export type OcrPageDetail = {
   modelVersion: string | null;
   coordWidth: number | null;
   coordHeight: number | null;
+  orientationChanged: boolean;
   lines: OcrLineDetail[];
 };
 
@@ -2217,6 +2221,7 @@ type OcrPageRow = {
   pageId: string;
   pageNumber: number;
   rotation: number;
+  ocrRotation: number | null;
   mimeType: string;
   storagePath: string;
   sourcePageNumber: number | null;
@@ -2347,7 +2352,7 @@ export async function getReportPageOcrDetail(
     .prepare(
       `
     SELECT p.id AS pageId, p.page_number AS pageNumber,
-      p.rotation, p.mime_type AS mimeType, p.storage_path AS storagePath,
+      p.rotation, p.ocr_rotation AS ocrRotation, p.mime_type AS mimeType, p.storage_path AS storagePath,
       p.source_page_number AS sourcePageNumber,
       o.id AS ocrResultId, o.engine, o.model_version AS modelVersion,
       o.lines_json AS linesJson, o.coord_width AS coordWidth,
@@ -2359,6 +2364,7 @@ export async function getReportPageOcrDetail(
     )
     .get(pageId, reportId) as OcrPageRow | undefined;
   if (!row) return null;
+  const orientationChanged = row.ocrRotation !== null && row.ocrRotation !== row.rotation;
   let rawLines = parseJson<Array<Record<string, unknown>>>(row.linesJson, []);
   let coordWidth =
     typeof row.coordWidth === "number" && row.coordWidth > 0
@@ -2368,7 +2374,7 @@ export async function getReportPageOcrDetail(
     typeof row.coordHeight === "number" && row.coordHeight > 0
       ? row.coordHeight
       : null;
-  if ((!coordWidth || !coordHeight) && rawLines.length) {
+  if (!orientationChanged && (!coordWidth || !coordHeight) && rawLines.length) {
     const healed = await healLegacyOcrCoordSpace(
       reportId,
       row,
@@ -2394,7 +2400,7 @@ export async function getReportPageOcrDetail(
           : `page_${row.pageNumber}_line_${index + 1}`;
       const confidence =
         typeof line.confidence === "number" ? line.confidence : 0;
-      const box = normalizeOcrBox(line.box);
+      const box = orientationChanged ? null : normalizeOcrBox(line.box);
       return { id, text, confidence, box };
     })
     .filter((line): line is OcrLineDetail => line !== null);
@@ -2405,6 +2411,7 @@ export async function getReportPageOcrDetail(
     modelVersion: row.modelVersion,
     coordWidth,
     coordHeight,
+    orientationChanged,
     lines,
   };
 }
@@ -2584,6 +2591,7 @@ function purgeTrashedReport(
   // Only known derivatives for this report; no global scan or eager deletion.
   const derivedFiles = pages.flatMap(page => [
     pdfPreviewRelativePath(reportId, page.id),
+    ...[0, 90, 180, 270].map(rotation => pdfPreviewRelativePath(reportId, page.id, rotation)),
     ...[0, 90, 180, 270].map(rotation => join("previews", "vision", reportId, `${page.id}.r${rotation}.jpg`))
   ]).filter(path => existsSync(join(getAppConfig().storageDir, path)));
   const exportDirectory = join(getAppConfig().storageDir, "report-exports");
@@ -4068,6 +4076,57 @@ function queuePageRefreshJobs(
   }
 }
 
+export function rotateReportPage(user: RequestUser, reportId: string, pageId: string, input: Record<string, unknown>) {
+  const rotation = Number(input.rotation);
+  const expectedRotation = Number(input.expectedRotation);
+  if (![0, 90, 180, 270].includes(rotation) || ![0, 90, 180, 270].includes(expectedRotation)) {
+    throw createError({ statusCode: 400, statusMessage: "页面旋转角度无效" });
+  }
+  const db = getDatabase();
+  const report = db.prepare("SELECT member_id AS memberId, status FROM reports WHERE id=? AND status<>'trashed'")
+    .get(reportId) as { memberId: string; status: string } | undefined;
+  if (!report) throw createError({ statusCode: 404, statusMessage: "报告不存在" });
+  assertMemberManage(user, report.memberId);
+  assertNoPageAppend(reportId);
+  if (["queued", "processing", "uploading"].includes(report.status)) {
+    throw createError({ statusCode: 409, statusMessage: "报告仍在处理中，请完成后再旋转页面" });
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const page = db.prepare("SELECT rotation FROM report_pages WHERE id=? AND report_id=?")
+      .get(pageId, reportId) as { rotation: number } | undefined;
+    if (!page) throw createError({ statusCode: 404, statusMessage: "页面不存在" });
+    if (page.rotation !== expectedRotation) throw createError({ statusCode: 409, statusMessage: "页面方向已变化，请刷新后重试" });
+    if (page.rotation !== rotation) {
+      if (db.prepare("SELECT 1 FROM processing_jobs WHERE report_id=? AND status IN ('queued','processing') LIMIT 1").get(reportId)
+        || isReportJobActive(reportId)) {
+        throw createError({ statusCode: 409, statusMessage: "报告任务仍在处理中，请稍后重试" });
+      }
+      db.prepare("UPDATE report_pages SET rotation=?,thumbnail_path=NULL,width=NULL,height=NULL WHERE id=? AND report_id=?")
+        .run(rotation, pageId, reportId);
+      db.prepare("UPDATE reports SET updated_at=CURRENT_TIMESTAMP WHERE id=?").run(reportId);
+      const jobId = createId("job");
+      const batchId = createId("batch");
+      db.prepare(`INSERT INTO processing_jobs(id,report_id,page_id,job_type,pipeline_version,deduplication_key)
+        VALUES(?,?,?,'thumbnail','page-orientation-v1',?)`)
+        .run(jobId, reportId, pageId, `${reportId}:${pageId}:orientation:${batchId}`);
+      db.prepare(`INSERT INTO processing_job_events(id,job_id,report_id,event_type,status,attempt,detail_json)
+        VALUES(?,?,?,'queued','queued',0,?)`)
+        .run(createId("event"), jobId, reportId, JSON.stringify({
+          jobType: "thumbnail", pageId, source: "page_orientation", batchId, previousReportStatus: report.status,
+        }));
+      db.prepare(`INSERT INTO audit_logs(id,actor_user_id,action,target_type,target_id,detail_json)
+        VALUES(?,?,'report.page.rotate','report_page',?,?)`)
+        .run(createId("audit"), user.id, pageId, JSON.stringify({ reportId, previousRotation: page.rotation, rotation }));
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getReportDetail(user, reportId);
+}
+
 export function updateReportPages(
   user: RequestUser,
   reportId: string,
@@ -4217,6 +4276,10 @@ export function deleteReportPage(
       [
         { storagePath: page.storagePath, fileKind: "original" },
         { storagePath: page.thumbnailPath, fileKind: "thumbnail" },
+        ...[undefined, 0, 90, 180, 270]
+          .map(rotation => pdfPreviewRelativePath(reportId, pageId, rotation))
+          .filter(relativePath => existsSync(storagePath(relativePath)))
+          .map(relativePath => ({ storagePath: relativePath, fileKind: "other" as const })),
       ],
       "report_page_delete",
       db,
@@ -6890,13 +6953,14 @@ export async function regeneratePdfPagePreviews(user: RequestUser) {
   const failures: Array<{ pageId: string; reportId: string; message: string }> =
     [];
   for (const row of rows) {
-    const previewPath = storagePath(
-      pdfPreviewRelativePath(row.reportId, row.pageId),
-    );
-    if (existsSync(previewPath)) {
-      rmSync(previewPath, { force: true });
-      removedLegacy += 1;
+    for (const rotation of [undefined, 0, 90, 180, 270]) {
+      const stalePath = storagePath(pdfPreviewRelativePath(row.reportId, row.pageId, rotation));
+      if (existsSync(stalePath)) {
+        rmSync(stalePath, { force: true });
+        if (rotation === undefined) removedLegacy += 1;
+      }
     }
+    const previewPath = storagePath(pdfPreviewRelativePath(row.reportId, row.pageId, row.rotation));
 
     try {
       await requestWorker({
@@ -7821,18 +7885,28 @@ export function preflightRestore(user:RequestUser,archivePath:string) {
   const sourceDb=new DatabaseSync(join(root,'db','health-records.sqlite'),{readOnly:true});
   let verified=false;
   let absent=false;
+  let rotatedLocalCredential=false;
+  let conflictingLocalUsername=false;
   const identity=getDatabase().prepare('SELECT id,subject FROM user_identities WHERE user_id=? AND provider=?').get(user.id,user.provider) as {id:string,subject:string}|undefined;
   try {
    absent=!sourceDb.prepare('SELECT 1 FROM users WHERE id=?').get(user.id);
    if(user.provider==='local') {
     const credential=captureRestoringAdministratorCredential(user)!;
     verified=Boolean(sourceDb.prepare('SELECT 1 FROM local_accounts WHERE id=? AND user_id=?').get(credential.accountId,user.id));
+    const source=findSourceLocalAccount(sourceDb,credential.username);
+    const matchingCredential=matchesLocalCredential(source,credential);
+    rotatedLocalCredential=Boolean(source?.userId===user.id && matchingCredential);
+    conflictingLocalUsername=Boolean(absent && source && !matchingCredential);
    } else if(identity) verified=Boolean(sourceDb.prepare('SELECT 1 FROM user_identities WHERE id=? AND user_id=? AND subject=?').get(identity.id,user.id,identity.subject));
   } finally {sourceDb.close();}
   const same=manifest.identity?.id===target.id && manifest.identity.authMode===target.authMode && manifest.identity.identityDomain===target.identityDomain;
-  // Legacy local archives need matching random internal account identity, never username alone.
-  const legacyVerified=!manifest.identity && user.provider==='local' && verified;
-  const strategy=(same && (verified || absent))||legacyVerified?'same':'cross';
+  // Legacy archives require the account ID or the same user ID and credential, never username alone.
+  const localVerified=verified || rotatedLocalCredential;
+  const legacyVerified=!manifest.identity && user.provider==='local' && localVerified;
+  const sameVerified=user.provider==='local'
+   ? (localVerified || (absent && !conflictingLocalUsername))
+   : (verified || absent);
+  const strategy=(same && sameVerified)||legacyVerified?'same':'cross';
   for(const [key,plan] of restorePlans) if(plan.expires<Date.now()) restorePlans.delete(key);
   const plan:RestorePlan={token:createId('restore'),digest:sha256File(archivePath),actorId:user.id,deployment:target.identityDomain,strategy,expires:Date.now()+15*60000,
    identitySubject:identity?.subject,accountFingerprint:restoreAccountFingerprint(),

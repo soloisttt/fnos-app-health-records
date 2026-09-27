@@ -274,6 +274,7 @@ export type ReportPage = {
   width: number | null;
   height: number | null;
   rotation: number;
+  ocrStale: boolean;
   sourcePageNumber: number | null;
   sourcePageCount: number | null;
   hasThumbnail: boolean;

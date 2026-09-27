@@ -300,6 +300,7 @@ export type ReportPage = {
   width: number | null;
   height: number | null;
   rotation: number;
+  ocrStale: boolean;
   sourcePageNumber: number | null;
   sourcePageCount: number | null;
   hasThumbnail: boolean | number;
@@ -313,7 +314,7 @@ export type ProcessingJob = {
   jobType: "pdf_extract" | "thumbnail" | "ocr" | "ai_extract";
   pipelineVersion: string;
   batchId: string;
-  batchKind: "initial_upload" | "manual_reprocess" | "manual_ai" | "page_append";
+  batchKind: "initial_upload" | "manual_reprocess" | "manual_ai" | "page_append" | "page_orientation";
   batchStartedAt: string;
   batchSequence: number;
   status: "queued" | "processing" | "completed" | "failed" | "cancelled";
@@ -507,6 +508,7 @@ export type OcrPageDetail = {
   modelVersion: string | null;
   coordWidth: number | null;
   coordHeight: number | null;
+  orientationChanged: boolean;
   lines: OcrLineDetail[];
 };
 

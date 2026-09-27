@@ -109,7 +109,7 @@ test("staged pages are invisible; PDF subset keeps source identity; restart, dup
     assert.equal(completed.state, "ocr_only");
     const rows = getDatabase()
       .prepare(
-        "SELECT id,page_number,source_page_number,rotation FROM report_pages ORDER BY page_number",
+        "SELECT id,page_number,source_page_number,rotation,ocr_rotation FROM report_pages ORDER BY page_number",
       )
       .all();
     assert.deepEqual(
@@ -119,6 +119,7 @@ test("staged pages are invisible; PDF subset keeps source identity; restart, dup
         [1, 0],
       ],
     );
+    assert.deepEqual(rows.map((p) => p.ocr_rotation), [90, 0]);
     assert.equal(calls.filter((c) => c.action === "ocr").length, 2);
     assert.equal(
       (
