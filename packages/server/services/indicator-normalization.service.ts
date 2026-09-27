@@ -314,7 +314,9 @@ const indicatorCodePattern = /^[A-Za-z][A-Za-z0-9.+-]{0,15}[#%]?$/;
 export function indicatorNameCandidates(value: string | null | undefined) {
   // Only remove edge footnote markers from lookup candidates; keep persisted source
   // names, internal operators and measurement qualifiers intact.
-  const raw = cleanIndicatorName(value || "").name;
+  const raw = cleanIndicatorName(value || "").name
+    // 表格序号后紧跟的星号是脚注/异常标记；只在后面明确是中文项目名时移除。
+    .replace(/^\s*(?:no\.?\s*)?\d{1,3}\s*(?:[.、)）:：]\s*)?[*﹡★☆]\s*(?=[\p{Script=Han}])/iu, "");
   if (!raw) return [];
   const candidates = new Set<string>();
   const add = (candidate: string | null | undefined) => {
@@ -492,6 +494,7 @@ const unitAliases: Record<string, string> = {
     "u/ml": "U/mL",
     "iu/l": "U/L",
     "miu/l": "mIU/L",
+    "μu/ml": "μU/mL",
     "uiu/ml": "μIU/mL",
     "μiu/ml": "μIU/mL",
     "pmol/l": "pmol/L",
