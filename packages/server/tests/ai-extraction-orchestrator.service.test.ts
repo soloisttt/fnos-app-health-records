@@ -162,6 +162,49 @@ test('paired project groups accept their own AI results and reject cross-group s
   });
 });
 
+test('coordinate panel fallback persists complete source facts and rejects borrowed or conflicting AI values', async () => {
+  await withReport(1, async ({ reportId, jobId }) => {
+    const raw = [
+      ['项目名称', '结果', '参考值', '单位', '项目名称', '单位', '结果', '参考值'],
+      ['合成项目甲', '12', '0-99', 'U/L', '合成项目乙', 'mg/L', '24', '0-88'],
+      ['缺值项目', '', '0-77', 'U/L', '无单位项目', '', '0', ''],
+      ['冲突项目', '13', '0-66', 'U/L', '带箭头项目', '', '↑36', ''],
+    ].flatMap((cells, row) => cells.flatMap((text, col) => text ? [{
+      id: `panel-${row}-${col}`, text, confidence: .99, tableUnsafe: true,
+      box: [col * 180, row * 40, col * 180 + 100, row * 40 + 22],
+    }] : []));
+    raw.push({ ...raw.find(line => line.id === 'panel-3-1')!, id: 'conflicting-result', text: '14' });
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=?').run(JSON.stringify(raw));
+    const executor: AiExecutor = async () => ({
+      ...emptyExtractionResult(),
+      ...normalizeAiExtraction({ observations: [
+        { itemName:'合成项目甲',resultText:'12',numericValue:12,unit:'mg/L',referenceLow:10,referenceHigh:88,evidence:[{pageNumber:1,quote:'合成项目甲 12'}] },
+        { itemName:'无单位项目',resultText:'0',numericValue:0,unit:'U/L',referenceHigh:50,evidence:[{pageNumber:1,quote:'无单位项目 0'}] },
+        { itemName:'合成项目甲',resultText:'24',numericValue:24,evidence:[{pageNumber:1,quote:'合成项目甲 24'}] },
+        { itemName:'缺值项目',resultText:'77',numericValue:77,evidence:[{pageNumber:1,quote:'缺值项目 0-77'}] },
+        { itemName:'冲突项目',resultText:'13',numericValue:13,evidence:[{pageNumber:1,quote:'冲突项目 13 14'}] },
+      ] }),
+    });
+    const execution = await executeAiExtractionPlan(jobId, reportId, executor);
+    const observations = execution.result.fields.observations;
+    assert.deepEqual(observations.map(item => [item.itemName,item.numericValue]).sort(), [
+      ['合成项目甲',12],['合成项目乙',24],['无单位项目',0],['带箭头项目',36],
+    ].sort());
+    assert.ok((execution.result.evidenceValidation?.rejectedObservations || 0) >= 3);
+    assert.equal(observations.find(item => item.itemName === '无单位项目')?.unit, null);
+    assert.equal(observations.find(item => item.itemName === '无单位项目')?.referenceHigh, null);
+    assert.equal(observations.find(item => item.itemName === '合成项目甲')?.unit, 'U/L');
+    assert.equal(observations.find(item => item.itemName === '合成项目甲')?.referenceHigh, 99);
+    persistAiExtraction(reportId, jobId, execution.result, execution.inputCharacters);
+    const stored = getDatabase().prepare('SELECT item_name AS name,numeric_value AS value,evidence_json AS evidence FROM observations WHERE report_id=?').all(reportId) as Array<{name:string;value:number;evidence:string}>;
+    assert.equal(stored.length,4);
+    assert.equal(stored.find(item=>item.name==='合成项目甲')?.value,12);
+    assert.ok(stored.every(item=>JSON.parse(item.evidence).every((e:{pageNumber:number})=>e.pageNumber===1)));
+    const unresolved = getDatabase().prepare("SELECT count(*) AS n FROM ai_extraction_candidates WHERE job_id=? AND status='unresolved'").get(jobId) as {n:number};
+    assert.ok(unresolved.n>=2);
+  });
+});
+
 test('overview mode backfills candidates when the main pass returns nothing', async () => {
   await withReport(1, async ({ reportId, jobId }) => {
     getDatabase().prepare("UPDATE app_settings SET value_json = '{\"extractionDepth\":\"overview\"}' WHERE setting_key = 'ai.provider'").run();

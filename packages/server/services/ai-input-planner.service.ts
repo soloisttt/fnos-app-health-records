@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { recoverHeaderAlignedTable, validOcrTableCell, type OcrTableCell } from "./ocr-table-structure";
+import { duplicatedOcrCodeName, duplicatedOcrResultName, recoverHeaderAlignedTable, validOcrTableCell, type OcrTableCell } from "./ocr-table-structure";
 import { isExplicitOcrTableHeader, isCurrentResultColumn, splitOcrTableCells, mappedOcrMeasurement, ocrProjectColumnGroups } from "./ocr-table-columns";
 import {
   measurementUnitPattern,
@@ -32,7 +32,7 @@ import {
 } from "./report-content-classifier.service";
 
 export const aiInputPlanningPolicy = {
-  version: "ocr-unit-plan-v20",
+  version: "ocr-unit-plan-v21",
   targetCharacters: 8_000,
   maxPagesPerUnit: 12,
   maxSparsePagesPerUnit: 24,
@@ -281,7 +281,7 @@ function isTemporalResultHeader(value: string) {
 const morphologyPattern =
   /(脂肪肝|囊肿|囊性(?:回声|灶)|结节|斑块|息肉|结石|钙化|占位|肿块|包块|积液|增生|萎缩|狭窄|扩张|病灶|(?:低|高|强|混合)回声|回声(?:不均|欠均|增强|减低|异常|团|区|灶)|(?:高|低|混合)?密度(?:影|灶|区|结节)|(?:边界|边缘)(?:不清|欠清|模糊|毛糙)|血流信号(?:丰富|增多|减少|异常|紊乱)|(?:BI-RADS|C-TIRADS|LI-RADS|Bosniak)\s*\d|分级\s*[:：]?\s*\d)/i;
 const metadataCandidatePattern =
-  /(?:报告号|门诊号|住院号|体检号|检查号|标本号|条码号|二维码|申请日期|报告日期|检查日期|采样日期|接收日期|审核日期|打印日期|打印时间|姓名|性别|年龄|出生日期|身份证|手机号|电话|地址|科室|病区|床号|医生)\s*[:：]/;
+  /(?:报告号|门诊号|住院号|体检号|检查号|标本号|条码号|二维码|申请日期|报告日期|检查日期|采样日期|送检日期|接收日期|审核日期|打印日期|打印时间|姓名|性别|年龄|出生日期|身份证|手机号|电话|地址|科室|病区|床号|医生)\s*[:：]/;
 const redactionPlaceholderPattern =
   /\[(?:患者个资已过滤|已过滤身份证号|已过滤手机号|已过滤邮箱)\]/g;
 const pageMarkerPattern =
@@ -2383,7 +2383,7 @@ function isMetadataRow(text: string) {
 }
 
 const resultCellPattern =
-  /^(?:<|<=|≤|>|>=|≥)?\s*(?:[-+±]+|[-+]?\d+(?:\.\d+)?|阴性|阳性|弱阳性|正常|异常|未见(?:异常)?|可见|无特殊)(?:\s|$|[↑↓▲▼⬆⬇])/;
+  /^[↑↓▲▼⬆⬇↗↘]?\s*(?:<=|>=|<|≤|>|≥)?\s*(?:[-+±]+|[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|阴性|阳性|弱阳性|正常|异常|未见(?:异常)?|可见|无特殊)(?:\s|$|[↑↓▲▼⬆⬇])/;
 const reportHeadingPattern =
   /(?:(?:检验|检查|体检|超声|心电图|病理|门诊|住院|出院|动脉阻塞|动脉功能).{0,18}|人体成(?:分|份)(?:分析)?)(?:报告|报告单)$/;
 
@@ -3023,11 +3023,13 @@ function parseLocalObservation(
     (line.confidence !== null && line.confidence < 0.65)
   )
     return null;
+  const explicitMeasurement = Boolean(line.projectHeaderCells && !line.tableStructureUnsafe
+    && mappedOcrMeasurement(line.text, tableHeader?.join(' | ')));
   let dictionary =
     line.dictionaryFacts.length > 1
       ? preferSectionDictionaryFact(line.dictionaryFacts, disambiguationSection)
       : line.dictionaryFacts[0] || null;
-  if (line.dictionaryFacts.length > 1 && !dictionary) return null;
+  if (line.dictionaryFacts.length > 1 && !dictionary && !explicitMeasurement) return null;
   const inlineResult = line.text.match(
     /^(.{2,60}?)(?:检验|检查)?结果\s*[:：]\s*(阴性|阳性|弱阳性|正常|异常|未见异常|未见|可见)\s*[。.]?$/i,
   );
@@ -3106,7 +3108,7 @@ function parseLocalObservation(
       exactFacts.length > 1
         ? preferSectionDictionaryFact(exactFacts, disambiguationSection)
         : exactFacts[0] || null;
-    if (exactFacts.length > 1 && !dictionary) return null;
+    if (exactFacts.length > 1 && !dictionary && !explicitMeasurement) return null;
   }
   /*
    * “名称: 值”内联格式（心电图“PR间期: 154 ms”、人体成分“肌肉量：55.5kg”）：
@@ -3216,12 +3218,12 @@ function parseLocalObservation(
       : null;
   const unit =
     unitIndex >= 0 && cells[unitIndex]
-      ? cells[unitIndex].trim() || null
+      ? explicitMeasurement ? credibleRepeatedTableUnit(cells[unitIndex], unitPattern) : cells[unitIndex].trim() || null
       : knownUnitFromResult(resultText, unitPattern) ||
         conservativeUnknownUnit(resultText) ||
         inheritedUnit;
   const numericMatch = resultText.match(
-    /^(?:<|<=|≤|>|>=|≥)?\s*([-+]?\d+(?:\.\d+)?)/,
+    /^[↑↓▲▼⬆⬇↗↘]?\s*(?:<=|>=|<|≤|>|≥)?\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)/,
   );
   const numericValue = numericMatch ? Number(numericMatch[1]) : null;
   if (!dictionary) {
@@ -3246,7 +3248,11 @@ function parseLocalObservation(
       numericValue !== null &&
       Boolean(unit) &&
       (reference.low !== null || reference.high !== null);
-    if (!section || (!categorical && !structural && !safeBodyCompositionTotal))
+    // A verified project/result grid establishes the source fact even when
+    // its dictionary entry or unit is absent. Keep the source name; dictionary
+    // normalization/trend admission still makes its own, separate decision.
+    const verifiedTableFact = explicitMeasurement && (numericValue !== null || categorical);
+    if (!verifiedTableFact && (!section || (!categorical && !structural && !safeBodyCompositionTotal)))
       return null;
   }
   if (dictionary && dictionary.canonicalKey.startsWith("qus_bone_") && !qusContext)
@@ -4887,7 +4893,7 @@ function annotatePageLines(
       (line.role === "noise" &&
         line.contentRole === "chart_axis" &&
         !line.candidate);
-    const tableMeasurement = !line.tableStructureUnsafe && !line.boundary
+    const tableMeasurement = line.projectHeaderCells && !line.tableStructureUnsafe && !line.boundary
       && effectiveLine.sourceCells.length === tableHeader?.length
       ? mappedOcrMeasurement(effectiveLine.text, tableHeader?.join(" | ")) : null;
     const structuredCandidate = Boolean(tableMeasurement
@@ -5678,21 +5684,6 @@ function parseLines(
       return { index, text: members.map(item => item.text).join(" "),
         sourceLineIds: members.flatMap(item => item.sourceLineIds), box: members[0]?.box ?? null };
     });
-    // OCR can join a unit and an explicit reference limit into one text box.
-    // Split only at the printed comparator, keeping the same original evidence ID.
-    if (key.startsWith('table_99:') && key !== 'table_99:0') {
-      const header = tableGroups.get('table_99:0') || [];
-      const unitIndex = header.find(item => item.line.text === '单位')?.cell.column;
-      const referenceIndex = header.find(item => /^(参考范围|参考值|参考区间)$/.test(item.line.text))?.cell.column;
-      if (unitIndex !== undefined && referenceIndex !== undefined && !sourceCells[referenceIndex].text) {
-        const unit = sourceCells[unitIndex];
-        const split = unit.text.match(/^([A-Za-zµμ][A-Za-zµμ0-9/ .^²³·%\-]*?)([<>≤≥]\s*\d+(?:\.\d+)?)$/);
-        if (split && split[1].includes('/')) {
-          sourceCells[referenceIndex] = { ...unit, index: referenceIndex, text: split[2] };
-          sourceCells[unitIndex] = { ...unit, text: split[1].trim() };
-        }
-      }
-    }
     const headerGroup = [...tableGroups.values()].filter(items =>
       items[0].cell.table === group[0].cell.table && items[0].cell.row <= group[0].cell.row
       && items[0].cell.columns === count
@@ -5704,6 +5695,47 @@ function parseLines(
       const members = headerGroup.filter(item => item.cell.column === index).map(item => item.line);
       return { index, text: members.map(item => item.text).join(' '), sourceLineIds: members.flatMap(item => item.sourceLineIds), box: members[0]?.box ?? null };
     });
+    if (headerCells && headerGroup !== group) {
+      // Split a printed unit/reference comparator without inventing source text.
+      const unitIndex = headerCells.findIndex(cell => cell.text === '单位');
+      const referenceIndex = headerCells.findIndex(cell => /^(参考范围|参考值|参考区间)$/.test(cell.text));
+      if (unitIndex >= 0 && referenceIndex >= 0 && !sourceCells[referenceIndex].text) {
+        const unit = sourceCells[unitIndex];
+        const split = unit.text.match(/^([A-Za-zµμ][A-Za-zµμ0-9/ .^²³·%\-]*?)([<>≤≥]\s*\d+(?:\.\d+)?)$/);
+        if (split && split[1].includes('/')) {
+          sourceCells[referenceIndex] = { ...unit, index: referenceIndex, text: split[2] };
+          sourceCells[unitIndex] = { ...unit, text: split[1].trim() };
+        }
+      }
+      if (unitIndex >= 0 && referenceIndex >= 0 && !sourceCells[unitIndex].text) {
+        const reference = sourceCells[referenceIndex];
+        const suffix = reference.text.match(new RegExp(`(${unitPattern.source})\\s*$`, 'i'));
+        const range = suffix ? reference.text.slice(0, suffix.index).trim() : '';
+        if (suffix && /^(?:[-+]?\d+(?:\.\d+)?\s*(?:-|~|～|—|至)\s*[-+]?\d+(?:\.\d+)?|(?:<=|>=|[<>≤≥])\s*[-+]?\d+(?:\.\d+)?)$/.test(range)) {
+          sourceCells[unitIndex] = { ...reference, index: unitIndex, text: suffix[1] };
+          sourceCells[referenceIndex] = { ...reference, text: range };
+        }
+      }
+      // OCR occasionally emits both "项目名12.3" and an overlapping "12.3".
+      // Remove only the duplicate suffix proved by that independent result box.
+      const nameIndex = headerCells.findIndex(cell => /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目)$/.test(cell.text));
+      const resultIndexes = headerCells.flatMap((cell, index) => isCurrentResultColumn(cell.text) ? [index] : []);
+      if (nameIndex >= 0 && resultIndexes.length === 1) {
+        const name = sourceCells[nameIndex], result = sourceCells[resultIndexes[0]];
+        const nameBox = boxRect(name.box), resultBox = boxRect(result.box);
+        const deduplicatedName = duplicatedOcrResultName(name.text, result.text);
+        if (deduplicatedName
+          && nameBox && resultBox && nameBox.left < resultBox.left && nameBox.right >= resultBox.left
+          && verticalOverlap(nameBox, resultBox) >= .55) {
+          sourceCells[nameIndex] = { ...name, text: deduplicatedName };
+        }
+        const codeName = duplicatedOcrCodeName(sourceCells[nameIndex].text);
+        if (nameIndex > 0 && /^(缩写|英文缩写|代码)$/.test(headerCells[nameIndex - 1].text)
+          && codeName && /^\d*\s*$/.test(sourceCells[nameIndex - 1].text)) {
+          sourceCells[nameIndex] = { ...sourceCells[nameIndex], text: codeName };
+        }
+      }
+    }
     const projectGroups = headerCells ? ocrProjectColumnGroups(headerCells.map(cell => cell.text).join(' | ')) : [];
     if (projectGroups.length && headerGroup !== group) {
       for (const { start, end } of projectGroups) {
@@ -5722,7 +5754,8 @@ function parseLines(
     }
     const text = sourceCells.map(cell => cell.text).join(" | ");
     tableRows.push({ ...row, id: `rapid_table_layout_${pageNumber}_${key}`, text, sourceCells,
-      sourceLineIds: sources.flatMap(line => line.sourceLineIds), boundary: boundaryFor(text) });
+      sourceLineIds: sources.flatMap(line => line.sourceLineIds), boundary: boundaryFor(text),
+      ...(headerCells && headerGroup !== group ? { projectHeaderCells: headerCells } : {}) });
     sources.forEach(line => consumed.add(line.id));
   }
   const structuredLines = [...lines.filter(line => !consumed.has(line.id)), ...tableRows]

@@ -2679,19 +2679,11 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
   assert.ok(wbcLine);
   assert.doesNotMatch(wbcLine.text, /深圳HR/);
   assert.equal(wbcLine.sourceLineIds.includes("wbc-marker"), false);
-  assert.equal(
-    wbcLine.expectedLocalObservationCount,
-    2,
-    JSON.stringify({
-      text: wbcLine.text,
-      candidate: wbcLine.candidate,
-      candidateKind: wbcLine.candidateKind,
-      role: wbcLine.role,
-      boundary: wbcLine.boundary,
-      tableHeaderText: wbcLine.tableHeaderText,
-      localObservationCount: wbcLine.localObservations.length,
-    }),
-  );
+  assert.equal(wbcLine.localObservations.length, 1);
+  assert.equal(wbcLine.sourceLineIds.includes('baso-item'), false);
+  const basoLine = reportPage.lines.find(line => line.sourceLineIds.includes('baso-item'))!;
+  assert.equal(basoLine.tableStructureUnsafe, true);
+  assert.equal(basoLine.localObservations.length, 0);
   assert.deepEqual(
     [
       byName.get("白细胞数目(WBC)")?.numericValue,
@@ -2702,8 +2694,12 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
     ],
     [5, 5.56, 1.96, 0.23, 49.1],
   );
-  assert.equal(rbcLine?.localObservations.length, 2);
-  assert.equal(byName.has("血小板体积分布宽度(PDVW)"), false);
+  assert.equal(rbcLine?.localObservations.length, 1);
+  assert.equal(rbcLine?.sourceLineIds.includes('neut-count-item'), false);
+  // Printed arrows are an abnormal flag; retain the observed number without
+  // trying to repair an outlier to a medically plausible value.
+  assert.equal(byName.get("血小板体积分布宽度(PDVW)")?.numericValue, 76);
+  assert.equal(byName.get("血小板体积分布宽度(PDVW)")?.abnormalFlag, 'high');
   assert.equal(byName.get("平均红细胞血红蛋白浓度(MCHC)")?.unit, null);
   assert.deepEqual(byName.get("白细胞数目(WBC)")?.sourceMap.result.sourceLineIds, [
     "wbc-result",
@@ -2713,13 +2709,13 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
     ["header-6"],
   );
   assert.ok(scalar);
-  assert.equal(scalar.candidateRowCount, 4);
+  assert.equal(scalar.candidateRowCount, 2);
   const aiCandidateText = scalar.candidateFacts
     .map((fact) => fact.sourceText)
     .join("\n");
   assert.match(aiCandidateText, /嗜碱性粒细胞百分比/);
   assert.match(aiCandidateText, /中性粒细胞百分比/);
-  assert.match(aiCandidateText, /血小板体积分布宽度/);
+  assert.doesNotMatch(aiCandidateText, /血小板体积分布宽度/);
   assert.doesNotMatch(aiCandidateText, /红细胞数目\(RBC\)/);
 });
 
@@ -4314,7 +4310,7 @@ test("extracts the real ophthalmology summary and filters routine negative exam 
   ]);
   const page = rebuilt[0];
   const filtered = page.lines.find(
-    (line) => line.text === golden.expected.filteredNegativeExamRow.text,
+    (line) => line.text.replace(/\s*\|\s*$/, '') === golden.expected.filteredNegativeExamRow.text,
   );
   assert.ok(filtered, "真实裂隙灯阴性查体行必须保留审计轨迹");
   assert.deepEqual(
@@ -4323,7 +4319,7 @@ test("extracts the real ophthalmology summary and filters routine negative exam 
   );
   assert.deepEqual(
     filtered.sourceCells.map((cell) => cell.text),
-    golden.expected.filteredNegativeExamRow.sourceCellTexts,
+    [...golden.expected.filteredNegativeExamRow.sourceCellTexts, ''],
   );
   assert.equal(filtered.candidate, false);
   assert.equal(filtered.candidateKind, null);

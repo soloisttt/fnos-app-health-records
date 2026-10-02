@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mappedOcrMeasurement, mappedOcrUnit, mappedOcrResultCells, splitOcrTableCells } from "./ocr-table-columns";
+import { isCurrentResultColumn, mappedOcrMeasurement, mappedOcrUnit, mappedOcrResultCells, splitOcrTableCells } from "./ocr-table-columns";
 import { unitFromResultCell } from "./measurement-units.service";
 import { cleanOcrResult } from "../utils/ocr-result";
 import { rollbackAfterError, getDatabase } from "../database/client";
@@ -839,6 +839,19 @@ function coordinateEvidenceForObservation(
   item: AiObservation,
 ) {
   if (line.sourceCells.length < 2) return null;
+  if (line.projectHeaderCells && line.tableStructureUnsafe) {
+    // A missing/conflicting result cannot borrow the next numeric reference.
+    // Retain the existing typed unit/result transposition recovery: the printed
+    // result slot must contain ONLY a unit, and the unit slot one numeric value.
+    const resultIndex = line.projectHeaderCells.findIndex(cell => isCurrentResultColumn(cell.text));
+    const unitIndex = line.projectHeaderCells.findIndex(cell => cell.text === '单位');
+    const resultCell = line.sourceCells[resultIndex]?.text || '';
+    const unitCell = line.sourceCells[unitIndex]?.text || '';
+    const printedUnit = unitFromResultCell(resultCell);
+    if (!printedUnit || normalizedUnit(printedUnit) !== normalizedUnit(resultCell)
+      || !/^[↑↓]?\s*(?:<=|>=|[<>≤≥])?\s*[-+]?\d+(?:\.\d+)?\s*$/.test(unitCell)
+      || !observationResultInRegionMatches(unitCell, item)) return null;
+  }
   const names = [item.itemName, item.normalizedName || ""].filter(Boolean);
   const nameTerms = [
     ...names,
@@ -994,7 +1007,7 @@ function exactEvidenceForObservation(
             coordinateEvidence !== null &&
             (line.tableStructureUnsafe || hasSingleResultColumnHeader(line.tableHeaderText)) &&
             !hasMultipleTimepointHeaders(line.tableHeaderText);
-          const textResultMatched = observationResultMatches(
+          const textResultMatched = !(line.projectHeaderCells && line.tableStructureUnsafe) && observationResultMatches(
             line.text,
             item,
             name.names,
@@ -1156,6 +1169,21 @@ function validatedObservation(
   const inferredContext =
     page && line ? nearestContext(plan, page, line.index) : null;
   const sectionName = inferredContext?.section || item.sectionName;
+  const local = line?.projectHeaderCells && !line.tableStructureUnsafe
+    ? localObservationsForLine(line) : [];
+  if (local.length === 1) {
+    // Once the name/result pair is verified, all printed fields in that same
+    // grid own their values. AI must not replace a unit/reference with a value
+    // from the neighbouring panel or supply an unprinted unit.
+    const fact = local[0];
+    return {
+      ...item, sectionName: fact.sectionName || sectionName,
+      itemName: fact.itemName, normalizedName: null,
+      resultText: fact.resultText, numericValue: fact.numericValue, unit: fact.unit,
+      referenceLow: fact.referenceLow, referenceHigh: fact.referenceHigh,
+      referenceText: fact.referenceText, abnormalFlag: fact.abnormalFlag, evidence,
+    };
+  }
   const measurement = line && !line.tableStructureUnsafe ? mappedOcrMeasurement(line.text, line.tableHeaderText) : null;
   if (measurement) {
     const resultText = cleanOcrResult(measurement.result);
