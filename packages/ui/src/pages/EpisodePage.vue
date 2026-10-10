@@ -141,12 +141,21 @@ const symptomStatusLabel: Record<CaseSymptom["status"], string> = {
   unknown: "未记录",
 };
 
+/** 状态取值可能来自旧数据或后续版本，查不到时回退，避免整页渲染失败。 */
+function episodeStatusOf(status: CaseEpisode["status"]) {
+  return episodeStatusMeta[status] ?? episodeStatusMeta.unknown;
+}
+
+function symptomStatusOf(status: CaseSymptom["status"]) {
+  return symptomStatusLabel[status] ?? symptomStatusLabel.unknown;
+}
+
 function formatDay(value: string | null) {
   return value ? value.slice(0, 10) : "";
 }
 
 function episodeMeta(item: CaseEpisode) {
-  const parts = [episodeStatusMeta[item.status].label];
+  const parts = [episodeStatusOf(item.status).label];
   const onset = formatDay(item.onsetAt);
   if (onset) parts.push(`${onset} 起`);
   if (item.symptomCount) parts.push(`${item.symptomCount} 个症状`);
@@ -154,7 +163,7 @@ function episodeMeta(item: CaseEpisode) {
 }
 
 function symptomMeta(item: CaseSymptom) {
-  const parts = [symptomStatusLabel[item.status]];
+  const parts = [symptomStatusOf(item.status)];
   if (item.onsetAt) parts.push(formatDay(item.onsetAt));
   if (item.durationText) parts.push(`持续${item.durationText}`);
   if (item.severity) parts.push(item.severity);
@@ -427,18 +436,18 @@ watch(
               <span>{{ episodeMeta(item) }}</span>
               <small v-if="item.causeText">病因：{{ item.causeText }}</small>
             </span>
-            <span class="chip status-label" :class="episodeStatusMeta[item.status].chip">
-              {{ episodeStatusMeta[item.status].label }}
+            <span class="chip status-label" :class="episodeStatusOf(item.status).chip">
+              {{ episodeStatusOf(item.status).label }}
             </span>
           </button>
         </article>
       </div>
     </template>
-  </section>
 
-  <ReportDetailModal
-    :open="Boolean(previewReportId)"
-    :report-id="previewReportId"
-    @close="previewReportId = null"
-  />
+    <ReportDetailModal
+      :open="Boolean(previewReportId)"
+      :report-id="previewReportId"
+      @close="previewReportId = null"
+    />
+  </section>
 </template>
