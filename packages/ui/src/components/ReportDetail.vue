@@ -2,7 +2,7 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import {
   ArrowDown, ArrowUp, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock3, Download,
-  CircleStop, FileImage, FileText, LoaderCircle, Maximize2, Pencil, Plus, RefreshCw, RotateCw, ScrollText, Search,
+  CircleStop, FileImage, FileText, FolderPlus, LoaderCircle, Maximize2, Pencil, Plus, RefreshCw, RotateCw, ScrollText, Search,
   Sparkles, Trash2, X
 } from "@lucide/vue";
 import ClinicalFactEditor from "./ClinicalFactEditor.vue";
@@ -18,6 +18,7 @@ import FormSelect from "./FormSelect.vue";
 import IndicatorHint from "./IndicatorHint.vue";
 import ImageViewer, { type ImageViewerPage } from "./ImageViewer.vue";
 import MorphologyFindingEditor from "./MorphologyFindingEditor.vue";
+import ReportEpisodeLinker from "./ReportEpisodeLinker.vue";
 import { request, apiUrl } from "../utils/api";
 import { downloadDirectUrl, downloadStreamedFile } from "../utils/download";
 import { describeObservationAbnormal, observationAttentionHint, formatReferenceRange } from "../utils/indicator-display";
@@ -112,6 +113,12 @@ const clinicalFactEditor = ref<{
   fact: (Record<string, unknown> & { id?: string }) | null;
 } | null>(null);
 const structuredSectionEditor = ref<ReportDetail["structuredSections"][number] | null | "create">(null);
+const episodeLinkerOpen = ref(false);
+
+function onEpisodeLinked(episodeTitle: string) {
+  episodeLinkerOpen.value = false;
+  toast.show(`已加入病程「${episodeTitle}」`);
+}
 const allObservationsOpen = ref(false);
 const observationEditorOpen = ref(false);
 const editingObservationId = ref<string | null>(null);
@@ -2076,6 +2083,12 @@ onActivated(() => {
           <article v-if="detail?.chiefComplaint"><span>主诉<em v-if="isManualField('chiefComplaint')" class="manual-field-chip">人工校对</em></span><p>{{ detail.chiefComplaint }}</p></article>
           <article v-if="detail?.findings"><span>检查所见<em v-if="isManualField('findings')" class="manual-field-chip">人工校对</em></span><p>{{ detail.findings }}</p></article>
         </section>
+        <section v-if="canManageReport" class="clinical-fact-add-strip">
+          <span>病程</span>
+          <div>
+            <button type="button" @click="episodeLinkerOpen = true"><FolderPlus :size="15" />加入病程</button>
+          </div>
+        </section>
         <section v-if="clinicalFactAddTypes.length" class="clinical-fact-add-strip">
           <span>补充分类信息</span>
           <div>
@@ -3126,5 +3139,12 @@ onActivated(() => {
         </div>
       </section>
     </div>
+    <ReportEpisodeLinker
+      :open="episodeLinkerOpen"
+      :report-id="detail?.id ?? null"
+      :member-id="detail?.memberId ?? ''"
+      @close="episodeLinkerOpen = false"
+      @linked="onEpisodeLinked"
+    />
   </Teleport>
 </template>

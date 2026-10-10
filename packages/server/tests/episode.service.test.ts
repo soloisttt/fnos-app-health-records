@@ -235,6 +235,50 @@ test("疾病目录下钻返回历史就诊记录（时间 / 医院 / 诊断 / �
   }
 });
 
+test("病程详情返回可展示的已归集内容，事实消失时标记 missing", () => {
+  const { storageDir, owner, db } = setup("linked-facts");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at, hospital_name_raw
+      ) VALUES ('r1', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '2026-10-09', '郑州市中心医院');
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+        VALUES ('d1', 'r1', 'outpatient', '呼吸道感染');
+      INSERT INTO report_medications (
+        id, report_id, medication_context, medication_name, dose, dose_unit, route, frequency
+      ) VALUES ('m1', 'r1', 'prescription', '复方氨酚甲麻口服液', '4.5', 'ml', '口服', 'tid');
+    `);
+    const episode = createEpisode(owner, "member", { title: "呼吸道感染" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "medication", factId: "m1" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "diagnosis", factId: "d1" });
+
+    const detail = getEpisode(owner, episode.episode.id);
+    assert.equal(detail.linkedFacts.length, 3);
+
+    const report = detail.linkedFacts.find((item) => item.factType === "report")!;
+    assert.equal(report.label, "门诊病历");
+    assert.equal(report.hospitalName, "郑州市中心医院");
+    assert.equal(report.missing, false);
+
+    const medication = detail.linkedFacts.find((item) => item.factType === "medication")!;
+    assert.equal(medication.label, "复方氨酚甲麻口服液");
+    assert.equal(medication.detail, "4.5ml 口服 tid");
+    assert.equal(medication.reportTitle, "门诊病历", "用药应带上来源报告，便于回看原件");
+
+    const diagnosis = detail.linkedFacts.find((item) => item.factType === "diagnosis")!;
+    assert.equal(diagnosis.label, "呼吸道感染");
+
+    db.prepare("DELETE FROM report_medications WHERE id = 'm1'").run();
+    const after = getEpisode(owner, episode.episode.id);
+    const gone = after.linkedFacts.find((item) => item.factType === "medication")!;
+    assert.equal(gone.missing, true);
+    assert.equal(gone.label, "内容已不存在");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("跨成员访问被拒绝", () => {
   const { storageDir, owner, db } = setup("episode-access");
   try {

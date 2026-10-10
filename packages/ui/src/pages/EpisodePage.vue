@@ -3,8 +3,9 @@ import { ref, watch } from "vue";
 import { ArrowLeft, CheckCircle2, Plus, Trash2 } from "@lucide/vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
+import ReportDetailModal from "../components/ReportDetailModal.vue";
 import { request } from "../utils/api";
-import type { CaseEpisode, CaseEpisodeDetail, CaseSymptom } from "../types/api";
+import type { CaseEpisode, CaseEpisodeDetail, CaseEpisodeLinkFactType, CaseSymptom, EpisodeLinkedFact } from "../types/api";
 import { useAppContext } from "../composables/useAppContext";
 import { useToast } from "../composables/useToast";
 
@@ -18,6 +19,40 @@ const episodes = ref<CaseEpisode[]>([]);
 const detail = ref<CaseEpisodeDetail | null>(null);
 const formOpen = ref(false);
 const symptomFormOpen = ref(false);
+const previewReportId = ref<string | null>(null);
+
+const factTypeLabels: Record<CaseEpisodeLinkFactType, string> = {
+  report: "报告",
+  diagnosis: "诊断",
+  medication: "用药",
+  procedure: "操作",
+  vaccination: "疫苗",
+  observation: "指标",
+  section: "章节",
+};
+
+function factDetail(fact: EpisodeLinkedFact) {
+  if (fact.missing) return "内容已不存在，可移除这条归集";
+  const parts = [fact.detail, fact.reportTitle, fact.hospitalName, formatDay(fact.occurredAt)];
+  return parts.filter(Boolean).join(" · ");
+}
+
+async function unlinkFact(factType: CaseEpisodeLinkFactType, factId: string) {
+  const episodeId = detail.value?.episode.id;
+  if (!episodeId || saving.value) return;
+  saving.value = true;
+  try {
+    detail.value = await request<CaseEpisodeDetail>(
+      `episodes/${episodeId}/links?factType=${encodeURIComponent(factType)}&factId=${encodeURIComponent(factId)}`,
+      { method: "DELETE" },
+    );
+    toast.show("已从病程移除");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "移除失败";
+  } finally {
+    saving.value = false;
+  }
+}
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
 const symptomForm = ref({ name: "", onsetAt: "", durationText: "", severity: "", bodyPart: "" });
@@ -242,7 +277,43 @@ watch(
       </div>
 
       <div class="page-intro">
-        <div><h3>症状</h3><p>系统只能从报告里读到"主诉"一句，其余请在这里补录</p></div>
+        <div><h3>已归集内容</h3><p>挂到这段病程上的报告、诊断与用药</p></div>
+      </div>
+
+      <EmptyState
+        v-if="!detail.linkedFacts.length"
+        title="还没有归集内容"
+        description="到报告详情页点「加入病程」，就能把这次看病挂上来。"
+      />
+      <div v-else class="data-list">
+        <article v-for="fact in detail.linkedFacts" :key="fact.linkId">
+          <div class="reminder-card-head">
+            <div class="reminder-card-main">
+              <strong>{{ fact.label }}</strong>
+              <span>{{ factDetail(fact) }}</span>
+            </div>
+          </div>
+          <div class="reminder-card-footer">
+            <span class="chip status-label">{{ factTypeLabels[fact.factType] }}</span>
+            <div class="row-actions">
+              <button v-if="fact.reportId" type="button" @click="previewReportId = fact.reportId">
+                查看报告
+              </button>
+              <button
+                class="danger-action"
+                type="button"
+                :disabled="saving"
+                @click="unlinkFact(fact.factType, fact.factId)"
+              >
+                <Trash2 :size="15" />移除
+              </button>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div class="page-intro">
+        <div><h3>症状</h3><p>系统只能从报告里读到「主诉」一句，其余请在这里补录</p></div>
         <button class="soft-action-button" type="button" @click="symptomFormOpen = !symptomFormOpen">
           <Plus :size="16" />添加症状
         </button>
@@ -332,4 +403,10 @@ watch(
       </div>
     </template>
   </section>
+
+  <ReportDetailModal
+    :open="Boolean(previewReportId)"
+    :report-id="previewReportId"
+    @close="previewReportId = null"
+  />
 </template>

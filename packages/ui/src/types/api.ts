@@ -1298,10 +1298,24 @@ export type CaseEpisodeLink = {
   createdAt: string;
 };
 
+export type EpisodeLinkedFact = {
+  linkId: string;
+  factType: CaseEpisodeLinkFactType;
+  factId: string;
+  label: string;
+  detail: string | null;
+  reportId: string | null;
+  reportTitle: string | null;
+  hospitalName: string | null;
+  occurredAt: string | null;
+  missing: boolean;
+};
+
 export type CaseEpisodeDetail = {
   episode: CaseEpisode;
   symptoms: CaseSymptom[];
   links: CaseEpisodeLink[];
+  linkedFacts: EpisodeLinkedFact[];
 };
 
 

@@ -140,6 +140,159 @@ function readLinks(episodeId: string): CaseEpisodeLink[] {
     .all(episodeId) as CaseEpisodeLink[];
 }
 
+export type EpisodeLinkedFact = {
+  linkId: string;
+  factType: CaseEpisodeLinkFactType;
+  factId: string;
+  label: string;
+  detail: string | null;
+  reportId: string | null;
+  reportTitle: string | null;
+  hospitalName: string | null;
+  occurredAt: string | null;
+  /** 事实已不存在（如报告被彻底删除），界面据此提示并允许清理挂链。 */
+  missing: boolean;
+};
+
+type FactHit = { label: string; detail: string | null; reportId: string | null; occurredAt: string | null };
+
+/** 把归集关系解析成可以直接展示的文字（含来源报告信息）。 */
+function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
+  const db = getDatabase();
+  const links = readLinks(episodeId);
+  const hits = new Map<string, FactHit>();
+  const reportIds = new Set<string>();
+
+  const record = (link: CaseEpisodeLink, hit: FactHit | undefined) => {
+    if (!hit) return;
+    hits.set(`${link.factType}:${link.factId}`, hit);
+    if (hit.reportId) reportIds.add(hit.reportId);
+  };
+
+  for (const link of links) {
+    if (link.factType === "report") {
+      const row = db
+        .prepare("SELECT id, title, report_issued_at AS issuedAt FROM reports WHERE id = ?")
+        .get(link.factId) as { id: string; title: string; issuedAt: string | null } | undefined;
+      record(link, row && { label: row.title, detail: "报告", reportId: row.id, occurredAt: row.issuedAt });
+    } else if (link.factType === "diagnosis") {
+      const row = db
+        .prepare(
+          "SELECT report_id AS reportId, diagnosis_text AS label FROM report_diagnoses WHERE id = ? AND is_deleted = 0",
+        )
+        .get(link.factId) as { reportId: string; label: string } | undefined;
+      record(link, row && { label: row.label, detail: "诊断", reportId: row.reportId, occurredAt: null });
+    } else if (link.factType === "medication") {
+      const row = db
+        .prepare(
+          `SELECT report_id AS reportId, medication_name AS label, dose, dose_unit AS doseUnit,
+                  route, frequency, quantity, quantity_unit AS quantityUnit
+           FROM report_medications WHERE id = ? AND is_deleted = 0`,
+        )
+        .get(link.factId) as
+        | {
+            reportId: string;
+            label: string;
+            dose: string | null;
+            doseUnit: string | null;
+            route: string | null;
+            frequency: string | null;
+            quantity: string | null;
+            quantityUnit: string | null;
+          }
+        | undefined;
+      record(
+        link,
+        row && {
+          label: row.label,
+          detail: [row.dose && row.doseUnit ? `${row.dose}${row.doseUnit}` : row.dose, row.route, row.frequency]
+            .filter(Boolean)
+            .join(" ") || "用药",
+          reportId: row.reportId,
+          occurredAt: null,
+        },
+      );
+    } else if (link.factType === "procedure") {
+      const row = db
+        .prepare(
+          "SELECT report_id AS reportId, procedure_name AS label, performed_at AS performedAt FROM report_procedures WHERE id = ? AND is_deleted = 0",
+        )
+        .get(link.factId) as { reportId: string; label: string; performedAt: string | null } | undefined;
+      record(link, row && { label: row.label, detail: "操作", reportId: row.reportId, occurredAt: row.performedAt });
+    } else if (link.factType === "vaccination") {
+      const row = db
+        .prepare(
+          "SELECT report_id AS reportId, vaccine_name AS label, administered_at AS administeredAt FROM vaccination_records WHERE id = ? AND is_deleted = 0",
+        )
+        .get(link.factId) as { reportId: string; label: string; administeredAt: string | null } | undefined;
+      record(link, row && { label: row.label, detail: "疫苗", reportId: row.reportId, occurredAt: row.administeredAt });
+    } else if (link.factType === "observation") {
+      const row = db
+        .prepare(
+          "SELECT report_id AS reportId, item_name AS label, result_text AS resultText, unit FROM observations WHERE id = ?",
+        )
+        .get(link.factId) as
+        | { reportId: string; label: string; resultText: string; unit: string | null }
+        | undefined;
+      record(
+        link,
+        row && {
+          label: row.label,
+          detail: ["指标", `${row.resultText}${row.unit ?? ""}`].filter(Boolean).join(" "),
+          reportId: row.reportId,
+          occurredAt: null,
+        },
+      );
+    } else if (link.factType === "section") {
+      const row = db
+        .prepare(
+          "SELECT report_id AS reportId, title AS label, content FROM report_structured_sections WHERE id = ? AND is_deleted = 0",
+        )
+        .get(link.factId) as { reportId: string; label: string; content: string | null } | undefined;
+      record(
+        link,
+        row && {
+          label: row.label,
+          detail: row.content ? row.content.slice(0, 120) : "报告章节",
+          reportId: row.reportId,
+          occurredAt: null,
+        },
+      );
+    }
+  }
+
+  const reportInfo = new Map<string, { title: string; hospitalName: string | null; issuedAt: string | null }>();
+  if (reportIds.size) {
+    const ids = [...reportIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = db
+      .prepare(
+        `SELECT id, title, hospital_name_raw AS hospitalName,
+                COALESCE(report_issued_at, created_at) AS issuedAt
+         FROM reports WHERE id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<{ id: string; title: string; hospitalName: string | null; issuedAt: string | null }>;
+    for (const row of rows) reportInfo.set(row.id, row);
+  }
+
+  return links.map((link) => {
+    const hit = hits.get(`${link.factType}:${link.factId}`);
+    const info = hit?.reportId ? reportInfo.get(hit.reportId) : undefined;
+    return {
+      linkId: link.id,
+      factType: link.factType,
+      factId: link.factId,
+      label: hit?.label ?? "内容已不存在",
+      detail: hit?.detail ?? null,
+      reportId: hit?.reportId ?? null,
+      reportTitle: info?.title ?? null,
+      hospitalName: info?.hospitalName ?? null,
+      occurredAt: hit?.occurredAt ?? info?.issuedAt ?? null,
+      missing: !hit,
+    };
+  });
+}
+
 // ---------------------------------------------------------------- 病程
 
 export function createEpisode(
@@ -198,6 +351,7 @@ export function getEpisode(user: RequestUser, episodeId: string) {
     episode: readEpisode(episodeId),
     symptoms: readSymptoms(episodeId),
     links: readLinks(episodeId),
+    linkedFacts: resolveLinkedFacts(episodeId),
   };
 }
 
