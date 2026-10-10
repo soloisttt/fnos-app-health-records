@@ -1226,6 +1226,85 @@ export type Reminder = {
   reportIssuedAt: string | null;
 };
 
+export type DiseaseCatalogEntry = {
+  kind: "diagnosis" | "symptom";
+  name: string;
+  count: number;
+  lastAt: string | null;
+};
+
+export type DiseaseVisitMedication = {
+  name: string;
+  dose: string | null;
+  frequency: string | null;
+  route: string | null;
+};
+
+export type DiseaseVisit = {
+  reportId: string;
+  title: string;
+  hospitalName: string | null;
+  departmentName: string | null;
+  issuedAt: string | null;
+  diagnoses: string[];
+  medications: DiseaseVisitMedication[];
+};
+
+export type CaseEpisodeStatus = "active" | "resolved" | "chronic" | "unknown";
+export type CaseSymptomStatus = "present" | "improved" | "resolved" | "unknown";
+export type CaseEpisodeLinkFactType =
+  | "report" | "diagnosis" | "medication" | "procedure" | "vaccination" | "observation" | "section";
+
+export type CaseEpisode = {
+  id: string;
+  memberId: string;
+  title: string;
+  status: CaseEpisodeStatus;
+  onsetAt: string | null;
+  resolvedAt: string | null;
+  causeText: string | null;
+  summary: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  symptomCount?: number;
+  linkCount?: number;
+};
+
+export type CaseSymptom = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  name: string;
+  onsetAt: string | null;
+  durationText: string | null;
+  severity: string | null;
+  bodyPart: string | null;
+  description: string | null;
+  status: CaseSymptomStatus;
+  source: "manual" | "ai";
+  reportId: string | null;
+  evidence: Array<{ pageNumber: number; quote: string }>;
+  manualFields: string[];
+};
+
+export type CaseEpisodeLink = {
+  id: string;
+  episodeId: string;
+  factType: CaseEpisodeLinkFactType;
+  factId: string;
+  note: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type CaseEpisodeDetail = {
+  episode: CaseEpisode;
+  symptoms: CaseSymptom[];
+  links: CaseEpisodeLink[];
+};
+
+
 export type AppNotification = {
   id: string;
   memberId: string;

@@ -2,7 +2,7 @@
 import MemberManager from "../components/MemberManager.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { Bell, Camera, ChartNoAxesCombined, ChevronsUpDown, FolderHeart, LayoutDashboard, Search, UserRound, X } from "@lucide/vue";
+import { Activity, Bell, Camera, ChartNoAxesCombined, ChevronsUpDown, ClipboardList, FolderHeart, LayoutDashboard, Search, UserRound, X } from "@lucide/vue";
 import appIcon from "../assets/app-icon.png";
 import MemberSwitcher from "../components/MemberSwitcher.vue";
 import SetupGuideModal from "../components/SetupGuideModal.vue";
@@ -116,6 +116,8 @@ const roleLabel = computed(() => app.session.value?.isAdmin ? "管理员" : "家
 const navItems = [
   { to: "/overview", label: "概览", icon: LayoutDashboard },
   { to: "/records", label: "档案", icon: FolderHeart },
+  { to: "/diseases", label: "疾病", icon: Activity },
+  { to: "/episodes", label: "病程", icon: ClipboardList },
   { to: "/upload", label: "上传报告", icon: Camera, primary: true },
   { to: "/trends", label: "趋势", icon: ChartNoAxesCombined },
   { to: "/me", label: "我的", icon: UserRound, badge: reminderBadge }

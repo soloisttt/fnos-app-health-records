@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from "vue-router";
 import OverviewPage from "./pages/OverviewPage.vue";
 import RecordsPage from "./pages/RecordsPage.vue";
+import DiseasePage from "./pages/DiseasePage.vue";
+import EpisodePage from "./pages/EpisodePage.vue";
 import TrendsPage from "./pages/TrendsPage.vue";
 import MorphologyTrendsPage from "./pages/MorphologyTrendsPage.vue";
 import UploadPage from "./pages/UploadPage.vue";
@@ -32,6 +34,8 @@ const router = createRouter({
     { path: "/", redirect: "/overview" },
     { path: "/overview", component: OverviewPage, meta: { title: "概览", subtitle: "报告、提醒和趋势摘要" } },
     { path: "/records", component: RecordsPage, meta: { title: "档案" } },
+    { path: "/diseases", component: DiseasePage, meta: { title: "疾病", subtitle: "按病查看历次就诊与用药" } },
+    { path: "/episodes", component: EpisodePage, meta: { title: "病程", subtitle: "把同一次生病的多次就诊串起来" } },
     { path: "/trends", component: TrendsPage, meta: { title: "趋势" } },
     { path: "/trends/morphology", component: MorphologyTrendsPage, meta: { title: "形态变化", subtitle: "追踪历次形态变化" } },
     { path: "/upload", component: UploadPage, meta: { title: "上传报告", subtitle: "拍照或上传 PDF，自动识别归档" } },

@@ -471,3 +471,139 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
     return left.name.localeCompare(right.name, "zh-CN");
   });
 }
+
+// ------------------------------------------------- 疾病目录下钻：历史就诊记录
+
+export type DiseaseVisitMedication = {
+  name: string;
+  dose: string | null;
+  frequency: string | null;
+  route: string | null;
+};
+
+export type DiseaseVisit = {
+  reportId: string;
+  title: string;
+  hospitalName: string | null;
+  departmentName: string | null;
+  issuedAt: string | null;
+  diagnoses: string[];
+  medications: DiseaseVisitMedication[];
+};
+
+/**
+ * 按疾病目录条目下钻，返回历史就诊记录（时间 / 医院 / 诊断 / 用药）。
+ *
+ * kind='diagnosis'：取诊断名（经别名归一后）等于 name 的报告。
+ * kind='symptom'  ：取含该症状的病程，再沿归集关系反解出相关报告。
+ *   —— 这正是「精细归集」的价值：即使只挂了一个药，也能定位到它所在的那次就诊。
+ */
+export function listDiseaseRecords(
+  user: RequestUser,
+  memberId: string,
+  kind: "diagnosis" | "symptom",
+  name: string,
+): DiseaseVisit[] {
+  assertMemberAccess(user, memberId);
+  const db = getDatabase();
+  const reportIds = new Set<string>();
+
+  if (kind === "diagnosis") {
+    const aliasRows = db
+      .prepare(
+        `SELECT a.normalized_alias AS normalizedAlias, c.canonical_name AS canonicalName
+         FROM diagnosis_aliases a JOIN diagnosis_catalog c ON c.id = a.catalog_id
+         WHERE a.enabled = 1`,
+      )
+      .all() as Array<{ normalizedAlias: string; canonicalName: string }>;
+    const aliasMap = new Map(aliasRows.map((row) => [row.normalizedAlias, row.canonicalName]));
+    const rows = db
+      .prepare(
+        `SELECT d.report_id AS reportId, d.diagnosis_text AS diagnosisText
+         FROM report_diagnoses d JOIN reports r ON r.id = d.report_id
+         WHERE r.member_id = ? AND r.status <> 'trashed' AND d.is_deleted = 0`,
+      )
+      .all(memberId) as Array<{ reportId: string; diagnosisText: string }>;
+    for (const row of rows) {
+      const canonical = aliasMap.get(normalizeDiagnosisName(row.diagnosisText)) ?? row.diagnosisText.trim();
+      if (canonical === name) reportIds.add(row.reportId);
+    }
+  } else {
+    const links = db
+      .prepare(
+        `SELECT l.fact_type AS factType, l.fact_id AS factId
+         FROM case_episode_links l
+         JOIN case_symptoms s ON s.episode_id = l.episode_id
+         WHERE s.member_id = ? AND s.is_deleted = 0 AND s.name = ?`,
+      )
+      .all(memberId, name) as Array<{ factType: string; factId: string }>;
+    const factTables: Record<string, string> = {
+      diagnosis: "report_diagnoses",
+      medication: "report_medications",
+      procedure: "report_procedures",
+      vaccination: "vaccination_records",
+    };
+    for (const link of links) {
+      if (link.factType === "report") {
+        reportIds.add(link.factId);
+        continue;
+      }
+      const table = factTables[link.factType];
+      if (!table) continue;
+      const row = db
+        .prepare(`SELECT report_id AS reportId FROM ${table} WHERE id = ?`)
+        .get(link.factId) as { reportId: string } | undefined;
+      if (row?.reportId) reportIds.add(row.reportId);
+    }
+  }
+
+  if (!reportIds.size) return [];
+  const ids = [...reportIds];
+  const placeholders = ids.map(() => "?").join(", ");
+
+  const reportRows = db
+    .prepare(
+      `SELECT id AS reportId, title, hospital_name_raw AS hospitalName,
+              COALESCE(reporting_department, visit_department, ordering_department) AS departmentName,
+              COALESCE(report_issued_at, created_at) AS issuedAt
+       FROM reports WHERE id IN (${placeholders})`,
+    )
+    .all(...ids) as Array<Omit<DiseaseVisit, "diagnoses" | "medications">>;
+
+  const diagnosisRows = db
+    .prepare(
+      `SELECT report_id AS reportId, diagnosis_text AS diagnosisText
+       FROM report_diagnoses WHERE report_id IN (${placeholders}) AND is_deleted = 0`,
+    )
+    .all(...ids) as Array<{ reportId: string; diagnosisText: string }>;
+
+  const medicationRows = db
+    .prepare(
+      `SELECT report_id AS reportId, medication_name AS name, dose, frequency, route
+       FROM report_medications WHERE report_id IN (${placeholders}) AND is_deleted = 0`,
+    )
+    .all(...ids) as Array<{ reportId: string } & DiseaseVisitMedication>;
+
+  const byReport = new Map<string, DiseaseVisit>();
+  for (const row of reportRows) {
+    byReport.set(row.reportId, { ...row, diagnoses: [], medications: [] });
+  }
+  for (const row of diagnosisRows) {
+    byReport.get(row.reportId)?.diagnoses.push(row.diagnosisText);
+  }
+  for (const row of medicationRows) {
+    byReport.get(row.reportId)?.medications.push({
+      name: row.name,
+      dose: row.dose,
+      frequency: row.frequency,
+      route: row.route,
+    });
+  }
+
+  return [...byReport.values()].sort((left, right) => {
+    const leftAt = left.issuedAt ?? "";
+    const rightAt = right.issuedAt ?? "";
+    if (leftAt === rightAt) return left.reportId < right.reportId ? -1 : 1;
+    return leftAt < rightAt ? 1 : -1;
+  });
+}

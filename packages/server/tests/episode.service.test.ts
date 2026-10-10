@@ -13,6 +13,7 @@ import {
   getEpisode,
   linkEpisodeFact,
   listDiseaseCatalog,
+  listDiseaseRecords,
   listEpisodes,
   normalizeDiagnosisName,
   unlinkEpisodeFact,
@@ -182,6 +183,53 @@ test("疾病目录按标准病名合并诊断，并并列展示症状", () => {
     const symptoms = catalog.filter((entry) => entry.kind === "symptom");
     assert.equal(symptoms.length, 1);
     assert.equal(symptoms[0]!.name, "咳嗽");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("疾病目录下钻返回历史就诊记录（时间 / 医院 / 诊断 / 用药）", () => {
+  const { storageDir, owner, db } = setup("disease-records");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at,
+        hospital_name_raw, visit_department
+      ) VALUES (
+        'r1', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '2026-10-09',
+        '郑州市中心医院', '急诊儿科'
+      );
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+        VALUES ('d1', 'r1', 'outpatient', '呼吸道感染');
+      INSERT INTO report_medications (
+        id, report_id, medication_context, medication_name, dose, frequency, route
+      ) VALUES ('m1', 'r1', 'prescription', '复方氨酚甲麻口服液', '4.5ml', 'tid', '口服');
+    `);
+
+    const byDiagnosis = listDiseaseRecords(owner, "member", "diagnosis", "呼吸道感染");
+    assert.equal(byDiagnosis.length, 1);
+    assert.equal(byDiagnosis[0]!.hospitalName, "郑州市中心医院");
+    assert.equal(byDiagnosis[0]!.departmentName, "急诊儿科");
+    assert.equal(byDiagnosis[0]!.issuedAt, "2026-10-09");
+    assert.deepEqual(byDiagnosis[0]!.diagnoses, ["呼吸道感染"]);
+    assert.equal(byDiagnosis[0]!.medications[0]!.name, "复方氨酚甲麻口服液");
+    assert.equal(byDiagnosis[0]!.medications[0]!.frequency, "tid");
+    assert.equal(byDiagnosis[0]!.medications[0]!.route, "口服");
+
+    // 症状路径：靠病程的精细归集反查——只挂了药，也应能定位到那次就诊
+    const episode = createEpisode(owner, "member", { title: "呼吸道感染" });
+    createSymptom(owner, episode.episode.id, { name: "咳嗽" });
+    assert.deepEqual(
+      listDiseaseRecords(owner, "member", "symptom", "咳嗽"),
+      [],
+      "未归集任何事实时不应凭空产生就诊记录",
+    );
+
+    linkEpisodeFact(owner, episode.episode.id, { factType: "medication", factId: "m1" });
+    const bySymptom = listDiseaseRecords(owner, "member", "symptom", "咳嗽");
+    assert.equal(bySymptom.length, 1);
+    assert.equal(bySymptom[0]!.reportId, "r1");
+    assert.equal(bySymptom[0]!.medications[0]!.name, "复方氨酚甲麻口服液");
   } finally {
     teardown(storageDir);
   }

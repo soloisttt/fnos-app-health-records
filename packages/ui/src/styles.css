@@ -387,6 +387,13 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
   color: var(--brand-strong); display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 800;
 }
 .row-actions button.danger-action { background: var(--danger-soft); color: var(--danger); }
+/* 疾病目录 / 病程列表：整行可点 */
+.disease-row {
+  display: flex !important; align-items: center; gap: 12px; width: 100%;
+  padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+}
+.disease-row:hover { color: var(--brand-strong); }
 .reminder-form { padding: 16px; margin-bottom: 12px; }
 .reminder-list article {
   display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 10px;
