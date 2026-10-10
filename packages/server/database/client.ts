@@ -1,6 +1,7 @@
 import { ensureReportDuplicateDraft } from "./report-duplicate-draft";
 import { ensurePageAppendDraft } from "./page-append-draft";
 import { ensureMemberSharingDraft } from "./member-sharing-draft";
+import { ensureCaseEpisodeDraft } from "./case-episode-draft";
 import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -239,6 +240,7 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     ensureMemberSharingDraft(db);
     ensurePageAppendDraft(db);
     ensureReportDuplicateDraft(db);
+    ensureCaseEpisodeDraft(db);
     ensureObservationFieldOverrideSchema(db);
     ensureOcrCoordSpaceColumns(db);
     ensureReportDuplicateGovernanceSchema(db);
@@ -302,6 +304,7 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     ensureMemberSharingDraft(db);
     ensurePageAppendDraft(db);
     ensureReportDuplicateDraft(db);
+    ensureCaseEpisodeDraft(db);
     ensureObservationFieldOverrideSchema(db);
     ensureOcrCoordSpaceColumns(db);
     ensureReportDuplicateGovernanceSchema(db);

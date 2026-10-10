@@ -3,6 +3,7 @@ import { reportDuplicateDraftSql } from "./report-duplicate-draft";
 import { pageAppendSchemaSql } from "./page-append-draft";
 import { memberSharingSchemaSql } from "./member-sharing-draft";
 import { fileGcMembersSchemaSql } from "./file-gc-members-draft";
+import { caseEpisodeSchemaSql } from "./case-episode-draft";
 import {
   uploadReceiptSchemaSql,
   institutionTrendRuleSchemaSql,
@@ -26,6 +27,7 @@ export const schemaSql = `
 ${memberSharingSchemaSql}
 ${reportNotesSchemaSql}
 ${trendGroupsSchemaSql}
+${caseEpisodeSchemaSql}
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',

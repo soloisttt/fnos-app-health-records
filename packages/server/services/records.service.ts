@@ -3817,6 +3817,7 @@ const reportEvidenceTables = [
   "billing_summaries",
   "billing_items",
   "report_structured_sections",
+  "case_symptoms",
 ] as const;
 
 const removableEvidenceTables = new Set<string>(reportEvidenceTables);
@@ -3829,6 +3830,7 @@ const manualEvidenceTables = new Set<string>([
   "billing_summaries",
   "billing_items",
   "report_structured_sections",
+  "case_symptoms",
 ]);
 
 const removedEvidence = Symbol("removed-evidence");
