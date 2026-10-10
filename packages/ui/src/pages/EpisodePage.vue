@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { ArrowLeft, CheckCircle2, Plus, Trash2 } from "@lucide/vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
@@ -53,6 +53,76 @@ async function unlinkFact(factType: CaseEpisodeLinkFactType, factId: string) {
     saving.value = false;
   }
 }
+
+type TimelineEvent = {
+  key: string;
+  at: string | null;
+  kind: string;
+  badge: string;
+  title: string;
+  detail: string | null;
+  reportId: string | null;
+  remove: (() => void) | null;
+};
+
+/** A5 病程时间轴：把起病、症状、已归集的事实、转归按时间排成一条线。 */
+const timeline = computed<TimelineEvent[]>(() => {
+  const current = detail.value;
+  if (!current) return [];
+  const events: TimelineEvent[] = [
+    {
+      key: "onset",
+      at: current.episode.onsetAt,
+      kind: "onset",
+      badge: "病程",
+      title: current.episode.causeText ? `起病 · 病因：${current.episode.causeText}` : "起病",
+      detail: current.episode.summary,
+      reportId: null,
+      remove: null,
+    },
+  ];
+
+  for (const item of current.symptoms) {
+    events.push({
+      key: `symptom:${item.id}`,
+      at: item.onsetAt,
+      kind: "symptom",
+      badge: "症状",
+      title: item.name,
+      detail: symptomMeta(item),
+      reportId: null,
+      remove: () => void removeSymptom(item.id),
+    });
+  }
+
+  for (const fact of current.linkedFacts) {
+    events.push({
+      key: `fact:${fact.linkId}`,
+      at: fact.occurredAt,
+      kind: fact.factType,
+      badge: factTypeLabels[fact.factType],
+      title: fact.label,
+      detail: factDetail(fact),
+      reportId: fact.reportId,
+      remove: () => void unlinkFact(fact.factType, fact.factId),
+    });
+  }
+
+  if (current.episode.status === "resolved" || current.episode.resolvedAt) {
+    events.push({
+      key: "resolved",
+      at: current.episode.resolvedAt,
+      kind: "resolved",
+      badge: "转归",
+      title: "已痊愈",
+      detail: null,
+      reportId: null,
+      remove: null,
+    });
+  }
+
+  return events.sort((left, right) => (left.at ?? "").localeCompare(right.at ?? ""));
+});
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
 const symptomForm = ref({ name: "", onsetAt: "", durationText: "", severity: "", bodyPart: "" });
@@ -277,43 +347,7 @@ watch(
       </div>
 
       <div class="page-intro">
-        <div><h3>已归集内容</h3><p>挂到这段病程上的报告、诊断与用药</p></div>
-      </div>
-
-      <EmptyState
-        v-if="!detail.linkedFacts.length"
-        title="还没有归集内容"
-        description="到报告详情页点「加入病程」，就能把这次看病挂上来。"
-      />
-      <div v-else class="data-list">
-        <article v-for="fact in detail.linkedFacts" :key="fact.linkId">
-          <div class="reminder-card-head">
-            <div class="reminder-card-main">
-              <strong>{{ fact.label }}</strong>
-              <span>{{ factDetail(fact) }}</span>
-            </div>
-          </div>
-          <div class="reminder-card-footer">
-            <span class="chip status-label">{{ factTypeLabels[fact.factType] }}</span>
-            <div class="row-actions">
-              <button v-if="fact.reportId" type="button" @click="previewReportId = fact.reportId">
-                查看报告
-              </button>
-              <button
-                class="danger-action"
-                type="button"
-                :disabled="saving"
-                @click="unlinkFact(fact.factType, fact.factId)"
-              >
-                <Trash2 :size="15" />移除
-              </button>
-            </div>
-          </div>
-        </article>
-      </div>
-
-      <div class="page-intro">
-        <div><h3>症状</h3><p>系统只能从报告里读到「主诉」一句，其余请在这里补录</p></div>
+        <div><h3>病程时间轴</h3><p>起病、症状、诊断、用药与转归，按时间排成一条线</p></div>
         <button class="soft-action-button" type="button" @click="symptomFormOpen = !symptomFormOpen">
           <Plus :size="16" />添加症状
         </button>
@@ -333,30 +367,28 @@ watch(
         </div>
       </form>
 
-      <EmptyState
-        v-if="!detail.symptoms.length"
-        title="还没有症状记录"
-        description="点上方「添加症状」补录，比如咳嗽、鼻塞、流涕。"
-      />
-      <div v-else class="data-list">
-        <article v-for="item in detail.symptoms" :key="item.id">
-          <div class="reminder-card-head">
-            <div class="reminder-card-main">
-              <strong>{{ item.name }}</strong>
-              <span>{{ symptomMeta(item) }}</span>
-              <small v-if="item.description">{{ item.description }}</small>
+      <p v-if="!detail.symptoms.length && !detail.linkedFacts.length" class="preview-hint">
+        还没有内容。到报告详情页点「加入病程」挂上报告，或用上方按钮补录症状。
+      </p>
+      <ol v-else class="episode-timeline">
+        <li v-for="event in timeline" :key="event.key" :class="`episode-event episode-event--${event.kind}`">
+          <span class="episode-dot" aria-hidden="true"></span>
+          <div class="episode-event-body">
+            <div class="episode-event-head">
+              <span class="chip status-label">{{ event.badge }}</span>
+              <time v-if="event.at">{{ formatDay(event.at) }}</time>
             </div>
-          </div>
-          <div class="reminder-card-footer">
-            <span class="chip status-label">{{ item.source === "manual" ? "手工录入" : "系统识别" }}</span>
-            <div class="row-actions">
-              <button class="danger-action" type="button" :disabled="saving" @click="removeSymptom(item.id)">
-                <Trash2 :size="15" />删除
+            <strong>{{ event.title }}</strong>
+            <small v-if="event.detail">{{ event.detail }}</small>
+            <div v-if="event.reportId || event.remove" class="row-actions">
+              <button v-if="event.reportId" type="button" @click="previewReportId = event.reportId">查看报告</button>
+              <button v-if="event.remove" class="danger-action" type="button" :disabled="saving" @click="event.remove()">
+                <Trash2 :size="15" />移除
               </button>
             </div>
           </div>
-        </article>
-      </div>
+        </li>
+      </ol>
     </template>
 
     <template v-else>

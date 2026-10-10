@@ -645,74 +645,134 @@ export type DiseaseVisit = {
   medications: DiseaseVisitMedication[];
 };
 
-/**
- * 按疾病目录条目下钻，返回历史就诊记录（时间 / 医院 / 诊断 / 用药）。
- *
- * kind='diagnosis'：取诊断名（经别名归一后）等于 name 的报告。
- * kind='symptom'  ：取含该症状的病程，再沿归集关系反解出相关报告。
- *   —— 这正是「精细归集」的价值：即使只挂了一个药，也能定位到它所在的那次就诊。
- */
-export function listDiseaseRecords(
-  user: RequestUser,
-  memberId: string,
-  kind: "diagnosis" | "symptom",
-  name: string,
-): DiseaseVisit[] {
-  assertMemberAccess(user, memberId);
-  const db = getDatabase();
-  const reportIds = new Set<string>();
+/** 加载诊断别名字典（归一化写法的映射）。 */
+function loadDiagnosisAliasMap() {
+  const rows = getDatabase()
+    .prepare(
+      `SELECT a.normalized_alias AS normalizedAlias, c.canonical_name AS canonicalName
+       FROM diagnosis_aliases a JOIN diagnosis_catalog c ON c.id = a.catalog_id
+       WHERE a.enabled = 1`,
+    )
+    .all() as Array<{ normalizedAlias: string; canonicalName: string }>;
+  return new Map(rows.map((row) => [row.normalizedAlias, row.canonicalName]));
+}
 
-  if (kind === "diagnosis") {
-    const aliasRows = db
-      .prepare(
-        `SELECT a.normalized_alias AS normalizedAlias, c.canonical_name AS canonicalName
-         FROM diagnosis_aliases a JOIN diagnosis_catalog c ON c.id = a.catalog_id
-         WHERE a.enabled = 1`,
-      )
-      .all() as Array<{ normalizedAlias: string; canonicalName: string }>;
-    const aliasMap = new Map(aliasRows.map((row) => [row.normalizedAlias, row.canonicalName]));
-    const rows = db
-      .prepare(
-        `SELECT d.report_id AS reportId, d.diagnosis_text AS diagnosisText
-         FROM report_diagnoses d JOIN reports r ON r.id = d.report_id
-         WHERE r.member_id = ? AND r.status <> 'trashed' AND d.is_deleted = 0`,
-      )
-      .all(memberId) as Array<{ reportId: string; diagnosisText: string }>;
-    for (const row of rows) {
-      const canonical = aliasMap.get(normalizeDiagnosisName(row.diagnosisText)) ?? row.diagnosisText.trim();
-      if (canonical === name) reportIds.add(row.reportId);
+function canonicalDiagnosisText(value: string, aliasMap: Map<string, string>) {
+  return aliasMap.get(normalizeDiagnosisName(value)) ?? value.trim();
+}
+
+/** 沿病程的归集关系反解出报告 id；已挂到病程上的报告、诊断、用药、操作、疫苗都能回溯到那次就诊。 */
+function collectReportIdsByEpisode(
+  memberId: string,
+  match: (episode: { id: string; title: string; causeText: string | null }) => boolean,
+) {
+  const db = getDatabase();
+  const episodes = db
+    .prepare(
+      "SELECT id, title, cause_text AS causeText FROM case_episodes WHERE member_id = ? AND deleted_at IS NULL",
+    )
+    .all(memberId) as Array<{ id: string; title: string; causeText: string | null }>;
+  const matched = episodes.filter(match).map((episode) => episode.id);
+  const ids = new Set<string>();
+  if (!matched.length) return ids;
+
+  const factTables: Record<string, string> = {
+    diagnosis: "report_diagnoses",
+    medication: "report_medications",
+    procedure: "report_procedures",
+    vaccination: "vaccination_records",
+    observation: "observations",
+    section: "report_structured_sections",
+  };
+  const placeholders = matched.map(() => "?").join(", ");
+  const links = db
+    .prepare(
+      `SELECT fact_type AS factType, fact_id AS factId FROM case_episode_links
+       WHERE episode_id IN (${placeholders})`,
+    )
+    .all(...matched) as Array<{ factType: string; factId: string }>;
+
+  for (const link of links) {
+    if (link.factType === "report") {
+      ids.add(link.factId);
+      continue;
     }
-  } else {
-    const links = db
-      .prepare(
-        `SELECT l.fact_type AS factType, l.fact_id AS factId
-         FROM case_episode_links l
-         JOIN case_symptoms s ON s.episode_id = l.episode_id
-         WHERE s.member_id = ? AND s.is_deleted = 0 AND s.name = ?`,
-      )
-      .all(memberId, name) as Array<{ factType: string; factId: string }>;
-    const factTables: Record<string, string> = {
-      diagnosis: "report_diagnoses",
-      medication: "report_medications",
-      procedure: "report_procedures",
-      vaccination: "vaccination_records",
-    };
-    for (const link of links) {
-      if (link.factType === "report") {
-        reportIds.add(link.factId);
-        continue;
-      }
-      const table = factTables[link.factType];
-      if (!table) continue;
-      const row = db
-        .prepare(`SELECT report_id AS reportId FROM ${table} WHERE id = ?`)
-        .get(link.factId) as { reportId: string } | undefined;
-      if (row?.reportId) reportIds.add(row.reportId);
+    const table = factTables[link.factType];
+    if (!table) continue;
+    const row = db
+      .prepare(`SELECT report_id AS reportId FROM ${table} WHERE id = ?`)
+      .get(link.factId) as { reportId: string } | undefined;
+    if (row?.reportId) ids.add(row.reportId);
+  }
+  return ids;
+}
+
+/** 按症状名条件收集报告 id（先定位病程，再沿归集关系反解）。 */
+function collectReportIdsBySymptom(memberId: string, match: (name: string) => boolean) {
+  const db = getDatabase();
+  const symptoms = db
+    .prepare(
+      "SELECT DISTINCT name FROM case_symptoms WHERE member_id = ? AND is_deleted = 0",
+    )
+    .all(memberId) as Array<{ name: string }>;
+  const matched = symptoms.filter((row) => match(row.name)).map((row) => row.name);
+  if (!matched.length) return new Set<string>();
+
+  const placeholders = matched.map(() => "?").join(", ");
+  const episodeIds = db
+    .prepare(
+      `SELECT DISTINCT episode_id AS episodeId FROM case_symptoms
+       WHERE member_id = ? AND is_deleted = 0 AND name IN (${placeholders})`,
+    )
+    .all(memberId, ...matched) as Array<{ episodeId: string }>;
+  const ids = new Set<string>();
+  for (const { episodeId } of episodeIds) {
+    for (const id of collectReportIdsByEpisode(memberId, (episode) => episode.id === episodeId)) {
+      ids.add(id);
     }
   }
+  return ids;
+}
 
-  if (!reportIds.size) return [];
-  const ids = [...reportIds];
+/** 按诊断名条件收集报告 id（经别名归一后再比较）。 */
+function collectReportIdsByDiagnosis(memberId: string, match: (canonical: string) => boolean) {
+  const db = getDatabase();
+  const aliasMap = loadDiagnosisAliasMap();
+  const rows = db
+    .prepare(
+      `SELECT d.report_id AS reportId, d.diagnosis_text AS diagnosisText
+       FROM report_diagnoses d JOIN reports r ON r.id = d.report_id
+       WHERE r.member_id = ? AND r.status <> 'trashed' AND d.is_deleted = 0`,
+    )
+    .all(memberId) as Array<{ reportId: string; diagnosisText: string }>;
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (match(canonicalDiagnosisText(row.diagnosisText, aliasMap))) ids.add(row.reportId);
+  }
+  return ids;
+}
+
+/** 按用药名条件收集报告 id。 */
+function collectReportIdsByMedication(memberId: string, match: (name: string) => boolean) {
+  const rows = getDatabase()
+    .prepare(
+      `SELECT m.report_id AS reportId, m.medication_name AS name
+       FROM report_medications m JOIN reports r ON r.id = m.report_id
+       WHERE r.member_id = ? AND r.status <> 'trashed' AND m.is_deleted = 0`,
+    )
+    .all(memberId) as Array<{ reportId: string; name: string }>;
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (match(row.name)) ids.add(row.reportId);
+  }
+  return ids;
+}
+
+/** 把报告 id 集合装配成可展示的就诊记录（时间 / 医院 / 诊断 / 用药）。 */
+function buildVisits(reportIds: Iterable<string>): DiseaseVisit[] {
+  const ids = [...new Set(reportIds)];
+  if (!ids.length) return [];
+  const db = getDatabase();
   const placeholders = ids.map(() => "?").join(", ");
 
   const reportRows = db
@@ -739,12 +799,8 @@ export function listDiseaseRecords(
     .all(...ids) as Array<{ reportId: string } & DiseaseVisitMedication>;
 
   const byReport = new Map<string, DiseaseVisit>();
-  for (const row of reportRows) {
-    byReport.set(row.reportId, { ...row, diagnoses: [], medications: [] });
-  }
-  for (const row of diagnosisRows) {
-    byReport.get(row.reportId)?.diagnoses.push(row.diagnosisText);
-  }
+  for (const row of reportRows) byReport.set(row.reportId, { ...row, diagnoses: [], medications: [] });
+  for (const row of diagnosisRows) byReport.get(row.reportId)?.diagnoses.push(row.diagnosisText);
   for (const row of medicationRows) {
     byReport.get(row.reportId)?.medications.push({
       name: row.name,
@@ -760,4 +816,45 @@ export function listDiseaseRecords(
     if (leftAt === rightAt) return left.reportId < right.reportId ? -1 : 1;
     return leftAt < rightAt ? 1 : -1;
   });
+}
+
+/**
+ * 按疾病目录条目下钻，返回历史就诊记录（时间 / 医院 / 诊断 / 用药）。
+ *
+ * kind='diagnosis'：取诊断名（经别名归一后）等于 name 的报告。
+ * kind='symptom'  ：取含该症状的病程，再沿归集关系反解出相关报告。
+ *   —— 这正是「精细归集」的价值：即使只挂了一个药，也能定位到它所在的那次就诊。
+ */
+export function listDiseaseRecords(
+  user: RequestUser,
+  memberId: string,
+  kind: "diagnosis" | "symptom",
+  name: string,
+): DiseaseVisit[] {
+  assertMemberAccess(user, memberId);
+  const ids =
+    kind === "diagnosis"
+      ? collectReportIdsByDiagnosis(memberId, (canonical) => canonical === name)
+      : collectReportIdsBySymptom(memberId, (symptomName) => symptomName === name);
+  return buildVisits(ids);
+}
+
+/**
+ * A6 综合检索：输入一个关键词，跨「症状 / 病因 / 病程标题 / 诊断 / 用药」一起匹配，
+ * 返回符合条件的历次就诊（什么时候、在哪家医院、开了什么药）。
+ */
+export function searchVisits(user: RequestUser, memberId: string, keyword: string): DiseaseVisit[] {
+  assertMemberAccess(user, memberId);
+  const needle = keyword.trim().toLowerCase();
+  if (!needle) return [];
+  const hit = (value: string | null | undefined) => Boolean(value && value.toLowerCase().includes(needle));
+
+  const ids = new Set<string>();
+  for (const id of collectReportIdsByDiagnosis(memberId, hit)) ids.add(id);
+  for (const id of collectReportIdsBySymptom(memberId, hit)) ids.add(id);
+  for (const id of collectReportIdsByMedication(memberId, hit)) ids.add(id);
+  for (const id of collectReportIdsByEpisode(memberId, (episode) => hit(episode.title) || hit(episode.causeText))) {
+    ids.add(id);
+  }
+  return buildVisits(ids);
 }

@@ -16,6 +16,7 @@ import {
   listDiseaseRecords,
   listEpisodes,
   normalizeDiagnosisName,
+  searchVisits,
   unlinkEpisodeFact,
   updateEpisode,
   updateSymptom,
@@ -274,6 +275,37 @@ test("病程详情返回可展示的已归集内容，事实消失时标记 miss
     const gone = after.linkedFacts.find((item) => item.factType === "medication")!;
     assert.equal(gone.missing, true);
     assert.equal(gone.label, "内容已不存在");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("A6 综合检索可跨诊断、用药、症状、病因与病程标题命中", () => {
+  const { storageDir, owner, db } = setup("visit-search");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at, hospital_name_raw
+      ) VALUES ('r1', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '2026-10-09', '郑州市中心医院');
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+        VALUES ('d1', 'r1', 'outpatient', '呼吸道感染');
+      INSERT INTO report_medications (id, report_id, medication_context, medication_name)
+        VALUES ('m1', 'r1', 'prescription', '氨溴特罗口服溶液');
+    `);
+
+    assert.equal(searchVisits(owner, "member", "呼吸道").length, 1, "按诊断应能命中");
+    assert.equal(searchVisits(owner, "member", "氨溴特罗").length, 1, "按用药名应能命中");
+    assert.equal(searchVisits(owner, "member", "呼吸道")[0]!.hospitalName, "郑州市中心医院");
+    assert.deepEqual(searchVisits(owner, "member", "   "), [], "空关键词不返回结果");
+    assert.deepEqual(searchVisits(owner, "member", "受凉"), [], "还没有病程时搜不到病因");
+
+    const episode = createEpisode(owner, "member", { title: "10月感冒", causeText: "受凉" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+    createSymptom(owner, episode.episode.id, { name: "咳嗽" });
+
+    assert.equal(searchVisits(owner, "member", "咳嗽").length, 1, "按症状应能命中");
+    assert.equal(searchVisits(owner, "member", "受凉").length, 1, "按病因应能命中");
+    assert.equal(searchVisits(owner, "member", "10月感冒").length, 1, "按病程标题应能命中");
   } finally {
     teardown(storageDir);
   }

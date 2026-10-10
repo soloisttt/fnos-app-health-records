@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowLeft, Search } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
@@ -15,6 +15,39 @@ const entries = ref<DiseaseCatalogEntry[]>([]);
 const selected = ref<DiseaseCatalogEntry | null>(null);
 const records = ref<DiseaseVisit[]>([]);
 const recordsLoading = ref(false);
+const searchResults = ref<DiseaseVisit[]>([]);
+const searching = ref(false);
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function runSearch(memberId: string, value: string) {
+  const needle = value.trim();
+  if (!needle || !memberId) {
+    searchResults.value = [];
+    return;
+  }
+  searching.value = true;
+  try {
+    searchResults.value = await request<DiseaseVisit[]>(
+      `episode-search?memberId=${encodeURIComponent(memberId)}&q=${encodeURIComponent(needle)}`,
+    );
+  } catch {
+    searchResults.value = [];
+  } finally {
+    searching.value = false;
+  }
+}
+
+watch(keyword, (value) => {
+  clearTimeout(searchTimer);
+  if (!value.trim()) {
+    searchResults.value = [];
+    return;
+  }
+  const memberId = app.selectedMemberId.value;
+  searchTimer = setTimeout(() => void runSearch(memberId, value), 300);
+});
+
+onBeforeUnmount(() => clearTimeout(searchTimer));
 
 const filtered = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
@@ -141,11 +174,11 @@ watch(
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
       <div v-if="loading" class="loading-list"><span v-for="index in 4" :key="index"></span></div>
       <EmptyState
-        v-else-if="!filtered.length"
+        v-else-if="!filtered.length && !keyword.trim()"
         title="还没有疾病记录"
         description="导入报告后，报告里的诊断会自动汇总到这里；在病程里录入的症状也会一并列出。"
       />
-      <div v-else class="data-list">
+      <div v-else-if="filtered.length" class="data-list">
         <article v-for="entry in filtered" :key="`${entry.kind}:${entry.name}`">
           <button class="disease-row" type="button" @click="openEntry(entry)">
             <span class="reminder-card-main">
@@ -156,6 +189,35 @@ watch(
           </button>
         </article>
       </div>
+
+      <template v-if="keyword.trim()">
+        <div class="page-intro">
+          <div>
+            <h3>相关就诊记录</h3>
+            <p>同时匹配症状、病因、诊断与用药</p>
+          </div>
+        </div>
+        <div v-if="searching" class="loading-list"><span v-for="index in 2" :key="index"></span></div>
+        <EmptyState
+          v-else-if="!searchResults.length"
+          title="没有匹配的就诊记录"
+          description="换个关键词试试，比如咳嗽、受凉，或者某个药名。"
+        />
+        <div v-else class="data-list">
+          <article v-for="visit in searchResults" :key="visit.reportId">
+            <div class="reminder-card-head">
+              <div class="reminder-card-main">
+                <strong>{{ formatDay(visit.issuedAt) }} · {{ visit.hospitalName || "医院未记录" }}</strong>
+                <span>{{ [visit.departmentName, visit.title].filter(Boolean).join(" · ") }}</span>
+                <small v-if="visit.diagnoses.length">诊断：{{ visit.diagnoses.join("、") }}</small>
+                <small v-for="(med, index) in visit.medications" :key="index">
+                  用药：{{ medicationText(med) }}
+                </small>
+              </div>
+            </div>
+          </article>
+        </div>
+      </template>
     </template>
   </section>
 </template>
