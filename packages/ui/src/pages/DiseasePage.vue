@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowLeft, Search } from "@lucide/vue";
+import { ArrowLeft, Activity, Search } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
 import type { DiseaseCatalogEntry, DiseaseVisit } from "../types/api";
@@ -150,20 +150,24 @@ watch(
         title="还没有关联的就诊记录"
         description="这个条目下的就诊记录来自报告诊断，或病程上挂载的用药与操作。"
       />
-      <div v-else class="data-list">
-        <article v-for="visit in records" :key="visit.reportId">
-          <div class="reminder-card-head">
-            <div class="reminder-card-main">
-              <strong>{{ formatDay(visit.issuedAt) }} · {{ visit.hospitalName || "医院未记录" }}</strong>
-              <span>{{ [visit.departmentName, visit.title].filter(Boolean).join(" · ") }}</span>
-              <small v-if="visit.diagnoses.length">诊断：{{ visit.diagnoses.join("、") }}</small>
-              <small v-for="(med, index) in visit.medications" :key="index">
-                用药：{{ medicationText(med) }}
-              </small>
-            </div>
+      <section v-else class="settings-band entry-list-card">
+        <header>
+          <div><Activity :size="18" /><h3>就诊记录</h3></div>
+          <span class="count-label">共 {{ records.length }} 次</span>
+        </header>
+        <div class="entry-list-body">
+        <article v-for="visit in records" :key="visit.reportId" class="entry-row entry-row--stacked">
+          <div class="entry-row-main">
+            <strong>{{ formatDay(visit.issuedAt) }} · {{ visit.hospitalName || "医院未记录" }}</strong>
+            <span>{{ [visit.departmentName, visit.title].filter(Boolean).join(" · ") }}</span>
+            <small v-if="visit.diagnoses.length">诊断：{{ visit.diagnoses.join("、") }}</small>
+            <small v-for="(med, index) in visit.medications" :key="index">
+              用药：{{ medicationText(med) }}
+            </small>
           </div>
         </article>
-      </div>
+        </div>
+      </section>
     </template>
 
     <template v-else>
@@ -178,46 +182,54 @@ watch(
         title="还没有疾病记录"
         description="导入报告后，报告里的诊断会自动汇总到这里；在病程里录入的症状也会一并列出。"
       />
-      <div v-else-if="filtered.length" class="data-list">
-        <article v-for="entry in filtered" :key="`${entry.kind}:${entry.name}`">
-          <button class="disease-row" type="button" @click="openEntry(entry)">
-            <span class="reminder-card-main">
+      <section v-else-if="filtered.length" class="settings-band entry-list-card">
+        <header>
+          <div><Activity :size="18" /><h3>疾病目录</h3></div>
+          <span class="count-label">共 {{ filtered.length }} 项</span>
+        </header>
+        <div class="entry-list-body">
+          <button
+            v-for="entry in filtered"
+            :key="`${entry.kind}:${entry.name}`"
+            class="entry-row"
+            type="button"
+            @click="openEntry(entry)"
+          >
+            <span class="entry-row-main">
               <strong>{{ entry.name }}</strong>
               <span>{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
             </span>
-            <span class="chip status-label" :class="kindChip(entry)">{{ kindLabel(entry) }}</span>
+            <span class="entry-row-side">
+              <span class="chip status-label" :class="kindChip(entry)">{{ kindLabel(entry) }}</span>
+            </span>
           </button>
-        </article>
-      </div>
-
-      <template v-if="keyword.trim()">
-        <div class="page-intro">
-          <div>
-            <h3>相关就诊记录</h3>
-            <p>同时匹配症状、病因、诊断与用药</p>
-          </div>
         </div>
-        <div v-if="searching" class="loading-list"><span v-for="index in 2" :key="index"></span></div>
-        <EmptyState
-          v-else-if="!searchResults.length"
-          title="没有匹配的就诊记录"
-          description="换个关键词试试，比如咳嗽、受凉，或者某个药名。"
-        />
-        <div v-else class="data-list">
-          <article v-for="visit in searchResults" :key="visit.reportId">
-            <div class="reminder-card-head">
-              <div class="reminder-card-main">
-                <strong>{{ formatDay(visit.issuedAt) }} · {{ visit.hospitalName || "医院未记录" }}</strong>
-                <span>{{ [visit.departmentName, visit.title].filter(Boolean).join(" · ") }}</span>
-                <small v-if="visit.diagnoses.length">诊断：{{ visit.diagnoses.join("、") }}</small>
-                <small v-for="(med, index) in visit.medications" :key="index">
-                  用药：{{ medicationText(med) }}
-                </small>
-              </div>
+      </section>
+
+      <section v-if="keyword.trim()" class="settings-band entry-list-card">
+        <header>
+          <div><Search :size="18" /><h3>相关就诊记录</h3></div>
+          <span class="count-label">同时匹配症状、病因、诊断与用药</span>
+        </header>
+        <div class="entry-list-body">
+          <div v-if="searching" class="loading-list"><span v-for="index in 2" :key="index"></span></div>
+          <EmptyState
+            v-else-if="!searchResults.length"
+            title="没有匹配的就诊记录"
+            description="换个关键词试试，比如咳嗽、受凉，或者某个药名。"
+          />
+          <article v-else v-for="visit in searchResults" :key="visit.reportId" class="entry-row entry-row--stacked">
+            <div class="entry-row-main">
+              <strong>{{ formatDay(visit.issuedAt) }} · {{ visit.hospitalName || "医院未记录" }}</strong>
+              <span>{{ [visit.departmentName, visit.title].filter(Boolean).join(" · ") }}</span>
+              <small v-if="visit.diagnoses.length">诊断：{{ visit.diagnoses.join("、") }}</small>
+              <small v-for="(med, index) in visit.medications" :key="index">
+                用药：{{ medicationText(med) }}
+              </small>
             </div>
           </article>
         </div>
-      </template>
+      </section>
     </template>
   </section>
 </template>

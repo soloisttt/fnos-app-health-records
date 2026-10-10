@@ -388,12 +388,46 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 }
 .row-actions button.danger-action { background: var(--danger-soft); color: var(--danger); }
 /* 疾病目录 / 病程列表：整行可点 */
-.disease-row {
-  display: flex !important; align-items: center; gap: 12px; width: 100%;
-  padding: 0; border: 0; background: none; color: inherit; font: inherit;
-  text-align: left; cursor: pointer;
+/* ---------- 条目卡片列表 ----------
+   一行一条独立成卡（浅底、描边、圆角、条目间留白），与总览页「最近报告」观感一致；
+   用于疾病目录、病程列表、报告归集等需要逐条明显区分的场景。 */
+.entry-list-card > header {
+  min-height: 46px; padding: 10px 14px; border-bottom: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.disease-row:hover { color: var(--brand-strong); }
+.entry-list-card > header > div { min-width: 0; display: flex; align-items: center; gap: 7px; color: var(--brand); }
+.entry-list-card > header h3 { font-size: 14px; line-height: 1.2; color: var(--ink); }
+.entry-list-card > header .count-label { padding-top: 0; }
+.entry-list-body { padding: 0 10px 10px; display: grid; gap: 8px; }
+.entry-list-body--bare { padding: 0; }
+.entry-row {
+  width: 100%; min-height: 56px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--fill-2);
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  color: inherit; font: inherit; text-align: left;
+}
+.entry-row--stacked { align-items: flex-start; }
+button.entry-row { cursor: pointer; transition: border-color .15s, background .15s; }
+button.entry-row:hover:not(:disabled) { border-color: var(--brand); }
+button.entry-row:disabled { opacity: .6; cursor: default; }
+.entry-row-main { min-width: 0; display: grid; gap: 4px; }
+.entry-row-main > strong { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.entry-row-main > span,
+.entry-row-main > small { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.entry-row-side { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
+/* 卡片内的表单块：与条目行同一观感，避免控件直接铺在白色卡片上显得散 */
+.entry-form {
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--fill-2);
+  display: grid; gap: 12px;
+}
+.entry-form > label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.entry-form input {
+  width: 100%; height: 42px; border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--surface); padding: 0 12px; outline: 0; color: var(--ink);
+  transition: border-color .15s, box-shadow .15s;
+}
+.entry-form input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
 /* A5 病程时间轴 */
 /* 病程信息卡片：状态标签在标题栏，操作按钮分列两端 */
 .episode-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }

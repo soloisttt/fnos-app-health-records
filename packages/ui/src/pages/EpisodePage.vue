@@ -321,20 +321,17 @@ watch(
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
-      <section class="settings-band">
+      <section class="settings-band entry-list-card">
         <header>
-          <ClipboardList :size="21" />
-          <div>
-            <h3>病程信息</h3>
-            <p>病因需要你自己填写，系统不做推断</p>
-          </div>
+          <div><ClipboardList :size="18" /><h3>病程信息</h3></div>
           <span class="chip status-label" :class="episodeStatusOf(detail.episode.status).chip">
             {{ episodeStatusOf(detail.episode.status).label }}
           </span>
         </header>
-        <form class="settings-form" @submit.prevent="patchEpisode({ causeText: detail.episode.causeText }, '病因已保存')">
+        <div class="entry-list-body">
+        <form class="entry-form" @submit.prevent="patchEpisode({ causeText: detail.episode.causeText }, '病因已保存')">
           <label>
-            <span>病因</span>
+            <span>病因（自己填写，系统不做推断）</span>
             <input v-model="detail.episode.causeText" placeholder="例如 受凉、接触感冒的家人" />
           </label>
           <div class="episode-actions">
@@ -359,6 +356,7 @@ watch(
             <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
           </div>
         </form>
+        </div>
       </section>
 
       <div class="page-intro episode-timeline-intro">
@@ -368,7 +366,12 @@ watch(
         </button>
       </div>
 
-      <form v-if="symptomFormOpen" class="settings-band" @submit.prevent="addSymptom">
+      <section v-if="symptomFormOpen" class="settings-band entry-list-card">
+        <header>
+          <div><Plus :size="18" /><h3>添加症状</h3></div>
+        </header>
+        <div class="entry-list-body">
+        <form class="entry-form" @submit.prevent="addSymptom">
         <div class="form-grid">
           <label><span>症状名称</span><input v-model="symptomForm.name" placeholder="例如 咳嗽" /></label>
           <label><span>出现日期</span><DateTimePicker v-model="symptomForm.onsetAt" aria-label="症状出现日期" /></label>
@@ -380,7 +383,9 @@ watch(
           <button type="button" @click="symptomFormOpen = false">取消</button>
           <button class="primary-button" :disabled="saving">保存</button>
         </div>
-      </form>
+        </form>
+        </div>
+      </section>
 
       <p v-if="!detail.symptoms.length && !detail.linkedFacts.length" class="preview-hint">
         还没有内容。到报告详情页点「加入病程」挂上报告，或用上方按钮补录症状。
@@ -416,17 +421,24 @@ watch(
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
-      <form v-if="formOpen" class="settings-band" @submit.prevent="createEpisode">
-        <div class="form-grid">
-          <label><span>病程标题</span><input v-model="episodeForm.title" placeholder="例如 10月呼吸道感染" /></label>
-          <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" aria-label="起病日期" /></label>
-          <label><span>病因（可留空）</span><input v-model="episodeForm.causeText" placeholder="例如 受凉" /></label>
+      <section v-if="formOpen" class="settings-band entry-list-card">
+        <header>
+          <div><Plus :size="18" /><h3>新建病程</h3></div>
+        </header>
+        <div class="entry-list-body">
+          <form class="entry-form" @submit.prevent="createEpisode">
+            <div class="form-grid">
+              <label><span>病程标题</span><input v-model="episodeForm.title" placeholder="例如 10月呼吸道感染" /></label>
+              <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" aria-label="起病日期" /></label>
+              <label><span>病因（可留空）</span><input v-model="episodeForm.causeText" placeholder="例如 受凉" /></label>
+            </div>
+            <div class="form-actions">
+              <button type="button" @click="formOpen = false">取消</button>
+              <button class="primary-button" :disabled="saving">保存</button>
+            </div>
+          </form>
         </div>
-        <div class="form-actions">
-          <button type="button" @click="formOpen = false">取消</button>
-          <button class="primary-button" :disabled="saving">保存</button>
-        </div>
-      </form>
+      </section>
 
       <div v-if="loading" class="loading-list"><span v-for="index in 3" :key="index"></span></div>
       <EmptyState
@@ -434,20 +446,26 @@ watch(
         title="还没有病程"
         description="孩子每生一次病就建一条病程，之后可以把这次相关的报告、用药都挂上去。"
       />
-      <div v-else class="data-list">
-        <article v-for="item in episodes" :key="item.id">
-          <button class="disease-row" type="button" @click="openEpisode(item.id)">
-            <span class="reminder-card-main">
+      <section v-else class="settings-band entry-list-card">
+        <header>
+          <div><ClipboardList :size="18" /><h3>全部病程</h3></div>
+          <span class="count-label">共 {{ episodes.length }} 段</span>
+        </header>
+        <div class="entry-list-body">
+          <button v-for="item in episodes" :key="item.id" class="entry-row" type="button" @click="openEpisode(item.id)">
+            <span class="entry-row-main">
               <strong>{{ item.title }}</strong>
               <span>{{ episodeMeta(item) }}</span>
               <small v-if="item.causeText">病因：{{ item.causeText }}</small>
             </span>
-            <span class="chip status-label" :class="episodeStatusOf(item.status).chip">
-              {{ episodeStatusOf(item.status).label }}
+            <span class="entry-row-side">
+              <span class="chip status-label" :class="episodeStatusOf(item.status).chip">
+                {{ episodeStatusOf(item.status).label }}
+              </span>
             </span>
           </button>
-        </article>
-      </div>
+        </div>
+      </section>
     </template>
 
     <ReportDetailModal

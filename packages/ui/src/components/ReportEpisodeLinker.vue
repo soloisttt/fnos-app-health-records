@@ -147,7 +147,7 @@ watch(
           </button>
         </div>
 
-        <form v-if="creating" class="settings-band" @submit.prevent="createAndAttach">
+        <form v-if="creating" class="entry-form" @submit.prevent="createAndAttach">
           <div class="form-grid">
             <label><span>病程标题</span><input v-model="newTitle" placeholder="例如 10月呼吸道感染" /></label>
             <label><span>起病日期</span><input v-model="newOnsetAt" type="date" /></label>
@@ -164,16 +164,23 @@ watch(
           title="还没有病程"
           description="先用上方「新建病程」建一条，这份报告就会挂上去。"
         />
-        <div v-else class="data-list">
-          <article v-for="item in episodes" :key="item.id">
-            <button class="disease-row" type="button" :disabled="saving" @click="attach(item)">
-              <span class="reminder-card-main">
-                <strong>{{ item.title }}</strong>
-                <span>{{ episodeMeta(item) }}</span>
-              </span>
+        <div v-else class="entry-list-body entry-list-body--bare">
+          <button
+            v-for="item in episodes"
+            :key="item.id"
+            class="entry-row"
+            type="button"
+            :disabled="saving"
+            @click="attach(item)"
+          >
+            <span class="entry-row-main">
+              <strong>{{ item.title }}</strong>
+              <span>{{ episodeMeta(item) }}</span>
+            </span>
+            <span class="entry-row-side">
               <span class="chip status-label">加入</span>
-            </button>
-          </article>
+            </span>
+          </button>
         </div>
       </section>
     </div>
