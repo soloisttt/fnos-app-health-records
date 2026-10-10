@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ArrowLeft, CheckCircle2, Plus, Trash2 } from "@lucide/vue";
+import { ArrowLeft, CheckCircle2, ClipboardList, Plus, Trash2 } from "@lucide/vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
@@ -321,41 +321,47 @@ watch(
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
-      <form class="settings-band" @submit.prevent="patchEpisode({ causeText: detail.episode.causeText }, '病因已保存')">
-        <div class="form-grid">
+      <section class="settings-band">
+        <header>
+          <ClipboardList :size="21" />
+          <div>
+            <h3>病程信息</h3>
+            <p>病因需要你自己填写，系统不做推断</p>
+          </div>
+          <span class="chip status-label" :class="episodeStatusOf(detail.episode.status).chip">
+            {{ episodeStatusOf(detail.episode.status).label }}
+          </span>
+        </header>
+        <form class="settings-form" @submit.prevent="patchEpisode({ causeText: detail.episode.causeText }, '病因已保存')">
           <label>
-            <span>病因（自己填写，系统不做推断）</span>
+            <span>病因</span>
             <input v-model="detail.episode.causeText" placeholder="例如 受凉、接触感冒的家人" />
           </label>
-        </div>
-        <div class="form-actions">
-          <button class="primary-button" :disabled="saving">保存病因</button>
-        </div>
-      </form>
+          <div class="episode-actions">
+            <button
+              v-if="detail.episode.status !== 'resolved'"
+              class="soft-action-button"
+              type="button"
+              :disabled="saving"
+              @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
+            >
+              <CheckCircle2 :size="15" />标记为已痊愈
+            </button>
+            <button
+              v-else
+              class="soft-action-button"
+              type="button"
+              :disabled="saving"
+              @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
+            >
+              恢复为进行中
+            </button>
+            <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
+          </div>
+        </form>
+      </section>
 
-      <div class="settings-band">
-        <div class="form-actions">
-          <button
-            v-if="detail.episode.status !== 'resolved'"
-            class="primary-button"
-            type="button"
-            :disabled="saving"
-            @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
-          >
-            <CheckCircle2 :size="16" />标记为已痊愈
-          </button>
-          <button
-            v-else
-            type="button"
-            :disabled="saving"
-            @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
-          >
-            恢复为进行中
-          </button>
-        </div>
-      </div>
-
-      <div class="page-intro">
+      <div class="page-intro episode-timeline-intro">
         <div><h3>病程时间轴</h3><p>起病、症状、诊断、用药与转归，按时间排成一条线</p></div>
         <button class="soft-action-button" type="button" @click="symptomFormOpen = !symptomFormOpen">
           <Plus :size="16" />添加症状

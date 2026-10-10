@@ -395,6 +395,9 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 }
 .disease-row:hover { color: var(--brand-strong); }
 /* A5 病程时间轴 */
+/* 病程信息卡片：状态标签在标题栏，操作按钮分列两端 */
+.episode-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.episode-timeline-intro { margin-top: 22px; }
 .episode-timeline { list-style: none; margin: 0; padding: 0 0 0 2px; display: grid; }
 .episode-event {
   position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr);
