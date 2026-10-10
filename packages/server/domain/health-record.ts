@@ -209,6 +209,78 @@ export type BillingItem = {
   manualFields: string[];
 };
 
+export const caseEpisodeStatuses = ["active", "resolved", "chronic", "unknown"] as const;
+export type CaseEpisodeStatus = typeof caseEpisodeStatuses[number];
+
+/** 病程主体。病程不跨成员，member_id 直接归属。 */
+export type CaseEpisode = {
+  id: string;
+  memberId: string;
+  title: string;
+  status: CaseEpisodeStatus;
+  onsetAt: string | null;
+  resolvedAt: string | null;
+  /** 病因：人工填写，AI 不得推断。 */
+  causeText: string | null;
+  summary: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const caseSymptomStatuses = ["present", "improved", "resolved", "unknown"] as const;
+export type CaseSymptomStatus = typeof caseSymptomStatuses[number];
+
+export type CaseSymptomSource = "manual" | "ai";
+
+/** 结构化症状。以人工录入为主；字段对齐 clinical fact 表，便于后续接入 AI 抽取。 */
+export type CaseSymptom = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  name: string;
+  onsetAt: string | null;
+  durationText: string | null;
+  severity: string | null;
+  bodyPart: string | null;
+  description: string | null;
+  status: CaseSymptomStatus;
+  source: CaseSymptomSource;
+  reportId: string | null;
+  evidence: ClinicalEvidence;
+  manualFields: string[];
+};
+
+export const caseEpisodeLinkFactTypes = [
+  "report",
+  "diagnosis",
+  "medication",
+  "procedure",
+  "vaccination",
+  "observation",
+  "section",
+] as const;
+export type CaseEpisodeLinkFactType = typeof caseEpisodeLinkFactTypes[number];
+
+/** 归集关系：把报告/诊断/用药等挂到某段病程上。fact_id 为多态引用，完整性由服务层保证。 */
+export type CaseEpisodeLink = {
+  id: string;
+  episodeId: string;
+  factType: CaseEpisodeLinkFactType;
+  factId: string;
+  note: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+/** 诊断标准名。用于把"呼吸道感染 / 急性上呼吸道感染"等写法归一，供疾病目录聚合。 */
+export type DiagnosisCatalogEntry = {
+  id: string;
+  canonicalName: string;
+  category: string | null;
+  icdCode: string | null;
+};
+
 export const reportStructuredSectionKeys = [
   "checkup_package",
   "checkup_positive_findings",
