@@ -114,6 +114,18 @@ const clinicalFactEditor = ref<{
 } | null>(null);
 const structuredSectionEditor = ref<ReportDetail["structuredSections"][number] | null | "create">(null);
 const episodeLinkerOpen = ref(false);
+/* 「加入病程」的建议标题与起病日期：取自报告的诊断或临床诊断 + 报告日期 */
+const episodeSuggestion = computed(() => {
+  const current = detail.value;
+  if (!current) return { title: "", onsetAt: "" };
+  const diagnosis = current.diagnoses?.[0]?.diagnosisText?.trim() || current.clinicalDiagnosis?.trim() || "";
+  const date = (current.reportIssuedAt || "").slice(0, 10);
+  const month = date ? String(Number(date.slice(5, 7))) : "";
+  return {
+    title: diagnosis ? (month ? `${month}月${diagnosis}` : diagnosis) : "",
+    onsetAt: date,
+  };
+});
 
 function onEpisodeLinked(episodeTitle: string) {
   episodeLinkerOpen.value = false;
@@ -3143,6 +3155,8 @@ onActivated(() => {
       :open="episodeLinkerOpen"
       :report-id="detail?.id ?? null"
       :member-id="detail?.memberId ?? ''"
+      :suggest-title="episodeSuggestion.title"
+      :suggest-onset-at="episodeSuggestion.onsetAt"
       @close="episodeLinkerOpen = false"
       @linked="onEpisodeLinked"
     />

@@ -311,6 +311,45 @@ test("A6 综合检索可跨诊断、用药、症状、病因与病程标题命�
   }
 });
 
+test("门诊病历的「临床诊断」也进入疾病目录、下钻与检索", () => {
+  const { storageDir, owner, db } = setup("episode-clinical-diagnosis");
+  try {
+    /* 门诊病历的诊断由 AI 写在 reports.clinical_diagnosis，而不是 report_diagnoses 表；
+       影像报告才会有 report_diagnoses 行。两种来源都必须被识别。 */
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, clinical_diagnosis, hospital_name_raw, report_issued_at)
+      VALUES ('report-outpatient', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '呼吸道感染', '郑州市中心医院', '2026-10-09');
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, clinical_diagnosis, hospital_name_raw, report_issued_at)
+      VALUES ('report-imaging', 'member', 'owner', 'imaging', '胸部CT', 'ready', '支气管炎', '郑州儿童医院', '2026-09-20');
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+      VALUES ('dx-imaging', 'report-imaging', 'other', '支气管炎');
+      INSERT INTO report_medications (id, report_id, medication_name, dose, frequency, route)
+      VALUES ('med-outpatient', 'report-outpatient', '复方氨酚甲麻口服液', '4.5ml', 'tid', '口服');
+    `);
+
+    const catalog = listDiseaseCatalog(owner, "member");
+    const names = catalog.filter((item) => item.kind === "diagnosis").map((item) => item.name).sort();
+    assert.deepEqual(names, ["呼吸道感染", "支气管炎"], "临床诊断字段与诊断表都应进入疾病目录");
+    assert.equal(
+      catalog.find((item) => item.name === "支气管炎")?.count,
+      1,
+      "同一份报告里两处出现同一诊断时不应重复计数",
+    );
+
+    const visits = listDiseaseRecords(owner, "member", "diagnosis", "呼吸道感染");
+    assert.equal(visits.length, 1);
+    assert.equal(visits[0].reportId, "report-outpatient");
+    assert.equal(visits[0].hospitalName, "郑州市中心医院");
+    assert.equal(visits[0].medications[0]?.name, "复方氨酚甲麻口服液");
+
+    const searched = searchVisits(owner, "member", "呼吸道感染");
+    assert.equal(searched.length, 1);
+    assert.equal(searched[0].reportId, "report-outpatient");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("跨成员访问被拒绝", () => {
   const { storageDir, owner, db } = setup("episode-access");
   try {

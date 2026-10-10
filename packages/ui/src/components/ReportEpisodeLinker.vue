@@ -9,6 +9,10 @@ const props = defineProps<{
   open: boolean;
   reportId: string | null;
   memberId: string;
+  /** 按报告内容给出的建议标题，例如「10月呼吸道感染」 */
+  suggestTitle?: string;
+  /** 建议起病日期，取报告日期 */
+  suggestOnsetAt?: string;
 }>();
 
 const emit = defineEmits<{
@@ -95,13 +99,28 @@ async function createAndAttach() {
   }
 }
 
+function applySuggestion() {
+  newTitle.value = props.suggestTitle?.trim() || "";
+  newOnsetAt.value = props.suggestOnsetAt?.trim() || "";
+}
+
 watch(
   () => props.open,
   (open) => {
     if (!open) return;
     error.value = "";
     creating.value = false;
+    applySuggestion();
     void load();
+  },
+);
+
+/* 报告详情可能晚于弹窗准备好，建议值到位后同步填充尚未输入的表单 */
+watch(
+  () => [props.suggestTitle, props.suggestOnsetAt],
+  () => {
+    if (!props.open || newTitle.value.trim() || newOnsetAt.value) return;
+    applySuggestion();
   },
 );
 </script>

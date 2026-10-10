@@ -581,14 +581,7 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
     .all() as Array<{ normalizedAlias: string; canonicalName: string }>;
   const aliasMap = new Map(aliasRows.map((row) => [row.normalizedAlias, row.canonicalName]));
 
-  const diagnosisRows = db
-    .prepare(
-      `SELECT d.diagnosis_text AS diagnosisText, r.report_issued_at AS reportIssuedAt,
-              r.created_at AS createdAt
-       FROM report_diagnoses d JOIN reports r ON r.id = d.report_id
-       WHERE r.member_id = ? AND r.status <> 'trashed' AND d.is_deleted = 0`,
-    )
-    .all(memberId) as Array<{ diagnosisText: string; reportIssuedAt: string | null; createdAt: string }>;
+  const diagnosisRows = collectDiagnosisTexts(memberId);
 
   const symptomRows = db
     .prepare(
@@ -611,8 +604,7 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
   };
 
   for (const row of diagnosisRows) {
-    const canonical = aliasMap.get(normalizeDiagnosisName(row.diagnosisText)) ?? row.diagnosisText.trim();
-    bump("diagnosis", canonical, row.reportIssuedAt ?? row.createdAt);
+    bump("diagnosis", canonicalDiagnosisText(row.text, aliasMap), row.occurredAt);
   }
   for (const row of symptomRows) {
     bump("symptom", row.name.trim(), row.onsetAt ?? row.createdAt);
@@ -735,19 +727,54 @@ function collectReportIdsBySymptom(memberId: string, match: (name: string) => bo
 }
 
 /** 按诊断名条件收集报告 id（经别名归一后再比较）。 */
-function collectReportIdsByDiagnosis(memberId: string, match: (canonical: string) => boolean) {
+/**
+ * 诊断文本有两个来源，必须都纳入，否则门诊/住院病历的诊断会整体缺失：
+ * 1) report_diagnoses 表：影像、化验等报告里的结构化诊断；
+ * 2) reports.clinical_diagnosis 字段：门诊/住院病历的「临床诊断」，AI 常写在这里。
+ */
+function collectDiagnosisTexts(memberId: string): Array<{ reportId: string; text: string; occurredAt: string | null }> {
   const db = getDatabase();
-  const aliasMap = loadDiagnosisAliasMap();
   const rows = db
     .prepare(
-      `SELECT d.report_id AS reportId, d.diagnosis_text AS diagnosisText
+      `SELECT d.report_id AS reportId, d.diagnosis_text AS text,
+              COALESCE(r.report_issued_at, r.created_at) AS occurredAt
        FROM report_diagnoses d JOIN reports r ON r.id = d.report_id
        WHERE r.member_id = ? AND r.status <> 'trashed' AND d.is_deleted = 0`,
     )
-    .all(memberId) as Array<{ reportId: string; diagnosisText: string }>;
+    .all(memberId) as Array<{ reportId: string; text: string; occurredAt: string | null }>;
+
+  const fieldRows = db
+    .prepare(
+      `SELECT r.id AS reportId, r.clinical_diagnosis AS text,
+              COALESCE(r.report_issued_at, r.created_at) AS occurredAt
+       FROM reports r
+       WHERE r.member_id = ? AND r.status <> 'trashed'
+         AND r.clinical_diagnosis IS NOT NULL AND TRIM(r.clinical_diagnosis) <> ''`,
+    )
+    .all(memberId) as Array<{ reportId: string; text: string; occurredAt: string | null }>;
+
+  /* 同一份报告里诊断表已收录过的文本不重复计入 */
+  const seen = new Set(rows.map((row) => `${row.reportId}|${normalizeDiagnosisName(row.text)}`));
+  for (const row of fieldRows) {
+    /* 「临床诊断」可能一行写多个病，按常见分隔符拆开分别收录 */
+    for (const part of String(row.text).split(/[、,，;；/\n]+/)) {
+      const text = part.trim();
+      if (!text) continue;
+      const key = `${row.reportId}|${normalizeDiagnosisName(text)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ reportId: row.reportId, text, occurredAt: row.occurredAt });
+    }
+  }
+  return rows;
+}
+
+function collectReportIdsByDiagnosis(memberId: string, match: (canonical: string) => boolean) {
+  const db = getDatabase();
+  const aliasMap = loadDiagnosisAliasMap();
   const ids = new Set<string>();
-  for (const row of rows) {
-    if (match(canonicalDiagnosisText(row.diagnosisText, aliasMap))) ids.add(row.reportId);
+  for (const row of collectDiagnosisTexts(memberId)) {
+    if (match(canonicalDiagnosisText(row.text, aliasMap))) ids.add(row.reportId);
   }
   return ids;
 }
