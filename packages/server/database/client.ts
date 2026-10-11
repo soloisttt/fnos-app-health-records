@@ -260,6 +260,12 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     unreleasedSchemaVersion = currentVersion;
     return;
   }
+  if (hasMigrationTable && currentVersion >= 18) {
+    const recorded = db.prepare("SELECT checksum FROM schema_migrations WHERE version = 18").get() as { checksum: string } | undefined;
+    if (recorded && recorded.checksum !== "manual:018-preserve-ocr-page-orientation") {
+      throw new Error("Database schema v18 conflicts with an earlier development migration; preserve the database and use a separately reviewed compatibility procedure.");
+    }
+  }
   if (currentVersion === 0 && tableExists(db, "reports")) {
     currentVersion = 1;
   }

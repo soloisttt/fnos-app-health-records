@@ -1,3 +1,5 @@
+import { preserveFeedbackInstallation } from './feedback-installation.service';
+import { assertRestoreAdministrator, restoreAccessPolicy, type RestoreAccessPolicy } from './restore-access.service';
 import { evaluateDuplicatePair } from "./report-duplicate-evidence";
 import { getReportExaminations } from "./report-examination.service";
 import { examinationDuplicateResolver } from "./examination-duplicate.service";
@@ -1299,9 +1301,11 @@ export function getReportDetail(
         unit: row.unit,
         resultText: row.resultText,
         manualReviewed: Boolean(row.manualReviewed),
-        trendAdmission: assessTrendAdmission({ ...row, reportId, hasAiExtraction: row.hasAiExtraction,
-          hospitalName: admissionReport.hospitalName, reportType: admissionReport.reportType,
-          reportIssuedAt: admissionReport.reportIssuedAt }),
+        trendAdmission: row.examinationTimeStatus === 'pending'
+          ? { eligible: false, kind: null, reason: '请先确认检查时间' }
+          : assessTrendAdmission({ ...row, reportId, hasAiExtraction: row.hasAiExtraction,
+            hospitalName: admissionReport.hospitalName, reportType: admissionReport.reportType,
+            reportIssuedAt: row.examinationId ? row.examinationTime : admissionReport.reportIssuedAt }),
       });
       const reference = assessPersistedObservationReference(row);
       const interpretation = assessObservationInterpretation({
@@ -6248,6 +6252,8 @@ const auditActionTitles: Record<string, string> = {
   "report.note.asset.upload": "添加补充图片",
   "report.note.asset.delete": "删除补充图片",
   "backup.restore": "恢复完整备份",
+  "backup.identity_restore": "恢复账号与档案授权",
+  "backup.takeover_repair": "接管未分配的恢复档案",
   "backup.identity_rebind": "接管恢复数据权限",
   "backup.delete": "删除完整备份",
   "maintenance.regenerate_report_titles": "批量清理报告标题",
@@ -7165,10 +7171,15 @@ function createBackupStagingDirectory() {
   return mkdtempSync(join(base, ".staging-"));
 }
 
-function asBackupCreateError(cause: unknown): Error {
+function asBackupCreateError(step: string, cause: unknown): Error {
   const classified = classifySystemError(cause);
-  if (classified) return apiError(classified.status, classified.code, classified.message);
-  return new Error("创建备份失败", { cause });
+  // Only fixed stage labels are exposed: never include source paths or raw errors.
+  const reason = classified?.code === 'STORAGE_UNAVAILABLE'
+    && /不可写/.test(classified.message)
+    ? '文件访问或权限操作被拒绝，请检查应用对档案及备份目录的读写权限和挂载状态'
+    : classified?.message || '操作未完成，请稍后重试';
+  return apiError(classified?.status || 500, classified?.code || 'INTERNAL_ERROR',
+    `创建备份失败（${step}）：${reason}`);
 }
 
 function assertSafeBackupId(id: string) {
@@ -7337,26 +7348,33 @@ export function createFullBackup(
   const id = createId("backup");
   const createdDate = new Date();
   const createdAt = createdDate.toISOString();
-  const filename = createBackupArchiveFilename(config.appName, createdDate, id);
-  const archivePath = join(backupDirectory(), filename);
-  const metadataPath = backupMetadataPath(id);
-
+  let step = "准备备份目录";
+  let filename: string;
+  let archivePath: string;
+  let metadataPath: string;
   let stagingRoot: string;
   try {
+    filename = createBackupArchiveFilename(config.appName, createdDate, id);
+    archivePath = join(backupDirectory(), filename);
+    metadataPath = backupMetadataPath(id);
+    step = "创建备份暂存目录";
     stagingRoot = createBackupStagingDirectory();
   } catch (cause) {
-    throw asBackupCreateError(cause);
+    throw asBackupCreateError(step, cause);
   }
 
   try {
+    step = "生成数据库快照";
     mkdirSync(join(stagingRoot, "db"), { recursive: true });
     const databaseStatus = getDatabaseStatus();
     const counts = countBackupSourceRows();
     copyDatabaseSnapshot(join(stagingRoot, "db", "health-records.sqlite"));
     for (const directoryName of backupIncludedDirectories) {
+      step = `复制${({ reports: "报告原件", "report-notes": "报告附件", thumbnails: "缩略图", config: "配置", secrets: "密钥" })[directoryName]}`;
       copyDirectoryForBackup(stagingRoot, directoryName);
     }
 
+    step = "校验备份文件";
     const manifestFiles = createBackupFileManifest(stagingRoot);
     const manifest: BackupManifest = {
       formatVersion: backupFormatVersion,
@@ -7385,8 +7403,10 @@ export function createFullBackup(
       { mode: 0o600 },
     );
 
+    step = "生成备份压缩包及设置权限";
     createTarArchive(stagingRoot, archivePath);
 
+    step = "保存备份记录";
     const metadata: CreatedBackup = {
       id,
       filename,
@@ -7433,9 +7453,11 @@ export function createFullBackup(
     } catch {
       // 清理失败不影响错误上报
     }
-    throw asBackupCreateError(cause);
+    throw asBackupCreateError(step, cause);
   } finally {
-    rmSync(stagingRoot, { recursive: true, force: true });
+    // A cleanup permission error must not hide the real failure or mark a saved
+    // backup as failed. Leftovers are retried on the next backup attempt.
+    try { rmSync(stagingRoot, { recursive: true, force: true }); } catch { /* retry later */ }
   }
 }
 
@@ -7872,14 +7894,26 @@ function insertRestoreAudit(
   );
 }
 
-type RestorePlan = { token:string; digest:string; actorId:string; deployment:string; strategy:'same'|'cross'; expires:number; warning:string; identitySubject?:string; accountFingerprint:string };
+// Validates the complete archive before exposing its read-only database to repair preflight.
+export function inspectBackupForTakeover<T>(archivePath:string, inspect:(manifest:BackupManifest, database:DatabaseSync, digest:string)=>T):T {
+ const root=mkdtempSync(join(backupStagingBaseDirectory(),'.takeover-check-'));
+ try {
+  extractTarArchive(archivePath,root);
+  ensureBackupValidationPassed(validateExtractedBackup(root));
+  const manifest=JSON.parse(readFileSync(join(root,'manifest.json'),'utf8')) as BackupManifest;
+  const db=new DatabaseSync(join(root,'db','health-records.sqlite'),{readOnly:true});
+  try { return inspect(manifest,db,sha256File(archivePath)); } finally { db.close(); }
+ } finally { rmSync(root,{recursive:true,force:true}); }
+}
+
+type RestorePlan = { token:string; digest:string; actorId:string; deployment:string; strategy:'same'|'cross'; accessPolicy:RestoreAccessPolicy; expires:number; warning:string; identitySubject?:string; accountFingerprint:string };
 const restorePlans=new Map<string,RestorePlan>();
 function restoreAccountFingerprint() {
  const db=getDatabase();
  return createHash('sha256').update(JSON.stringify([db.prepare('SELECT * FROM user_identities ORDER BY id').all(),db.prepare('SELECT id,is_gateway_admin FROM users ORDER BY id').all(),db.prepare('SELECT * FROM local_accounts ORDER BY id').all(),db.prepare('SELECT * FROM member_permissions ORDER BY member_id,user_id').all(),db.prepare('SELECT * FROM identity_recovery_pending ORDER BY user_id').all()])).digest('hex');
 }
-export function preflightRestore(user:RequestUser,archivePath:string) {
- assertGatewayAdmin(user,'恢复预检');
+export function preflightRestore(user:RequestUser,archivePath:string,takeover=false) {
+ assertRestoreAdministrator(user);
  const root=mkdtempSync(join(backupStagingBaseDirectory(),'.check-'));
  try {
   extractTarArchive(archivePath,root);
@@ -7887,12 +7921,14 @@ export function preflightRestore(user:RequestUser,archivePath:string) {
   const manifest=JSON.parse(readFileSync(join(root,'manifest.json'),'utf8')) as BackupManifest;
   const target=getDeploymentIdentity();
   const sourceDb=new DatabaseSync(join(root,'db','health-records.sqlite'),{readOnly:true});
+  let memberCount=0;
   let verified=false;
   let absent=false;
   let rotatedLocalCredential=false;
   let conflictingLocalUsername=false;
   const identity=getDatabase().prepare('SELECT id,subject FROM user_identities WHERE user_id=? AND provider=?').get(user.id,user.provider) as {id:string,subject:string}|undefined;
   try {
+   memberCount=Number(sourceDb.prepare('SELECT COUNT(*) AS n FROM health_members').get()!.n);
    absent=!sourceDb.prepare('SELECT 1 FROM users WHERE id=?').get(user.id);
    if(user.provider==='local') {
     const credential=captureRestoringAdministratorCredential(user)!;
@@ -7911,17 +7947,18 @@ export function preflightRestore(user:RequestUser,archivePath:string) {
    ? (localVerified || (absent && !conflictingLocalUsername))
    : (verified || absent);
   const strategy=(same && sameVerified)||legacyVerified?'same':'cross';
+  const {accessPolicy,canChooseTakeover}=restoreAccessPolicy(manifest.identity?.authMode,strategy,takeover);
   for(const [key,plan] of restorePlans) if(plan.expires<Date.now()) restorePlans.delete(key);
-  const plan:RestorePlan={token:createId('restore'),digest:sha256File(archivePath),actorId:user.id,deployment:target.identityDomain,strategy,expires:Date.now()+15*60000,
+  const plan:RestorePlan={token:createId('restore'),digest:sha256File(archivePath),actorId:user.id,deployment:target.identityDomain,strategy,accessPolicy,expires:Date.now()+15*60000,
    identitySubject:identity?.subject,accountFingerprint:restoreAccountFingerprint(),
-   warning:strategy==='same'?'账号、授权和档案将回到备份时间点，之后新增的账号及授权可能不再存在；所有账号需要重新登录。':'来源身份无法与当前部署确认一致。源账号全部待映射，当前管理员仅保留系统维护权限，须使用受控映射工具逐项确认。'};
+   warning:accessPolicy==='admin_takeover'?`${manifest.identity?.authMode==='fnos'?'检测到飞牛备份。':'此备份来源未标明。'}恢复后，${memberCount} 个成员档案（含回收站）将由当前管理员管理，可在成员共享中分配给本地账号。原账号不能在此登录。`:strategy==='same'?'账号、授权和档案将回到备份时间点，之后新增的账号及授权可能不再存在；所有账号需要重新登录。':'来源身份无法与当前部署确认一致。源账号全部待映射，当前管理员仅保留系统维护权限，须使用受控映射工具逐项确认。'};
   restorePlans.set(plan.token,plan);
-  return {token:plan.token,strategy,warning:plan.warning,expiresAt:new Date(plan.expires).toISOString(),validation};
+  return {token:plan.token,strategy,accessPolicy,canChooseTakeover,memberCount,sourceMode:manifest.identity?.authMode||'unknown',targetMode:target.authMode,warning:plan.warning,expiresAt:new Date(plan.expires).toISOString(),validation};
  } finally {rmSync(root,{recursive:true,force:true});}
 }
-export function preflightStoredBackup(user:RequestUser,id:string) { return preflightRestore(user,backupArchivePath(id)); }
+export function preflightStoredBackup(user:RequestUser,id:string,takeover=false) { assertRestoreAdministrator(user); return preflightRestore(user,backupArchivePath(id),takeover); }
 function restoreBackupFromArchive(user:RequestUser,archivePath:string,backupId:string,token?:string) {
- assertGatewayAdmin(user,'恢复备份');
+ assertRestoreAdministrator(user);
  const plan=token?restorePlans.get(token):undefined;
  if(!plan || plan.actorId!==user.id || plan.expires<Date.now() || plan.deployment!==getDeploymentIdentity().identityDomain || plan.digest!==sha256File(archivePath) || plan.accountFingerprint!==restoreAccountFingerprint())
  throw createError({statusCode:409,statusMessage:'恢复预检已失效，请重新预检并确认',data:{code:'RESTORE_PLAN_EXPIRED'}});
@@ -7942,7 +7979,7 @@ function restoreBackupFromArchive(user:RequestUser,archivePath:string,backupId:s
   ensureBackupValidationPassed(validateExtractedBackup(rollbackRoot));
   const staged=prepareRestoredDatabase(join(root,'db','health-records.sqlite'));
   let identityRebind:ReturnType<typeof rebindRestoredAdministrator>;
-  try {identityRebind=rebindRestoredAdministrator(user,credential,plan.strategy,plan.identitySubject,staged);} finally {staged.close();}
+  try {preserveFeedbackInstallation(staged,getDatabase());identityRebind=rebindRestoredAdministrator(user,credential,plan.strategy,plan.identitySubject,staged,plan.accessPolicy==='admin_takeover');} finally {staged.close();}
   atomicStorageJson(journal,{version:1,safetyBackupId:safetyBackup.id,rollbackRoot,phase:'switching'});
   restorePlans.delete(plan.token);
   closeDatabase(); switched=true;
@@ -7974,11 +8011,13 @@ function restoreBackupFromArchive(user:RequestUser,archivePath:string,backupId:s
 }
 
 export function restoreBackup(user: RequestUser, id: string, token?:string) {
+  assertRestoreAdministrator(user);
   const archivePath = backupArchivePath(id);
   return restoreBackupFromArchive(user, archivePath, id,token);
 }
 
 export function restoreUploadedBackup(user: RequestUser, archivePath: string,token?:string) {
+  assertRestoreAdministrator(user);
   const validation = validateBackupArchivePath(archivePath);
   ensureBackupValidationPassed(validation);
   const manifestId =

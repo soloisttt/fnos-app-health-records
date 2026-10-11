@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "dev": "concurrently \"npm:dev:web\" \"npm:dev:server\"",
-    "dev:web": "vite --config packages/ui/vite.config.ts",
+    "dev:web": "vite --config packages/ui/vite.config.ts --host",
     "dev:server": "node scripts/dev.mjs",
     "test": "tsx --test packages/server/tests/*.test.ts",
     "test:duplicates:benchmark": "DUPLICATE_SCAN_BENCHMARK=1 tsx --test --test-concurrency=1 packages/server/tests/report-duplicate-scale.service.test.ts",

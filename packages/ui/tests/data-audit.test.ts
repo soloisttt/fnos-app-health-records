@@ -52,6 +52,7 @@ beforeEach(() => {
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = String(init?.method || "GET");
+    if(url.endsWith("/takeover-repair")) return jsonResponse({available:false});
     if(url.endsWith("/preflight")) return jsonResponse({token:"test-plan",warning:"账号和授权将回到备份时点，普通账号不会统一停用"});
     if (url.includes("/api/backups/") && method === "POST") {
       return jsonResponse({
@@ -92,9 +93,9 @@ describe("DataAuditSettingsPage restore notices", () => {
     await options.run();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("授权已回到备份时点，请重新登录");
+    expect(toastShow).toHaveBeenCalledWith(expect.stringContaining("授权已回到备份时点，请重新登录"), 6000);
     expect(fetchMock.mock.calls.some(([url,init])=>String(url).endsWith("/restore") && JSON.parse(String(init?.body)).token==="test-plan")).toBe(true);
-    expect(toastShow).toHaveBeenCalledWith("备份已恢复");
+    expect(toastShow).toHaveBeenCalledTimes(1); // 页面重载后只保留一次完成提示。
     expect(appLoad).toHaveBeenCalled();
   });
 });

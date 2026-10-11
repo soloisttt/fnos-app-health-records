@@ -1046,7 +1046,7 @@ TABLE_RESULT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CORRUPTED_DECIMAL_PATTERN = re.compile(r"^\s*\d+[`'’]\d+\s*[↑↓▲▼⬆⬇]?\s*$")
-SUSPICIOUS_UNIT_PATTERN = re.compile(r"^(?:9|q)\s*/\s*[lL]$", re.IGNORECASE)
+SUSPICIOUS_UNIT_PATTERN = re.compile(r"^(?:(?:9|q)\s*/\s*[lL]|\d+\s*/\s*\d+)$", re.IGNORECASE)
 
 
 def standalone_unit(text: str) -> bool:
@@ -1799,6 +1799,12 @@ def header_retry_regions(lines, width, height, limit=8):
                     next_cell_top = min([rect[1] for rect in column_boxes if rect[1] >= original_box[3]] or [height])
                     top = max(0, int(max((previous_bottom+original_box[1])/2, min(top,original_box[1]-row_h*.6))))
                     bottom = min(height, int(min((next_cell_top+original_box[3])/2, max(bottom,original_box[3]+row_h*.6))))
+                elif kind == 'unit' and len(members) == 1 and (
+                        float(members[0].get('confidence', 0)) < .80
+                        or SUSPICIOUS_UNIT_PATTERN.fullmatch(normalized_ocr_text(members[0].get('text')))):
+                    # The unit column can follow the reference column. Even a
+                    # high-confidence digit fraction requires pixel verification.
+                    original = members[0]
                 elif members:
                     continue  # Existing ambiguous results go through row retry.
                 elif kind == 'unit':
@@ -1815,7 +1821,7 @@ def header_retry_regions(lines, width, height, limit=8):
                     if glued_result: region['expectedResult'] = re.sub(r'\s+', '', glued_result.group(1))
                     if original is not None:region['original']=original
                     regions.append(region)
-    return sorted(regions,key=lambda r:{'name':0,'result':1,'reference':2,'unit':3}[r['kind']])[:limit]
+    return sorted(regions,key=lambda r:(r.get('original') is None, {'name':0,'result':1,'reference':2,'unit':3}[r['kind']]))[:limit]
 
 
 def retry_missing_header_cells(engine, image_path, lines, budget=None, retry_context=None):
@@ -1874,7 +1880,7 @@ def retry_missing_header_cells(engine, image_path, lines, budget=None, retry_con
                                              [min(b[0] for b in boxes),max(b[3] for b in boxes)]]}]
                 for line in retry_lines:
                     text=normalized_ocr_text(line.get('text'))
-                    if region['kind'] == 'reference':
+                    if region['kind'] in ('reference', 'unit'):
                         text=re.sub(r'\s+', '', text)
                         line={**line,'text':text}
                     if region.get('expectedResult'):

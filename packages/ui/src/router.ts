@@ -20,6 +20,7 @@ import IndicatorDictionarySettingsPage from "./pages/settings/IndicatorDictionar
 import UserAuditSettingsPage from "./pages/settings/UserAuditSettingsPage.vue";
 import AiAuditSettingsPage from "./pages/settings/AiAuditSettingsPage.vue";
 import SystemLogsSettingsPage from "./pages/settings/SystemLogsSettingsPage.vue";
+import FeedbackSettingsPage from "./pages/settings/FeedbackSettingsPage.vue";
 import AboutSettingsPage from "./pages/settings/AboutSettingsPage.vue";
 import AccountSecuritySettingsPage from "./pages/settings/AccountSecuritySettingsPage.vue";
 import { useAppContext } from "./composables/useAppContext";
@@ -38,9 +39,10 @@ const router = createRouter({
     { path: "/reminders", component: RemindersPage, meta: { title: "提醒", subtitle: "集中处理即将到期的健康事项" } },
     { path: "/me", component: SettingsPage, meta: { title: "我的", subtitle: "账号、成员与识别服务" } },
     { path: "/me/members", component: MembersSettingsPage, meta: { title: "家庭成员" } },
+    { path: "/me/feedback", component: FeedbackSettingsPage, meta: { title: "反馈与进度" } },
     { path: "/me/trash", component: TrashSettingsPage, meta: { title: "回收站" } },
     { path: "/me/duplicates", component: DuplicatesSettingsPage, meta: { title: "重复报告检测" } },
-    { path: "/me/data", component: DataAuditSettingsPage, meta: { title: "备份与恢复" } },
+    { path: "/me/data", component: DataAuditSettingsPage, meta: { title: "备份与恢复", requiresAdmin: true } },
     { path: "/me/account-security", component: AccountSecuritySettingsPage, meta: { title: "账号安全", requiresLocalAccount: true, requiresAdmin: true } },
     { path: "/me/audit", component: UserAuditSettingsPage, meta: { title: "用户操作日志", requiresAdmin: true } },
     { path: "/me/ai-audit", component: AiAuditSettingsPage, meta: { title: "AI 审计", requiresAdmin: true } },

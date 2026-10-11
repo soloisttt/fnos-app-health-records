@@ -1,3 +1,4 @@
+import { getFeedbackInstallation,readFeedbackInstallation } from '../services/feedback-installation.service';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync,mkdirSync,rmSync,readFileSync,writeFileSync,existsSync } from 'node:fs';
@@ -295,7 +296,8 @@ test('sharing account list requires member sharing rights and excludes unusable 
  db.exec("INSERT INTO users(id,display_name) VALUES('foreign-mode','其他环境'); INSERT INTO user_identities(id,user_id,provider,subject) VALUES('foreign-mode-id','foreign-mode','fnos_gateway','foreign-mode')");
  const accounts=listMemberSharingAccounts(a,member.id);
  assert.deepEqual(new Set(accounts.map(account=>account.id)),new Set([admin.id,a.id,b.id]));
- assert.deepEqual(Object.keys(accounts[0]).sort(),['displayName','id']);
+ assert.deepEqual(Object.keys(accounts[0]).sort(),['displayName','id','username']);
+ assert.equal((accounts.find(account => account.id === a.id) as {username?:string}).username, 'account-a');
  assert.equal(listMembers(admin).length,0);
  assert.throws(()=>setMemberPermission(a,member.id,{userId:inactive.userId,permission:'viewer',version:3}),status(404));
 }));
@@ -350,4 +352,28 @@ test('restoring an older backup without examination tables preserves unlinked ob
  assert.equal(result.observations[0].examinationId,null);
  assert.equal(getDatabase().prepare('SELECT COUNT(*) AS n FROM processing_jobs').get()!.n,0);
  assert.throws(()=>getReportExaminations(admin,'old-exam-report'),status(403));
+}));
+
+test('local sharing identifies duplicate names without exposing credentials',()=>setup((_dir,admin,a,b)=>{
+ const db=getDatabase();
+ db.prepare('UPDATE users SET display_name=? WHERE id IN (?,?)').run('synthetic duplicate',a.id,b.id);
+ const member=createMember(a,{displayName:'synthetic member',relationship:'other'});
+ const accounts=listMemberSharingAccounts(a,member.id);
+ assert.equal((accounts.find(account=>account.id===a.id) as {username?:string}).username,'account-a');
+ assert.equal((accounts.find(account=>account.id===b.id) as {username?:string}).username,'account-b');
+ for(const account of accounts) assert.deepEqual(Object.keys(account).sort(),['displayName','id','username']);
+}));
+
+test('full backup restore retains feedback identity and old backups preserve the target identity',()=>setup((_dir,admin)=>{
+ const oldBackup=createFullBackup(admin);
+ const id=getFeedbackInstallation();
+ const oldPlan=preflightStoredBackup(admin,oldBackup.id);
+ restoreBackup(admin,oldBackup.id,oldPlan.token);
+ assert.equal(readFeedbackInstallation(getDatabase()),id);
+ const newBackup=createFullBackup(admin);
+ getDatabase().prepare("DELETE FROM app_settings WHERE setting_key='x-client-id'").run();
+ const replacement=getFeedbackInstallation();assert.notEqual(id,replacement);
+ const plan=preflightStoredBackup(admin,newBackup.id);
+ restoreBackup(admin,newBackup.id,plan.token);
+ assert.equal(readFeedbackInstallation(getDatabase()),id);
 }));

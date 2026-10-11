@@ -97,7 +97,7 @@ test("closes an explicitly repaired connection when migration fails and safely r
   try { repair.exec("DROP TRIGGER fail_migration"); } finally { repair.close(); }
   const recovered = getDatabase();
   assert.equal(getUnreleasedSchemaMaintenance(), null);
-  assert.equal(recovered.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 17);
+  assert.equal(recovered.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 18);
   assert.equal(recovered.prepare("SELECT COUNT(*) AS n FROM reports").get()?.n, 1);
 }));
 

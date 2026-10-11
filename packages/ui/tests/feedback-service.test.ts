@@ -1,0 +1,45 @@
+import { mount,flushPromises } from '@vue/test-utils';
+import { describe,it,expect,vi,beforeEach } from 'vitest';
+import FeedbackImageEditor from '../src/components/FeedbackImageEditor.vue';
+import Page from '../src/pages/settings/FeedbackSettingsPage.vue';
+import { createFeedbackOperation } from '../src/utils/feedback-service';
+import { feedbackEnvironmentPayload } from '../src/utils/feedback-environment';
+const request=vi.hoisted(()=>vi.fn());
+vi.mock('../src/utils/api',()=>({request:(path:string,...args:unknown[])=>path==='feedback/identity'?Promise.resolve({clientId:'a'.repeat(43)}):request(path,...args)}));
+const ticket={number:'B0001',title:'测试反馈',category:'problem',status:'released_pending_verification',version:2,fixedVersion:'0.2.12',description:'合成描述',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',events:[{id:1,actorType:'admin',content:'已更新',toStatus:'released_pending_verification',fixedVersion:'0.2.12',createdAt:'2026-01-01T00:00:00Z',attachments:[]}],eventTotal:1};
+function render(){return mount(Page,{global:{stubs:{SubPageHeader:true,Teleport:true,FeedbackImageEditor:true}}});}
+beforeEach(()=>{request.mockReset();request.mockImplementation(async(path:string)=>path==='feedback-diagnostics'?{}:path.includes('?page=')?{items:[],total:0}:ticket);});
+describe('live feedback workflows',()=>{
+ it('loads feedback lazily on page mount and submits only approved fields with installation header',async()=>{
+  const page=render();await flushPromises();expect(request).toHaveBeenCalledWith('feedback/tickets?page=1&pageSize=20',expect.objectContaining({headers:{'x-client-id':'a'.repeat(43)}}));
+  await page.get('.feedback-primary').trigger('click');await flushPromises();
+  await page.get('form input').setValue('测试反馈');await page.get('form textarea').setValue('合成描述');
+  await page.findAll('.type-options button')[1].trigger('click');
+  await page.get('form').trigger('submit');await flushPromises();
+  const [,options]=request.mock.calls.find(c=>c[0]==='feedback/tickets')!;
+  expect(JSON.parse(options.body).category).toBe('suggestion');expect(JSON.parse(options.body).reproductionSteps).toBeUndefined();expect(options.headers['idempotency-key']).toBeTruthy();expect(options.headers['x-client-id']).toBe('a'.repeat(43));expect(page.get('.number-box').text()).toContain('B0001');page.unmount();
+ });
+ it('shows real progress and version, sends user confirmation with optimistic version',async()=>{
+  request.mockImplementation(async(path:string)=>path.includes('?page=')?{items:[ticket],total:1}:ticket);
+  const page=render();await flushPromises();await page.get('.feedback-row').trigger('click');await flushPromises();expect(page.text()).toContain('0.2.12');
+  await page.findAll('button').find(b=>b.text()==='确认已解决')!.trigger('click');await flushPromises();
+  const call=request.mock.calls.find(c=>c[0]==='feedback/tickets/B0001/resolution')!;expect(JSON.parse(call[1].body)).toEqual({action:'confirm',expectedVersion:2});page.unmount();
+ });
+
+ it('uploads only the edited image and reuses upload and submission keys after a timeout',async()=>{
+  const objectUrl=vi.spyOn(URL,'createObjectURL').mockReturnValue('blob:synthetic');const revoke=vi.spyOn(URL,'revokeObjectURL').mockImplementation(()=>{});
+  let submissions=0;
+  request.mockImplementation(async(path:string)=>{if(path.includes('?page='))return {items:[],total:0};if(path==='feedback-diagnostics')return {};if(path==='feedback/upload')return {id:7};if(path==='feedback/tickets'){if(++submissions===1)throw new Error('timeout');return ticket;}return ticket;});
+  const page=render();try {
+   await page.get('.feedback-primary').trigger('click');await flushPromises();
+   const input=page.get('input[type="file"]');Object.defineProperty(input.element,'files',{value:[new File(['original'],'private.png',{type:'image/png'})]});await input.trigger('change');await page.get('.attachment-edit').trigger('click');
+   page.getComponent(FeedbackImageEditor).vm.$emit('save',new File(['masked'],'edited.png',{type:'image/png'}));await page.vm.$nextTick();
+   await page.get('form input').setValue('测试截图');await page.get('form textarea').setValue('合成说明');await page.get('form').trigger('submit');await flushPromises();expect(page.find('.success-card').exists()).toBe(false);
+   await page.get('form').trigger('submit');await flushPromises();
+   const uploads=request.mock.calls.filter(c=>c[0]==='feedback/upload');expect(uploads).toHaveLength(1);expect(await (uploads[0][1].body.get('file') as File).text()).toBe('masked');
+   const posts=request.mock.calls.filter(c=>c[0]==='feedback/tickets');expect(posts[0][1].headers['idempotency-key']).toBe(posts[1][1].headers['idempotency-key']);expect(JSON.parse(posts[1][1].body).attachmentIds).toEqual([7]);expect(page.find('.success-card').exists()).toBe(true);
+  }finally{page.unmount();objectUrl.mockRestore();revoke.mockRestore();}
+ });
+ it('retries an unchanged submission with the same operation key',()=>{const operation=createFeedbackOperation();const key=operation.key('submit','body');expect(operation.key('submit','body')).toBe(key);expect(operation.key('submit','changed')).not.toBe(key);});
+ it('diagnostics payload has no build ID, raw UA or credentials',()=>{const body=feedbackEnvironmentPayload({appVersion:'1',ocr:{available:false},ai:{enabled:false,visionEnabled:false}},{userAgent:'SYNTHETIC_UA',width:360,height:740});expect(body.app).toEqual({version:'1'});expect(body.ocr.available).toBe(false);expect(JSON.stringify(body)).not.toContain('SYNTHETIC_UA');expect(JSON.stringify(body)).not.toContain('buildId');});
+});

@@ -1,3 +1,4 @@
+import { wrappedTableNameGroups } from "../utils/wrapped-table-name";
 import { createHash } from "node:crypto";
 import { measurementEvidenceRegions } from '../utils/measurement-bound';
 import { duplicatedOcrCodeName, duplicatedOcrResultName, recoverHeaderAlignedTable, uncoveredOcrResultIds, validOcrTableCell, type OcrTableCell } from "./ocr-table-structure";
@@ -2075,59 +2076,46 @@ function canJoinWrappedTableName(first: string, second: string, aliases: Prepare
     && firstFacts.every(fact => fact.canonicalKey === facts[0]?.canonicalKey);
 }
 
-/* 只恢复两行项目名与右侧单一数值，不推断多结果表或任意合并单元格。
- * 在视觉分行前拼接名称，保留两段原始来源；结果、单位和范围仍走原有坐标分行。
+/* 只恢复二至四行项目名与右侧单一数值，不推断多结果表或任意合并单元格。
+ * 在视觉分行前拼接名称，保留各段原始来源；结果、单位和范围仍走原有坐标分行。
  */
 function mergeWrappedTableNames(
   lines: PlannedOcrLine[],
   aliases: PreparedDictionaryAliases,
 ) {
-  const positioned = lines.map((line) => ({ line, rect: boxRect(line.box) }));
-  const pairs: Array<{ first: PlannedOcrLine; second: PlannedOcrLine; box: number[] }> = [];
-  for (const { line: first, rect: a } of positioned) {
-    if (!a || first.boundary || !/^[\p{L}\p{N}（）().+%\/-]{2,}$/u.test(first.text.trim())
-      || !/\p{L}/u.test(first.text)) continue;
-    for (const { line: second, rect: b } of positioned) {
-      if (!b || second.boundary || !/^[\p{L}\p{N}（）().+%\/-]+$/u.test(second.text.trim())) continue;
-      const height = Math.min(rectHeight(a), rectHeight(b));
-      if (
-        height <= 0 || b.top < a.bottom - height * 0.2 || b.top - a.bottom > height * 0.7 ||
-        Math.abs(a.left - b.left) > height * 0.6 ||
-        horizontalOverlap(a, b) < 0.7
-      ) continue;
-      if (!canJoinWrappedTableName(first.text, second.text, aliases)) continue;
-      const right = Math.max(a.right, b.right);
-      const band = positioned.filter(({ line, rect }) =>
-        line !== first && line !== second && rect &&
-        rect.bottom > a.top && rect.top < b.bottom,
-      );
-      // 项目列有其它文字或结果跨出名称高度时，无法可靠恢复。
-      if (band.some(({ rect }) => rect!.left < right + height * 0.5)) continue;
-      const values = band.filter(({ line }) => isStrictVisualNumericCell(line));
-      if (values.length !== 1) continue;
-      const value = values[0].rect!;
-      if (value.top < a.top - height * 0.25 || value.bottom > b.bottom + height * 0.25) continue;
-      // 结果必须是项目名右侧第一列；拒绝预测值/实测值等多个纯数值列。
-      if (band.some(({ rect }) => rect!.left < value.left)) continue;
-      pairs.push({ first, second, box: [a.left, a.top, right, b.bottom] });
-    }
-  }
-  const unambiguous = pairs.filter((pair) =>
-    pairs.every((other) => other === pair ||
-      ![other.first, other.second].some((line) => line === pair.first || line === pair.second)),
-  );
-  const consumed = new Set(unambiguous.map((pair) => pair.second));
-  return lines.filter((line) => !consumed.has(line)).map((line) => {
-    const pair = unambiguous.find((candidate) => candidate.first === line);
-    if (!pair) return line;
+  const positioned = lines.flatMap(line => {
+    const rect = boxRect(line.box);
+    return rect ? [{ line, rect }] : [];
+  });
+  const pieces = positioned.filter(({ line }) => !line.boundary
+    && /^[\p{L}\p{N}（）().+%\/-]+$/u.test(line.text.trim()));
+  const groups = wrappedTableNameGroups(pieces, item => item.rect, item => item.line.text.trim(),
+    (first, second) => canJoinWrappedTableName(first, second, aliases),
+    group => {
+      const a = group[0].rect, b = group.at(-1)!.rect;
+      const height = Math.min(...group.map(item => rectHeight(item.rect)));
+      const right = Math.max(...group.map(item => item.rect.right));
+      const band = positioned.filter(item => !group.includes(item) && item.rect.bottom > a.top && item.rect.top < b.bottom);
+      if (band.some(item => item.rect.left < right + height * .5)) return false;
+      const values = band.filter(item => isStrictVisualNumericCell(item.line));
+      if (values.length !== 1) return false;
+      const value = values[0].rect;
+      return value.top >= a.top - height * .25 && value.bottom <= b.bottom + height * .25
+        && !band.some(item => item.rect.left < value.left);
+    });
+  const consumed = new Set(groups.flatMap(group => group.slice(1).map(item => item.line)));
+  return lines.filter(line => !consumed.has(line)).map(line => {
+    const group = groups.find(group => group[0].line === line);
+    if (!group) return line;
     return {
       ...line,
-      id: `table_name_wrap_${line.id}_${pair.second.id}`,
-      text: line.text.trim() + pair.second.text.trim(),
-      sourceLineIds: [...line.sourceLineIds, ...pair.second.sourceLineIds],
-      box: pair.box,
-      confidence: line.confidence === null || pair.second.confidence === null
-        ? null : Math.min(line.confidence, pair.second.confidence),
+      id: `table_name_wrap_${group.map(item => item.line.id).join('_')}`,
+      text: group.map(item => item.line.text.trim()).join(''),
+      sourceLineIds: group.flatMap(item => item.line.sourceLineIds),
+      box: [Math.min(...group.map(item => item.rect.left)), group[0].rect.top,
+        Math.max(...group.map(item => item.rect.right)), group.at(-1)!.rect.bottom],
+      confidence: group.some(item => item.line.confidence === null) ? null
+        : Math.min(...group.map(item => item.line.confidence!)),
     };
   });
 }

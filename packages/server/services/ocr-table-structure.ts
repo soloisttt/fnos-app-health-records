@@ -1,3 +1,4 @@
+import { wrappedTableNameGroups } from "../utils/wrapped-table-name";
 import { isCurrentResultColumn, isExplicitOcrTableHeader, normalizeOcrTableHeader } from './ocr-table-columns';
 
 export type OcrTableCell = { table: string; row: number; column: number; columns: number; headerRow?: number };
@@ -154,30 +155,25 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(
       const namePieces = body.filter(item => column(item) === nameCol && !trusted(item)
         && /^[\p{L}\p{N}（）().+%\/-]+$/u.test(item.text) && !administrativeLabel.test(item.text)
         && !headerLabel.test(item.text));
-      const wraps = namePieces.flatMap(first => namePieces.flatMap(second => {
-        const h = Math.min(first.box.height, second.box.height);
-        if (first === second || !/\p{L}/u.test(first.text)
-          || second.box.top < first.box.bottom - h * .2 || second.box.top - first.box.bottom > h * .7
-          || Math.abs(first.box.left - second.box.left) > h * .6
-          || /^(?:请|建议|备注|说明|参考|审核|签名|报告|咨询)/.test(second.text)
-          || !canJoinName?.(first.text, second.text)) return [];
-        const band = body.filter(item => item !== first && item !== second
-          && item.box.bottom > first.box.top - h * .25 && item.box.top < second.box.bottom + h * .25);
-        if (band.some(item => column(item) === nameCol)) return [];
-        const results = band.filter(item => column(item) === resultCols[0]);
-        if (results.length !== 1 || !resultText.test(results[0].text)
-          || results[0].box.top < first.box.top - h * .25
-          || results[0].box.bottom > second.box.bottom + h * .25) return [];
-        return [{ first, second }];
-      }));
-      const uniqueWraps = wraps.filter(pair => wraps.every(other => other === pair
-        || ![other.first, other.second].some(item => item === pair.first || item === pair.second)));
-      body = body.filter(item => !uniqueWraps.some(pair => pair.second === item)).map(item => {
-        const pair = uniqueWraps.find(pair => pair.first === item);
-        if (!pair) return item;
-        const box = geometry([Math.min(item.box.left, pair.second.box.left), item.box.top,
-          Math.max(item.box.right, pair.second.box.right), pair.second.box.bottom])!;
-        return { ...item, box, members: [...item.members, ...pair.second.members], text: item.text + pair.second.text };
+      const wraps = wrappedTableNameGroups(namePieces, item => item.box, item => item.text,
+        (first, second) => !/^(?:请|建议|备注|说明|参考|审核|签名|报告|咨询)/.test(second) && Boolean(canJoinName?.(first, second)),
+        group => {
+          const first = group[0], last = group.at(-1)!;
+          const h = Math.min(...group.map(item => item.box.height));
+          const band = body.filter(item => !group.includes(item)
+            && item.box.bottom > first.box.top - h * .25 && item.box.top < last.box.bottom + h * .25);
+          if (band.some(item => column(item) === nameCol)) return false;
+          const results = band.filter(item => column(item) === resultCols[0]);
+          return results.length === 1 && resultText.test(results[0].text)
+            && results[0].box.top >= first.box.top - h * .25
+            && results[0].box.bottom <= last.box.bottom + h * .25;
+        });
+      body = body.filter(item => !wraps.some(group => group.slice(1).includes(item))).map(item => {
+        const group = wraps.find(group => group[0] === item);
+        if (!group) return item;
+        const box = geometry([Math.min(...group.map(piece => piece.box.left)), item.box.top,
+          Math.max(...group.map(piece => piece.box.right)), group.at(-1)!.box.bottom])!;
+        return { ...item, box, members: group.flatMap(piece => piece.members), text: group.map(piece => piece.text).join('') };
       });
       const trustedHeaders = headers.filter(trusted);
       const existingTable = trustedHeaders[0]?.line.tableCell as OcrTableCell | undefined;

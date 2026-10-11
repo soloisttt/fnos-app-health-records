@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createUuid as randomId } from "../utils/uuid";
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { ArrowLeft, ArrowRight, FileImage, LoaderCircle, Plus, Trash2, X } from '@lucide/vue';
 import ImageViewer, { type ImageViewerPage } from './ImageViewer.vue';
@@ -12,9 +13,7 @@ type SelectedImage = { key: string; id?: string; file?: File; originalName: stri
 const props = defineProps<{ reportId: string; note: ReportNote | null }>();
 const emit = defineEmits<{ close: []; saved: [note: ReportNote] }>();
 const content = ref(props.note?.contentText || '');
-// getRandomValues also works on HTTP NAS addresses, unlike randomUUID.
-const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-const createId = `note_${randomId()}`;
+const createId = `note_${randomId().replaceAll('-', '')}`;
 const images = ref<SelectedImage[]>((props.note?.assets || []).map(asset => ({ key: asset.id, id: asset.id, originalName: asset.originalName, fileSize: asset.fileSize,
   url: apiUrl(`reports/${props.reportId}/notes/${props.note!.id}/assets/${asset.id}?variant=preview`), status: 'ready', progress: 100 })));
 const saving = ref(false);

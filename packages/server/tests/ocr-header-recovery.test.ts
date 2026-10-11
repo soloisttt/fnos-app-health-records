@@ -575,3 +575,27 @@ test('a closed code followed by a result can share one box across explicit name 
     }
   }
 }));
+
+
+test('two to four wrapped name lines retain every source without merging competing results', () => withPlanner(() => {
+  for (const parts of [['25羟基维生','素D'], ['小而密低密','度脂蛋白胆','固醇'], ['合成长','名称检测','项目延续','末段']]) {
+    for (const withHeader of [false,true]) {
+      const headers = withHeader ? ['项目名称','结果','参考范围','单位'].map((text,i)=>({
+        id:`head-${i}`,text,confidence:.99,box:[i*250,0,i*250+120,25],
+      })) : [];
+      const names=parts.map((text,i)=>({id:`part-${i}`,text,confidence:.99,box:[0,80+i*30,120,105+i*30]}));
+      const middle=80+Math.floor(parts.length/2)*30;
+      const unit=parts.length===2?'ng/mL':'mmol/L';
+      const fields=(withHeader?['18.2','0-99',unit]:['18.2',unit,'0-99']).map((text,i)=>({id:`field-${i}`,text,confidence:.99,box:[(i+1)*250,middle,(i+1)*250+100,middle+25]}));
+      const rebuild=(raw:typeof names)=>rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}])[0];
+      const page=rebuild([...headers,...names,...fields]);
+      const row=page.lines.find(line=>line.sourceCells.some(cell=>cell.text===parts.join('')));
+      assert.ok(row,`${parts.length} lines, header ${withHeader}`);
+      assert.equal(row.candidate,true);
+      assert.deepEqual(row.sourceCells.find(cell=>cell.text===parts.join(''))?.sourceLineIds,names.map(line=>line.id));
+      assert.ok(row.sourceCells.some(cell=>cell.text==='18.2'));
+      const competing=rebuild([...headers,...names,...fields,{id:'competing',text:'27.4',confidence:.99,box:[250,80,350,105]}]);
+      assert.ok(competing.lines.every(line=>line.sourceCells.every(cell=>cell.text!==parts.join(''))));
+    }
+  }
+}));

@@ -729,7 +729,7 @@ test("backup and same-instance restore preserve draft files, owner and selected 
     env.cleanup();
   }
 });
-test("existing v17 database receives unnumbered draft with backup and no schema increment", () => {
+test("existing database receives missing page append tables with backup and no schema increment", () => {
   const env = setup();
   try {
     env.db.exec(
@@ -746,11 +746,11 @@ test("existing v17 database receives unnumbered draft with backup and no schema 
     );
     assert.equal(
       db.prepare("SELECT MAX(version) AS n FROM schema_migrations").get()!.n,
-      17,
+      18,
     );
     assert.ok(
       readdirSync(join(env.directory, "backups/db")).some((name) =>
-        name.includes("v17-to-v17"),
+        name.includes("v18-to-v18"),
       ),
     );
     assert.equal(db.prepare("SELECT * FROM reports").all().length, 1);

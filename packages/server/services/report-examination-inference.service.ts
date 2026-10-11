@@ -85,7 +85,14 @@ export function inferObservationExamination(observation:AiObservation,pages:Exam
  const evidence=observation.evidence[0];
  const page=pages.find(p=>p.pageNumber===evidence?.pageNumber);
  const quote=evidence?.quote || '';
- const matchingRows=page?.lines.flatMap((line,index)=>compact(line.text).includes(compact(quote)) && !!compact(quote)?[index]:[]) || [];
+ // Extraction passes may quote a reconstructed table row with spaces instead of
+ // pipes. Resolve that formatting difference before deriving its examination key.
+ // Keep ambiguous rows ambiguous, and retain decimal signs, bounds and dates.
+ const rowText=(value:string)=>compact(value).replace(/[|｜]/g,'');
+ let matchingRows=page?.lines.flatMap((line,index)=>compact(line.text).includes(compact(quote)) && !!compact(quote)?[index]:[]) || [];
+ if(!matchingRows.length && rowText(quote)) {
+  matchingRows=page?.lines.flatMap((line,index)=>rowText(line.text).includes(rowText(quote))?[index]:[]) || [];
+ }
  const rowIndex=matchingRows.length===1?matchingRows[0]:-1;
  if(matchingRows.length>1)risks.push('source_row_ambiguous');
  let context='';let contextStart=0;

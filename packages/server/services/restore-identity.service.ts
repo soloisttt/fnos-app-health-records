@@ -2,6 +2,7 @@ import type {DatabaseSync} from "node:sqlite";
 import {createError} from 'h3';
 import { getDatabase, runInTransaction } from '../database/client';
 import { isAdministrator, type RequestUser } from '../domain/request-user';
+import { grantRestoredMembers, memberIdsInBackup } from './restore-access.service';
 import { createId } from '../utils/identifier';
 
 export type RestoredLocalCredential = {
@@ -24,11 +25,13 @@ export function captureRestoringAdministratorCredential(user:RequestUser):Restor
  if(!row) throw new Error('当前管理员凭据不可用');
  return row;
 }
-export function rebindRestoredAdministrator(user:RequestUser,credential:RestoredLocalCredential|null=null,strategy:'same'|'cross'='cross',identitySubject?:string,database?:DatabaseSync) {
+export function rebindRestoredAdministrator(user:RequestUser,credential:RestoredLocalCredential|null=null,strategy:'same'|'cross'='cross',identitySubject?:string,database?:DatabaseSync,takeover=false) {
  if(!user.authenticated||!isAdministrator(user)) throw new Error('恢复需要已验证的管理员');
  if(user.provider==='local'&&!credential) throw new Error('缺少管理员凭据');
  const db=database || getDatabase();
+ if(takeover && (strategy!=='cross' || user.provider!=='local')) throw new Error('无效的恢复接管策略');
  let targetId=user.id;
+ let memberPermissionCount=0;
  runInTransaction(db,()=>{
   if(strategy==='cross') {
    for(const row of db.prepare('SELECT id FROM users').all() as Array<{id:string}>) {
@@ -60,9 +63,10 @@ export function rebindRestoredAdministrator(user:RequestUser,credential:Restored
   if(credential) db.prepare("DELETE FROM user_identities WHERE user_id=? AND provider='local'").run(targetId);
   const subject=credential?.username||identitySubject;
   if(subject) db.prepare(`INSERT INTO user_identities(id,user_id,provider,subject) VALUES(?,?,?,?) ON CONFLICT(provider,subject) DO UPDATE SET user_id=excluded.user_id`).run(createId('identity'),targetId,user.provider,subject);
+  if(takeover) memberPermissionCount=grantRestoredMembers(db,targetId,memberIdsInBackup(db));
   db.exec('DELETE FROM auth_sessions; DELETE FROM login_attempts');
-  db.prepare(`INSERT INTO audit_logs(id,actor_user_id,action,target_type,target_id,detail_json) VALUES(?,?,'backup.identity_restore','user',?,?)`).run(createId('audit'),targetId,targetId,JSON.stringify({strategy,memberPermissionCount:0}));
+  db.prepare(`INSERT INTO audit_logs(id,actor_user_id,action,target_type,target_id,detail_json) VALUES(?,?,'backup.identity_restore','user',?,?)`).run(createId('audit'),targetId,targetId,JSON.stringify({strategy,memberPermissionCount,accessPolicy:takeover?'admin_takeover':strategy==='same'?'preserve':'isolate'}));
  });
- return {userId:targetId,memberPermissionCount:0,disabledLocalAccountCount:0,previousAdminCount:0,strategy};
+ return {userId:targetId,memberPermissionCount,accessPolicy:takeover?'admin_takeover' as const:strategy==='same'?'preserve' as const:'isolate' as const,disabledLocalAccountCount:0,previousAdminCount:0,strategy};
 }
 export const rebindRestoredGatewayAdministrator=rebindRestoredAdministrator;

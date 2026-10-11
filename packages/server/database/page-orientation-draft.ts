@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-// Unnumbered draft: retain the OCR orientation when a page is rotated without re-recognition.
+// Formal migration v18; also idempotent for databases that installed the earlier draft.
 export function ensurePageOrientationDraft(db: DatabaseSync) {
   const columns = db.prepare('PRAGMA table_info(report_pages)').all() as Array<{ name: string }>;
   if (columns.some(column => column.name === 'ocr_rotation')) return;

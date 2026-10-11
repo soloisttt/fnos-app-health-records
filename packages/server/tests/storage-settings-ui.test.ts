@@ -6,7 +6,9 @@ test('storage settings reuses themed controls and keeps migration confirmation',
   const page = readFileSync(new URL('../../ui/src/pages/settings/StorageSettingsPage.vue', import.meta.url), 'utf8');
   const menu = readFileSync(new URL('../../ui/src/pages/SettingsPage.vue', import.meta.url), 'utf8');
   assert.match(menu, /to="\/me\/storage"><HardDrive/);
-  assert.match(menu, /to="\/me\/data"><DatabaseBackup/);
+  const maintenance = readFileSync(new URL('../../ui/src/pages/settings/MaintenanceSettingsPage.vue', import.meta.url), 'utf8');
+  assert.match(menu, /to="\/me\/maintenance"/);
+  assert.match(maintenance, /to="\/me\/data"><DatabaseBackup/);
   assert.match(page, /<FormSelect v-model="selectedRoot"/);
   assert.doesNotMatch(page, /<select\b/);
   assert.match(page, /confirm\.ask\(/);

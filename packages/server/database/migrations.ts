@@ -1,3 +1,4 @@
+import { ensurePageOrientationDraft } from "./page-orientation-draft";
 import type { DatabaseSync } from "node:sqlite";
 import {
   isAiReportStructuredSectionCompatible,
@@ -414,6 +415,12 @@ export const databaseMigrations: DatabaseMigration[] = [
       db.exec(institutionTrendRuleSchemaSql);
       db.exec(uploadReceiptSchemaSql);
     }
+  },
+  {
+    version: 18,
+    name: "preserve_ocr_page_orientation",
+    checksum: "manual:018-preserve-ocr-page-orientation",
+    up: ensurePageOrientationDraft
   }
 ];
 

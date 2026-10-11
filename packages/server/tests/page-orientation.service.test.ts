@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { closeDatabaseForTests, getDatabase } from '../database/client';
-import { ensurePageOrientationDraft } from '../database/page-orientation-draft';
+import { databaseMigrations } from '../database/migrations';
 import type { RequestUser } from '../domain/request-user';
 import { processNextJob } from '../services/job-runner.service';
 import { getReportPageOcrDetail, getReportPagePreviewFile, rotateReportPage } from '../services/records.service';
@@ -87,14 +87,37 @@ test('saving one page orientation preserves OCR and AI results without queuing r
   }
 });
 
-test('the unnumbered orientation draft backfills old OCR orientation once', () => {
+test('formal v18 migration backfills old OCR orientation once and preserves installed drafts', () => {
   const db = new DatabaseSync(':memory:');
   try {
     db.exec("CREATE TABLE report_pages(id TEXT PRIMARY KEY,rotation INTEGER); CREATE TABLE ocr_results(page_id TEXT); INSERT INTO report_pages VALUES('old',90); INSERT INTO ocr_results VALUES('old')");
-    ensurePageOrientationDraft(db);
+    databaseMigrations.find(m => m.version === 18)!.up(db);
     assert.deepEqual({ ...db.prepare("SELECT rotation,ocr_rotation AS ocrRotation FROM report_pages WHERE id='old'").get() }, { rotation: 90, ocrRotation: 90 });
     db.prepare("UPDATE report_pages SET rotation=180 WHERE id='old'").run();
-    ensurePageOrientationDraft(db);
+    databaseMigrations.find(m => m.version === 18)!.up(db);
     assert.equal(db.prepare("SELECT ocr_rotation FROM report_pages WHERE id='old'").get()!.ocr_rotation, 90);
   } finally { db.close(); }
+});
+
+
+test('v17 installation upgrades to v18 with a backup and preserves data on repeat startup', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orientation-v18-upgrade-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = dir;
+  try {
+    const db = getDatabase();
+    db.exec("DELETE FROM schema_migrations WHERE version=18; ALTER TABLE report_pages DROP COLUMN ocr_rotation; INSERT INTO users(id,display_name) VALUES('migration-fixture','fixture')");
+    closeDatabaseForTests();
+    const upgraded = getDatabase();
+    assert.equal(upgraded.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()!.v, 18);
+    assert.ok(upgraded.prepare('PRAGMA table_info(report_pages)').all().some(c => c.name === 'ocr_rotation'));
+    assert.ok(upgraded.prepare("SELECT id FROM users WHERE id='migration-fixture'").get());
+    assert.ok(readdirSync(join(dir, 'backups/db')).some(name => name.includes('v17-to-v18')));
+    closeDatabaseForTests();
+    assert.ok(getDatabase().prepare("SELECT id FROM users WHERE id='migration-fixture'").get());
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(dir, {recursive:true, force:true});
+  }
 });

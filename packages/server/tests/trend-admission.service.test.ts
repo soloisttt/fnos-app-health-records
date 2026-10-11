@@ -292,3 +292,36 @@ test('pipeline keeps uncertain visual values pending and only converts a printed
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test('detail and trends use the confirmed examination date even when the report date is absent', () => {
+  const dir=mkdtempSync(join(tmpdir(),'health-time-admission-'));
+  const previous=process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR=dir;
+  try {
+    const db=getDatabase();
+    db.prepare('INSERT INTO users (id,display_name) VALUES (?,?)').run(user.id,user.displayName);
+    db.prepare("INSERT INTO health_members (id,display_name,relationship,created_by) VALUES ('time-member','合成成员','self',?)").run(user.id);
+    db.prepare("INSERT INTO member_permissions (member_id,user_id,permission,granted_by) VALUES ('time-member',?,'manager',?)").run(user.id,user.id);
+    db.prepare("INSERT INTO reports (id,member_id,created_by,title,report_type,status) VALUES ('time-report','time-member',?,'合成报告','laboratory','needs_review')").run(user.id);
+    db.prepare("INSERT INTO observations (id,report_id,item_name,result_text,numeric_value,unit,evidence_json) VALUES ('time-observation','time-report',?,'2',2,'U/L',?)").run(raw.itemName,raw.evidenceJson);
+    normalizeReportObservations('time-report');
+    db.prepare("INSERT INTO report_examinations (id,report_id,source_key,occurred_at,time_kind,time_precision,confirmation_status) VALUES ('time-exam','time-report','synthetic-time','2026-01-02','examined','date','confirmed')").run();
+    db.prepare("INSERT INTO observation_examinations (observation_id,examination_id,assignment_source) VALUES ('time-observation','time-exam','manual')").run();
+    const detail=()=>getReportDetail(user,'time-report');
+    const series=()=>listTrendSeries(user,'time-member');
+    assert.equal(detail().observations[0].displayTier,'primary');
+    assert.equal(series()[0].pointCount,1);
+    assert.equal(detail().status,'needs_review','time confirmation does not archive a report');
+    // A pending examination cannot borrow the report date to enter either display.
+    db.prepare("UPDATE reports SET report_issued_at='2026-01-03' WHERE id='time-report'").run();
+    db.prepare("UPDATE report_examinations SET confirmation_status='pending',occurred_at=NULL WHERE id='time-exam'").run();
+    assert.equal(detail().observations[0].displayTier,'secondary');
+    assert.equal(detail().observations[0].displayReason,'请先确认检查时间');
+    assert.equal(series().length,0);
+  } finally {
+    closeDatabaseForTests();
+    if(previous===undefined)delete process.env.STORAGE_DIR;else process.env.STORAGE_DIR=previous;
+    rmSync(dir,{recursive:true,force:true});
+  }
+});

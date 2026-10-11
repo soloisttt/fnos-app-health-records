@@ -1517,6 +1517,24 @@ test("blanks conflicting clinical fields instead of silently picking one when me
   }, () => ["空腹血糖 5.18 mmol/L 参考范围 3.9-6.1"]);
 });
 
+test("merges one source row quoted with different table separators instead of retaining a pending copy", async () => {
+  await withReport(1, async ({ reportId }) => {
+    const base = { sectionName: '检验', itemCode: null, itemName: '肌酸激酶', normalizedName: null,
+      resultText: '83', numericValue: 83, unit: 'U/L', referenceLow: null, referenceHigh: null,
+      referenceText: null, abnormalFlag: null, method: null } as const;
+    const observations = [
+      {...base, evidence: [{pageNumber: 1, quote: '肌酸激酶 | 83 | U/L'}]},
+      {...base, evidence: [{pageNumber: 1, quote: '肌酸激酶 83 U/L'}]}
+    ];
+    for (const rows of [observations, [...observations].reverse()]) {
+      const merged = deduplicateReportObservations(reportId, rows);
+      assert.equal(merged.length, 1);
+      assert.equal(merged[0].evidence[0].pageNumber, 1);
+      assert.match(merged[0].evidence[0].quote, /肌酸激酶/);
+    }
+  }, () => ['检验日期：2026-01-03', '肌酸激酶 | 83 | U/L']);
+});
+
 test("preserves summary and detail aliases when their examination identity cannot be verified", async () => {
   await withReport(1, async ({ reportId }) => {
     const base = {

@@ -456,6 +456,38 @@ class TableRetryTest(unittest.TestCase):
                     self.assertEqual(budget['cellRemaining'],0)
                     self.assertEqual(budget['cellUnresolved'],0 if expected=='0-99' else 1)
 
+    def test_high_confidence_fraction_unit_after_reference_requires_pixel_consensus(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest('OpenCV runtime is unavailable')
+        import tempfile
+        lines = [ocr_line(text, .99, col * 200, y, col * 200 + 90, y + 20)
+                 for y, cells in [(10, ['Test', 'Result', 'Reference', 'Unit']),
+                                  (60, ['Synthetic', '18.2', '0-99', '7/6'])]
+                 for col, text in enumerate(cells)]
+        regions = worker.header_retry_regions(lines, 900, 150)
+        self.assertEqual([r['kind'] for r in regions], ['unit'])
+        self.assertIs(regions[0]['original'], lines[-1])
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'synthetic.png'
+            cv2.imwrite(str(path), np.full((150, 900, 3), 255, dtype=np.uint8))
+            for replies, expected in [(('g/ L', 'g/L'), 'g/L'),
+                                      (('g/L', 'U/L'), '7/6'),
+                                      (('7/6', '7/6'), '7/6')]:
+                answers = iter(replies)
+                def engine(_):
+                    return [([[90,12],[240,12],[240,60],[90,60]], next(answers), .99)], None
+                budget = worker.empty_retry_budget()
+                result, attempts = worker.retry_missing_header_cells(engine, path, lines, budget)
+                self.assertEqual([l['text'] for l in result], [l['text'] for l in lines[:-1]] + [expected])
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(budget['cellUnresolved'], 0 if expected == 'g/L' else 1)
+        missing = [ocr_line('Another', .99, 0, 100, 90, 120)]
+        first = worker.header_retry_regions(lines + missing, 900, 150, limit=1)
+        self.assertIs(first[0]['original'], lines[-1])
+
     def test_pdf_fusion_keeps_repeated_results_units_and_signs_at_distinct_positions(self):
         source = [ocr_line(text, 1, 10, index * 30, 50, index * 30 + 20)
                   for index, text in enumerate(["0", "0", "-", "-", "U/L", "U/L", "+", "±"])]

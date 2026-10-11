@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createUuid as createItemId } from "../utils/uuid";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import {
   ArrowUp, ArrowDown, Camera, CheckCircle2, ChevronRight, CircleAlert, FileImage, FileText,
@@ -271,15 +272,6 @@ function supported(file: File) {
 function canPreview(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type)
     || /\.(jpe?g|png|webp)$/i.test(file.name);
-}
-
-/* crypto.randomUUID 仅在安全上下文（HTTPS/localhost）可用，HTTP 内网访问或旧浏览器会抛 TypeError，退回 getRandomValues */
-function createItemId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
-  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 type FnosAuthorizationFlow = "directory" | "files";
