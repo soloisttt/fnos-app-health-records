@@ -1,6 +1,6 @@
-import { isCurrentResultColumn, isExplicitOcrTableHeader } from './ocr-table-columns';
+import { isCurrentResultColumn, isExplicitOcrTableHeader, normalizeOcrTableHeader } from './ocr-table-columns';
 
-export type OcrTableCell = { table: string; row: number; column: number; columns: number };
+export type OcrTableCell = { table: string; row: number; column: number; columns: number; headerRow?: number };
 type PositionedText = { id?: unknown; text?: unknown; box?: unknown; confidence?: unknown; tableUnsafe?: boolean; tableCell?: unknown };
 
 function geometry(box: unknown) {
@@ -33,7 +33,7 @@ export function duplicatedOcrCodeName(text: string): string | null {
 export function duplicatedOcrResultName(text: string, result: string): string | null {
   if (!result || !text.endsWith(result) || !/\d/.test(result)) return null;
   const name = text.slice(0, -result.length).trim();
-  return name.length >= 2 && /[\u3400-\u9fff)）]$/.test(name) ? name : null;
+  return name.length >= 2 && /[\u3400-\u9fff)）\]]$/.test(name) ? name : null;
 }
 
 /**
@@ -42,17 +42,61 @@ export function duplicatedOcrResultName(text: string, result: string): string | 
  * Only unique name/result pairs are promoted. Missing/conflicting results stay
  * marked unsafe, and useful model cells are never overwritten.
  */
-export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]): T[] {
-  const items = lines.flatMap((line, index) => {
+export function recoverHeaderAlignedTable<T extends PositionedText>(
+  lines: T[],
+  canJoinName?: (first: string, second: string) => boolean,
+): T[] {
+  // Retry OCR may repeat a value with different spacing. Only coalesce equal
+  // text occupying the same area; equal values on other rows remain separate.
+  const unique: T[] = [];
+  for (const line of lines) {
     const box = geometry(line.box);
-    return box && typeof line.text === 'string' ? [{ line, index, box, text: line.text.trim() }] : [];
+    const key = String(line.text || '').normalize('NFKC').replace(/\s+/g, '');
+    const index = unique.findIndex(previous => {
+      const prior = geometry(previous.box);
+      if (!box || !prior || key !== String(previous.text || '').normalize('NFKC').replace(/\s+/g, '')) return false;
+      const overlap = Math.max(0, Math.min(box.right, prior.right) - Math.max(box.left, prior.left))
+        * Math.max(0, Math.min(box.bottom, prior.bottom) - Math.max(box.top, prior.top));
+      return overlap / Math.min((box.right-box.left)*box.height,(prior.right-prior.left)*prior.height) >= .8;
+    });
+    if (index < 0) unique.push(line);
+    else if (Number(line.confidence) > Number(unique[index].confidence)) unique[index] = { ...line, id: unique[index].id };
+  }
+  if (unique.length !== lines.length) lines = unique;
+  const originalItems = lines.flatMap((line, index) => {
+    const box = geometry(line.box);
+    return box && typeof line.text === 'string' ? [{ line, index, members:[index], box, text: normalizeOcrTableHeader(line.text) }] : [];
+  });
+  const joined = new Set<number>();
+  const items = [...originalItems].sort((a,b)=>a.box.top-b.box.top).flatMap(item => {
+    if (joined.has(item.index)) return [];
+    const continuation = originalItems.filter(next => next.index !== item.index && !joined.has(next.index)
+      && !validOcrTableCell(item.line.tableCell) && !validOcrTableCell(next.line.tableCell)
+      && next.box.top >= item.box.bottom - item.box.height*.2 && next.box.top-item.box.bottom <= item.box.height*.8
+      && Math.abs(next.box.x-item.box.x) <= Math.max(next.box.height,item.box.height)
+      && /^(项目名称|检验项目|检验结果|参考范围|参考区间|ReferenceRange)$/i.test(item.text+next.text));
+    if (continuation.length !== 1) return [item];
+    const next=continuation[0]; joined.add(next.index);
+    const box=geometry([Math.min(item.box.left,next.box.left),item.box.top,Math.max(item.box.right,next.box.right),next.box.bottom])!;
+    return [{...item,members:[item.index,next.index],box,text:normalizeOcrTableHeader(item.text+next.text)}];
   });
   const headings = items.filter(item => headerLabel.test(item.text));
   const anchors = headings.filter(item => nameHeader.test(item.text));
   const bands = new Map<string, typeof items>();
   for (const anchor of anchors) {
-    const band = headings.filter(item => Math.abs(item.box.y - anchor.box.y) <= Math.max(item.box.height, anchor.box.height) * .9)
-      .sort((a, b) => a.box.x - b.box.x);
+    // Estimate the baseline before grouping: a horizontal-only prefilter loses
+    // distant columns even on a mildly tilted wide report.
+    const slopes = [0, ...headings.flatMap(item => {
+      const dx = item.box.x - anchor.box.x;
+      const slope = (item.box.y - anchor.box.y) / dx;
+      return Math.abs(dx) > anchor.box.height * 3 && Math.abs(slope) <= .18 ? [slope] : [];
+    })];
+    const fits = slopes.map(slope => {
+      const members = headings.filter(item => Math.abs(item.box.y - anchor.box.y - slope * (item.box.x - anchor.box.x))
+        <= Math.max(item.box.height, anchor.box.height) * .9);
+      return { slope, members, residual: members.reduce((sum, item) => sum + Math.abs(item.box.y - anchor.box.y - slope * (item.box.x - anchor.box.x)), 0) };
+    }).sort((a, b) => b.members.length - a.members.length || a.residual - b.residual || Math.abs(a.slope) - Math.abs(b.slope));
+    const band = fits[0].members.sort((a, b) => a.box.x - b.box.x);
     bands.set(band.map(item => item.index).join(','), band);
   }
   const mapping = new Map<number, OcrTableCell>();
@@ -73,14 +117,14 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]):
       const headers = band.slice(groupStarts[groupIndex], groupStarts[groupIndex + 1]);
       const nameCol = headers.findIndex(item => nameHeader.test(item.text));
       const resultCols = headers.flatMap((item, i) => isCurrentResultColumn(item.text) ? [i] : []);
-      if (nameCol < 0 || resultCols.length !== 1 || headers.length < 3
+      if (nameCol < 0 || resultCols.length !== 1 || headers.length < 2
         || !isExplicitOcrTableHeader(headers.map(item => item.text).join(' | '))
         || headers.some(item => /历史|上次|前次/.test(item.text))) continue;
       const anchor = headers[nameCol];
       const height = Math.max(...headers.map(item => item.box.height));
       const first = headers[0], last = headers[headers.length - 1];
       const slope = (last.box.y - first.box.y) / (last.box.x - first.box.x);
-      if (!Number.isFinite(slope) || Math.abs(slope) > .08) continue;
+      if (!Number.isFinite(slope) || Math.abs(slope) > .18) continue;
       const y = (item: typeof anchor) => item.box.y - slope * (item.box.x - anchor.box.x);
       // Do not silently drop unrecognised reference/history/date/chart columns.
       // Dedicated matrix and device-chart parsers retain their full header.
@@ -100,11 +144,54 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]):
       const nextHeader = anchors.filter(item => y(item) > y(anchor) + height
         && item.box.x >= edges[0] && item.box.x < edges[edges.length - 1])
         .reduce((bottom, item) => Math.min(bottom, y(item) - item.box.height / 2), Infinity);
-      const body = items.filter(item => y(item) > y(anchor) + Math.min(item.box.height, anchor.box.height) / 2
+      let body = items.filter(item => y(item) > y(anchor) + Math.min(item.box.height, anchor.box.height) / 2
         && y(item) < nextHeader && column(item) >= 0 && !recognitionMarker.test(item.text));
-      // Protect model structure per region, so a good neighbouring table does
-      // not disable fallback on the rest of the page.
-      if ([...headers, ...body].some(item => validOcrTableCell(item.line.tableCell) && !item.line.tableUnsafe)) continue;
+      const modelHeader = headers.some(item => validOcrTableCell(item.line.tableCell));
+      const trusted = (item: typeof anchor) => validOcrTableCell(item.line.tableCell) && !item.line.tableUnsafe
+        && (modelHeader || item.line.tableCell.columns === headers.length && item.line.tableCell.column === column(item));
+      // A wrapped project name belongs to one row only when its full vertical
+      // band contains one independent result. OCR boxes can overlap slightly.
+      const namePieces = body.filter(item => column(item) === nameCol && !trusted(item)
+        && /^[\p{L}\p{N}（）().+%\/-]+$/u.test(item.text) && !administrativeLabel.test(item.text)
+        && !headerLabel.test(item.text));
+      const wraps = namePieces.flatMap(first => namePieces.flatMap(second => {
+        const h = Math.min(first.box.height, second.box.height);
+        if (first === second || !/\p{L}/u.test(first.text)
+          || second.box.top < first.box.bottom - h * .2 || second.box.top - first.box.bottom > h * .7
+          || Math.abs(first.box.left - second.box.left) > h * .6
+          || /^(?:请|建议|备注|说明|参考|审核|签名|报告|咨询)/.test(second.text)
+          || !canJoinName?.(first.text, second.text)) return [];
+        const band = body.filter(item => item !== first && item !== second
+          && item.box.bottom > first.box.top - h * .25 && item.box.top < second.box.bottom + h * .25);
+        if (band.some(item => column(item) === nameCol)) return [];
+        const results = band.filter(item => column(item) === resultCols[0]);
+        if (results.length !== 1 || !resultText.test(results[0].text)
+          || results[0].box.top < first.box.top - h * .25
+          || results[0].box.bottom > second.box.bottom + h * .25) return [];
+        return [{ first, second }];
+      }));
+      const uniqueWraps = wraps.filter(pair => wraps.every(other => other === pair
+        || ![other.first, other.second].some(item => item === pair.first || item === pair.second)));
+      body = body.filter(item => !uniqueWraps.some(pair => pair.second === item)).map(item => {
+        const pair = uniqueWraps.find(pair => pair.first === item);
+        if (!pair) return item;
+        const box = geometry([Math.min(item.box.left, pair.second.box.left), item.box.top,
+          Math.max(item.box.right, pair.second.box.right), pair.second.box.bottom])!;
+        return { ...item, box, members: [...item.members, ...pair.second.members], text: item.text + pair.second.text };
+      });
+      const trustedHeaders = headers.filter(trusted);
+      const existingTable = trustedHeaders[0]?.line.tableCell as OcrTableCell | undefined;
+      // Reuse a model header only when column ownership agrees. Never overwrite
+      // good cells, but let failed rows in that same table use geometry.
+      if (existingTable && trustedHeaders.some(item => {
+        const cell = item.line.tableCell as OcrTableCell;
+        return cell.table !== existingTable.table || cell.row !== existingTable.row
+          || cell.columns !== headers.length || cell.column !== headers.indexOf(item);
+      })) continue;
+      let recoveredRow = existingTable ? Math.max(...items.flatMap(item => {
+        const cell = item.line.tableCell;
+        return validOcrTableCell(cell) && cell.table === existingTable.table ? [cell.row] : [];
+      })) + 1 : 1;
       const rowNames = body.filter(item => column(item) === nameCol && /\p{L}/u.test(item.text)
         && !/[：:；;。]/.test(item.text) && !administrativeLabel.test(item.text))
         .sort((a, b) => y(a) - y(b));
@@ -112,9 +199,18 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]):
       const conflicting = new Set<number>();
       rowNames.forEach((name, rowIndex) => {
         const sameRow = body.filter(item => Math.abs(y(item) - y(name)) < Math.min(item.box.height, name.box.height) * .65);
+        if (sameRow.some(trusted)) return;
+        // A lone label may open a new clinical section. Padding it into an
+        // empty table row would hide that boundary from downstream parsing.
+        if (sameRow.every(item => column(item) === nameCol)) return;
+        const rowNumber = recoveredRow++;
         const results = sameRow.filter(item => column(item) === resultCols[0] && !/^[↑↓↗↘*★☆]+$/.test(item.text));
         if (sameRow.filter(item => column(item) === nameCol && /\p{L}/u.test(item.text)).length !== 1) return;
         const result = results[0];
+        const gluedCodeResult = results.length === 0
+          && /^.+\[[A-Za-z][A-Za-z0-9.\/%# -]*\]\s*[<>≤≥]?\s*\d+(?:\.\d+)?$/.test(name.text)
+          && name.box.right > edges[resultCols[0]] + height
+          && name.box.right < edges[resultCols[0] + 1];
         // A merged name/value OCR box is usable only if the independent result
         // box overlaps it and repeats the exact printed suffix.
         const duplicatedResult = result && duplicatedOcrResultName(name.text, result.text)
@@ -122,11 +218,11 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]):
         const duplicatedCode = nameCol > 0 && prefixHeader.test(headers[nameCol - 1].text)
           && duplicatedOcrCodeName(name.text) && name.box.left < edges[nameCol] && name.box.right > edges[nameCol];
         const crossed = [name, ...results].some(item => {
-          if (item === name && (duplicatedResult || duplicatedCode)) return false;
+          if (item === name && (duplicatedResult || duplicatedCode || gluedCodeResult)) return false;
           const col = column(item);
           return (Math.min(item.box.right, edges[col + 1]) - Math.max(item.box.left, edges[col])) / (item.box.right - item.box.left) < .8;
         });
-        const rowUnsafe = crossed || results.length !== 1 || !resultText.test(result?.text || '')
+        const rowUnsafe = crossed || (!gluedCodeResult && (results.length !== 1 || !resultText.test(result?.text || '')))
           || [name, ...results].some(item => item.line.confidence != null && Number(item.line.confidence) < .65)
           || headers.some((header, col) => header.text === '单位' && sameRow.filter(item => column(item) === col).length > 1);
         const nextName = rowNames[rowIndex + 1];
@@ -135,22 +231,24 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(lines: T[]):
           const col = column(item);
           const auxiliary = ![nameCol, resultCols[0]].includes(col) && headers[col]?.text !== '单位';
           if (sameRow.includes(item) || (auxiliary && y(item) >= y(name) && y(item) + item.box.height / 2 < bottom)) {
-            if (rows.has(item.index) || conflicting.has(item.index)) { rows.delete(item.index); conflicting.add(item.index); continue; }
-            rows.set(item.index, { row: rowIndex + 1, column: col, unsafe: rowUnsafe });
+            for (const index of item.members) {
+              if (rows.has(index) || conflicting.has(index)) { rows.delete(index); conflicting.add(index); continue; }
+              if (!trusted(item)) rows.set(index, { row: rowNumber, column: col, unsafe: rowUnsafe });
+            }
           }
         }
       });
       if (!rows.size) continue;
       while (usedTables.has(`table_${tableNumber}`) && tableNumber >= 0) tableNumber--;
       if (tableNumber < 0) break;
-      const table = `table_${tableNumber--}`;
+      const table = existingTable?.table ?? `table_${tableNumber--}`;
       usedTables.add(table);
       headers.forEach((item, column) => {
-        mapping.set(item.index, { table, row: 0, column, columns: headers.length });
+        if (!trusted(item)) item.members.forEach(index=>mapping.set(index, { table, row: existingTable?.row ?? 0, column, columns: headers.length }));
         coveredHeaders.add(item.index);
       });
       rows.forEach(({ unsafe: rowUnsafe, ...cell }, index) => {
-        mapping.set(index, { table, ...cell, columns: headers.length });
+        mapping.set(index, { table, ...cell, columns: headers.length, ...(existingTable ? {headerRow:existingTable.row} : {}) });
         if (rowUnsafe) unsafe.add(index);
       });
     }
@@ -165,5 +263,26 @@ export function validOcrTableCell(value: unknown): value is OcrTableCell {
   return typeof v.table === 'string' && /^table_\d{1,2}$/.test(v.table)
     && Number.isInteger(v.row) && v.row >= 0 && v.row <= 1024
     && Number.isInteger(v.columns) && v.columns >= 2 && v.columns <= 64
+    && (v.headerRow === undefined || Number.isInteger(v.headerRow) && v.headerRow >= 0 && v.headerRow <= v.row)
     && Number.isInteger(v.column) && v.column >= 0 && v.column < v.columns;
+}
+
+/** Independent coverage check: numbers under printed result headers that never
+ * entered a candidate. It reports uncertainty, never manufactures a result. */
+export function uncoveredOcrResultIds(lines: PositionedText[], covered: Set<string>): string[] {
+  const items = lines.flatMap(line => {
+    const box = geometry(line.box);
+    return box && typeof line.text === 'string' ? [{line,box,text:normalizeOcrTableHeader(line.text)}] : [];
+  });
+  const headers = items.filter(item => isCurrentResultColumn(item.text) && headerLabel.test(item.text));
+  return items.filter(item => typeof item.line.id === 'string' && !covered.has(item.line.id) && resultText.test(item.text)
+    && headers.some(header => {
+      const dy = item.box.y - header.box.y;
+      if (dy <= header.box.height || Math.abs(item.box.x-header.box.x) > Math.max(header.box.height*3,header.box.right-header.box.left)) return false;
+      if (headers.some(next => next !== header && next.box.y > header.box.y && next.box.y < item.box.y
+        && Math.abs(next.box.x-header.box.x) < header.box.height*3)) return false;
+      return items.some(name => name.box.right <= item.box.left && /\p{L}/u.test(name.text)
+        && !administrativeLabel.test(name.text) && !headerLabel.test(name.text)
+        && Math.abs(name.box.y-item.box.y) <= Math.max(name.box.height,item.box.height));
+    })).map(item=>String(item.line.id));
 }

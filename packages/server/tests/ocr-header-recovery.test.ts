@@ -3,10 +3,164 @@ import test from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeDatabaseForTests } from '../database/client.ts';
-import { duplicatedOcrResultName, recoverHeaderAlignedTable } from '../services/ocr-table-structure.ts';
-import { rebuildOcrPages } from '../services/ai-input-planner.service.ts';
+import { closeDatabaseForTests, getDatabase } from '../database/client.ts';
+import { duplicatedOcrResultName, recoverHeaderAlignedTable, uncoveredOcrResultIds } from '../services/ocr-table-structure.ts';
+import { rebuildOcrPages, observationFieldConfidenceIssue, trustedOcrNameReviewCandidate } from '../services/ai-input-planner.service.ts';
 import { mappedOcrMeasurement, mappedOcrResultCells } from '../services/ocr-table-columns.ts';
+
+test('every headerless field retains its own confidence and weak references do not reject the result', () => withPlanner(() => {
+  for (const weak of [0,1,2,3]) {
+    const raw = ['ALT','12','U/L','0-40'].map((text,index)=>({id:`raw-${index}`,text,
+      box:[index*200,50,index*200+100,70],confidence:index===weak?.1:.99}));
+    const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+    const row = page.lines[0];
+    assert.equal(row.candidate,true);
+    assert.equal(row.localObservations.length,weak===3?1:0,`field ${weak}`);
+    const issue = observationFieldConfidenceIssue(row,{itemName:'ALT',resultText:'12',unit:'U/L'});
+    if (weak<3) assert.ok(issue.fields.includes((['item','result','unit'] as const)[weak]));
+    else {
+      assert.deepEqual(issue.fields,[]);
+      assert.equal(issue.referenceConfidence,.1);
+      assert.equal(row.localObservations[0].referenceLow,null);
+      assert.equal(row.localObservations[0].referenceHigh,null);
+      assert.equal(row.localObservations[0].referenceText,'0-40');
+      assert.equal(row.localObservations[0].unit,'U/L');
+    }
+  }
+}));
+
+test('unparsed suspicious values still expose field confidence for AI response admission', () => withPlanner(() => {
+  const raw = ['合成测定项目','O.12','U/L','0-40'].map((text,index)=>({id:`raw-${index}`,text,
+    box:[index*200,50,index*200+150,70],confidence:index===1?.2:.99}));
+  const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const row=page.lines[0];
+  assert.equal(row.candidate,true);
+  assert.equal(row.tableStructureUnsafe,true);
+  assert.equal(row.localObservations.length,0);
+  assert.deepEqual(observationFieldConfidenceIssue(row,{itemName:'合成测定项目',resultText:'0.12',unit:'U/L'}).fields,['result']);
+  assert.match(row.text,/O\.12/,'the uncertain OCR token remains unchanged');
+  for (const [name,value] of [['姓名','O.12'],['合成测定项目','OI.12'],['设备型号','CAL8000'],['合成测定项目','O']]) {
+    const [negative] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify([
+      {id:'name',text:name,box:[0,50,150,70]}, {id:'value',text:value,box:[200,50,300,70]},
+    ])}]);
+    assert.ok(negative.lines.every(line=>!line.tableStructureUnsafe),`${name} ${value}`);
+  }
+}));
+
+test('synthetic body-composition and bone-score layouts retain confidence for each original value', () => withPlanner(() => {
+  const cases = [
+    [
+      {id:'heading',text:'人体成分分析报告',box:[0,0,250,20]},
+      {id:'name',text:'身高',box:[300,80,380,100]},
+      {id:'value',text:'170cm',box:[300,50,380,70]},
+    ],
+    [
+      {id:'heading',text:'超声骨密度检测报告',box:[0,0,250,20]},
+      {id:'name',text:'T值',box:[0,40,50,60]},
+      {id:'other-name',text:'Z值',box:[200,40,250,60]},
+      {id:'value',text:'-1.9',box:[100,120,150,140]},
+      {id:'other-value',text:'-1.7',box:[100,155,150,175]},
+      {id:'footer',text:'结果分析',box:[0,205,100,225]},
+    ],
+  ];
+  for (const raw of cases) for (const weak of [false,true]) {
+    const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw.map(line=>({
+      ...line,confidence:weak && line.id==='value'?.45:.99,
+    })))}]);
+    const row=page.lines.find(line=>line.id.startsWith('body_composition_layout_') || line.id.startsWith('quantitative_ultrasound_bone_layout_'))!;
+    assert.ok(row);
+    assert.ok((row.confidence || 0)>.65,'the former row mean would have admitted this value');
+    assert.equal(row.sourceCells.find(cell=>cell.sourceLineIds.includes('value'))?.confidence,weak?.45:.99);
+    assert.equal(row.localObservations.length,weak?0:raw.length===3?1:2);
+    if (weak) {
+      assert.ok(row.lowConfidenceFields?.includes('result'));
+      assert.ok(row.localObservationCandidates?.length);
+    }
+  }
+}));
+
+test('name review proposes only one confusable character against a unique installed trusted identity', () => withPlanner(() => {
+  const suggested = trustedOcrNameReviewCandidate('Y-谷氨酰转肽酶');
+  assert.ok(suggested);
+  assert.equal(suggested.originalName,'Y-谷氨酰转肽酶');
+  assert.equal(suggested.suggestedName,'γ-谷氨酰转肽酶');
+  for (const name of ['γ-谷氨酰转肽酶','Y-谷氨酰转移酶','超敏C反应蛋白','C反应蛋白','CAI9-9','Y-合成检测项目']) {
+    assert.equal(trustedOcrNameReviewCandidate(name),null,name);
+  }
+  const raw=coordinatePanel('name',0,0,[['项目名称','结果','单位'],['Y-谷氨酰转肽酶','36.7','U/L']]);
+  const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const row=page.lines.find(line=>line.candidate)!;
+  assert.equal(row.localObservations.length,0);
+  assert.equal(row.nameReviewCandidate?.canonicalKey,suggested.canonicalKey);
+  assert.match(row.text,/Y-谷氨酰/);
+  const db=getDatabase();
+  const other=db.prepare("SELECT id FROM indicator_catalog WHERE canonical_key='liver_alt'").get() as {id:string};
+  db.prepare("INSERT INTO indicator_aliases(id,indicator_id,alias_name,normalized_alias,scope,source,confidence,enabled) VALUES('synthetic-confusable',?,'γ-谷氨酰转肽酶','γ谷氨酰转肽酶','global','user',1,1)").run(other.id);
+  assert.equal(trustedOcrNameReviewCandidate('Y-谷氨酰转肽酶'),null,'ambiguous dictionary identities never suggest a replacement');
+}));
+
+test('mixed categorical rows keep their empty unit and printed reference while hint columns retain arrows', () => withPlanner(() => {
+  const raw=coordinatePanel('mixed',0,0,[
+    ['项目名称','结果','提示','单位','参考范围'],
+    ['尿蛋白','阴性','','','阴性'],
+    ['ALT','95','↑','U/L','10-90'],
+    ['AST','5','↓','U/L','10-90'],
+  ]);
+  const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const facts=page.lines.flatMap(line=>line.localObservations);
+  const categorical=facts.find(fact=>fact.itemName==='尿蛋白')!;
+  assert.equal(categorical.unit,null);
+  assert.equal(categorical.referenceText,'阴性');
+  assert.equal(categorical.sourceMap.unit,undefined);
+  assert.deepEqual(categorical.sourceMap.reference?.sourceLineIds,['mixed-1-4']);
+  assert.equal(facts.find(fact=>fact.itemName==='ALT')?.abnormalFlag,'high');
+  assert.equal(facts.find(fact=>fact.itemName==='AST')?.abnormalFlag,'low');
+}));
+
+test('recovers a wrapped name before header recovery with realistic overlapping OCR boxes', () => withPlanner(() => {
+  const headers = ['项目名称','结果','单位','参考范围'].map((text, column) => ({
+    id:`header-${column}`, text, confidence:.99, box:[[78,218],[858,932],[1128,1204],[1399,1537]][column].flatMap((x, i) => [x, i ? 101 : 58]),
+  }));
+  const data = [
+    {id:'name-a',text:'丙氨酸氨基',confidence:.99,box:[81,151,250,185]},
+    {id:'result',text:'12.5',confidence:.99,box:[856,145,932,187]},
+    {id:'unit',text:'U/L',confidence:.99,box:[1126,145,1190,187]},
+    {id:'reference',text:'0-99',confidence:.99,box:[1395,147,1473,186]},
+    {id:'name-b',text:'转移酶',confidence:.99,box:[79,184,185,223]},
+  ];
+  const rebuild = (raw: typeof data) => rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify([...headers,...raw])}])[0];
+  const row = rebuild(data).lines.find(line => line.localObservations.length)!;
+  assert.equal(row.localObservations[0].itemName,'丙氨酸氨基转移酶');
+  assert.equal(row.localObservations[0].numericValue,12.5);
+  assert.deepEqual(row.sourceCells[0].sourceLineIds,['name-a','name-b']);
+  const separate = rebuild(data.map(line => line.id === 'name-a' ? {...line,text:'ALT'}
+    : line.id === 'name-b' ? {...line,text:'AST'} : line));
+  assert.ok(separate.lines.every(line => !line.sourceCells.some(cell => cell.sourceLineIds.includes('name-a') && cell.sourceLineIds.includes('name-b'))));
+  const ambiguous = rebuild([...data,{id:'second-result',text:'24.6',confidence:.99,box:[856,184,932,223]}]);
+  assert.ok(ambiguous.lines.every(line => !line.localObservations.some(item => item.itemName === '丙氨酸氨基转移酶')));
+}));
+
+test('unaltered continuation columns reuse the original page header while shifts and weak result cells stay for review', () => withPlanner(() => {
+  const first = coordinatePanel('first',0,0,[['项目名称','结果','单位','参考范围'],['合成项目甲','12','U/L','0-30']]);
+  for (const variant of ['aligned','shifted','weak'] as const) {
+    const second = coordinatePanel('second',0,0,[['合成项目乙','24','U/L','0-30']]).map((line,index) => ({...line,
+      tableUnsafe:false,
+      confidence:variant === 'weak' && index === 1 ? .1 : .99,
+      box:line.box.map((value,axis) => value + (variant === 'shifted' && axis % 2 === 0 ? 90 : 0)),
+    }));
+    const [, page] = rebuildOcrPages([
+      {pageId:'first',pageNumber:1,linesJson:JSON.stringify(first)},
+      {pageId:'second',pageNumber:2,linesJson:JSON.stringify(second)},
+    ]);
+    const row = page.lines.find(line => line.candidate)!;
+    assert.ok(row);
+    assert.equal(row.localObservations.length,variant === 'aligned' ? 1 : 0,variant);
+    assert.equal(row.tableHeaderSourcePageNumber,1);
+    assert.deepEqual(row.tableHeaderSourceLineIds,['first-0-0','first-0-1','first-0-2','first-0-3']);
+    if (variant === 'aligned') assert.equal(row.localObservations[0].itemName,'合成项目乙');
+    if (variant === 'weak') assert.equal(row.tableStructureUnsafe,true);
+  }
+}));
 
 test('paired tables retain independent headers, empty cells and evidence groups', () => {
   const storage = mkdtempSync(join(tmpdir(), 'ocr-paired-'));
@@ -54,6 +208,12 @@ function fixture() {
     box: [column * 200, row * 100, column * 200 + (text.includes('≥') ? 210 : 100), row * 100 + 20],
   }] : []));
 }
+
+test('coverage notices unprocessed result cells without treating reference values as results', () => {
+  const raw = fixture();
+  assert.deepEqual(uncoveredOcrResultIds(raw,new Set()),['1-2','2-2']);
+  assert.deepEqual(uncoveredOcrResultIds(raw,new Set(['1-2','2-2'])),[]);
+});
 
 test('recovers explicit result columns without borrowing reference values or altering OCR', () => {
   const storage = mkdtempSync(join(tmpdir(), 'ocr-header-'));
@@ -153,6 +313,86 @@ function withPlanner(fn: () => void) {
     rmSync(storage, { recursive: true, force: true });
   }
 }
+
+test('fits tilted header baselines before selecting columns, with signed slopes and shuffled OCR', () => withPlanner(() => {
+  for (const slope of [.07, -.07, .14, -.14]) {
+    const raw = coordinatePanel('tilted', 0, 100, [
+      ['项目名称', '结果', '参考值', '单位'],
+      ['合成项目甲', '12.5', '0-99', 'U/L'],
+      ['合成项目乙', '24', '0-99', 'U/L'],
+    ], slope).reverse();
+    const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+    const facts = page.lines.flatMap(line => line.localObservations);
+    assert.deepEqual(facts.map(f => f.numericValue).sort((a,b)=>Number(a)-Number(b)), [12.5,24]);
+    assert.ok(facts.every(f=>f.sourceMap.result.sourceLineIds.length===1));
+  }
+}));
+
+test('supports explicit two-column, English and OCR-variant headers without requiring dictionary membership', () => withPlanner(() => {
+  for (const headers of [['项目名称','结果'],['Test','Result','Reference range','Unit'],['项目名称','结杲','参考范国','单位']]) {
+    const raw = coordinatePanel('headers',0,0,[headers,['合成项目甲','12.5','0-99','U/L'].slice(0,headers.length)]);
+    const original = JSON.stringify(raw);
+    const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:original}]);
+    const facts = page.lines.flatMap(l=>l.localObservations);
+    assert.equal(facts.length,1,headers.join(','));
+    assert.equal(facts[0].numericValue,12.5);
+    assert.deepEqual(facts[0].sourceMap.result.sourceLineIds,['headers-1-1']);
+    assert.equal(JSON.stringify(raw),original);
+  }
+}));
+
+test('model table cells and geometric recovery both retain low-confidence measurement fields for review', () => withPlanner(() => {
+  for (const model of [false, true]) for (const lowColumn of [0, 1, 2, 3]) {
+    const raw = coordinatePanel('confidence', 0, 0, [
+      ['项目名称', '结果', '参考值', '单位'], ['合成项目甲', '12.5', '0-99', 'U/L'],
+    ]).map(line => ({ ...line, tableUnsafe: false,
+      confidence: line.id === `confidence-1-${lowColumn}` ? .1 : .99,
+      ...(model ? {tableCell:{table:'table_0', row:Number(line.id.split('-')[1]),column:Number(line.id.split('-')[2]),columns:4}} : {}),
+    }));
+    const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+    const row = page.lines.find(line => line.sourceLineIds.includes('confidence-1-1'))!;
+    assert.ok(row.confidence! > .65, 'the aggregate score alone is insufficient');
+    assert.equal(row.sourceCells[lowColumn].confidence, .1);
+    assert.equal(row.localObservations.length, lowColumn === 2 ? 1 : 0, `model=${model}, column=${lowColumn}`);
+    assert.equal(row.tableStructureUnsafe, lowColumn !== 2);
+    assert.equal(row.candidate, true);
+  }
+}));
+
+test('joins vertically wrapped header tokens while retaining both original source IDs', () => withPlanner(() => {
+  const raw = coordinatePanel('wrapped-header',0,0,[
+    ['项目名称','结果','参考','单位'],['合成项目甲','12.5','0-99','U/L'],
+  ]);
+  raw.push({id:'reference-second',text:'范围',confidence:.99,tableUnsafe:true,box:[310,23,400,43]});
+  // Keep the data row below the complete two-line heading.
+  for (const line of raw.filter(line=>line.id.startsWith('wrapped-header-1'))) line.box=line.box.map((v,i)=>i%2?v+35:v);
+  const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const fact=page.lines.flatMap(line=>line.localObservations)[0];
+  assert.equal(fact?.numericValue,12.5);
+  assert.ok(fact.sourceMap.reference?.headerSourceLineIds?.includes('reference-second'));
+}));
+
+test('recovers failed rows inside a partially mapped model table without changing trusted cells', () => withPlanner(() => {
+  const raw = coordinatePanel('partial', 0, 0, [
+    ['项目名称', '结果', '参考值', '单位'],
+    ['合成项目甲', '12.5', '0-99', 'U/L'],
+    ['合成项目乙', '24', '0-99', 'U/L'],
+  ]).map(line => Number(line.id.split('-')[1]) < 2 ? {...line, tableUnsafe:false,
+    tableCell:{table:'table_0',row:Number(line.id.split('-')[1]),column:Number(line.id.split('-')[2]),columns:4}} : line);
+  const recovered = recoverHeaderAlignedTable(raw);
+  for (const line of raw.filter(line=>!line.tableUnsafe)) assert.deepEqual(recovered.find(item=>item.id===line.id),line);
+  const [page] = rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  assert.deepEqual(page.lines.flatMap(line=>line.localObservations).map(f=>f.numericValue),[12.5,24]);
+}));
+
+test('partial table recovery preserves standalone section headings', () => {
+  const raw = coordinatePanel('sections', 0, 0, [
+    ['项目名称', '结果', '参考值'], ['合成项目甲', '12.5', '0-99'], ['内科检查'],
+  ]).map(line => line.id.startsWith('sections-0') ? {...line, tableUnsafe:false,
+    tableCell:{table:'table_0',row:0,column:Number(line.id.split('-')[2]),columns:3}} : line);
+  const heading = recoverHeaderAlignedTable(raw).find(line=>line.id==='sections-2-0');
+  assert.equal(heading && 'tableCell' in heading, false);
+});
 
 test('recovers skewed parallel panels with different column orders even without a table model', () => withPlanner(() => {
   const raw = [
@@ -285,4 +525,53 @@ test('splits reference/unit OCR only at an explicit printed unit and preserves b
   assert.equal(facts.find(item => item.itemName === '合成项目乙')?.unit, 'ng/ml');
   assert.equal(facts.find(item => item.itemName === '合成项目乙')?.referenceHigh, 40);
   assert.equal(facts.find(item => item.itemName === '合成项目丙')?.unit, null);
+}));
+
+test('visible headers repair a headerless model with an extra column and overlapping retries', () => withPlanner(() => {
+  const headers=['项目','结果','参考区间','单位','检测方法'];
+  const positions=[0,300,500,700,900];
+  const raw=headers.map((text,i)=>({id:`head-${i}`,text,box:[positions[i],0,positions[i]+90,20],confidence:.99}));
+  const cells=['8*★合成指标[SYN]','18. 25','0-30','mmo1/L','酶法'];
+  const body=cells.map((text,i)=>({id:`cell-${i}`,text,box:[positions[i],50,positions[i]+150,70],confidence:.98,
+    tableCell:{table:'table_0',row:1,column:i<2?i:i+1,columns:6}}));
+  const retry={...body[1],id:'retry',text:'18.25',box:[301,51,449,69],confidence:.99};
+  const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify([...raw,...body,retry])}]);
+  const facts=page.lines.flatMap(l=>l.localObservations);
+  assert.equal(facts.length,1);
+  assert.equal(facts[0].numericValue,18.25);
+  assert.equal(facts[0].unit,'mmol/L');
+  assert.equal(facts[0].referenceLow,0);
+  assert.equal(facts[0].referenceHigh,30);
+}));
+
+test('explicit unit cells retain full tokens rather than matching smaller units inside them', () => withPlanner(() => {
+  for (const unit of ['ug/mL','μmo1/L','mmol/L','custom/L','ng/mlL']) {
+    const raw=[['项目','结果','参考区间','单位'],['合成指标','12','0-30',unit]].flatMap((cells,row)=>cells.map((text,i)=>({
+      id:`${row}-${i}`,text,box:[i*220,row*60,i*220+120,row*60+20],confidence:.99,
+    })));
+    const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+    const facts=page.lines.flatMap(l=>l.localObservations);
+    assert.equal(facts.length,1);
+    assert.equal(facts[0].unit,unit.replace('mo1','mol').replace('/mlL','/mL'));
+  }
+}));
+
+test('a closed code followed by a result can share one box across explicit name and result columns', () => withPlanner(() => {
+  for (const token of ['合成项目[SYN]18.25','合成项目[SYN]18.25 19','合成项目18.25']) {
+    const raw=[
+      {id:'h0',text:'项目',box:[0,0,90,20]}, {id:'h1',text:'结果',box:[300,0,360,20]},
+      {id:'h2',text:'参考区间',box:[500,0,580,20]}, {id:'h3',text:'单位',box:[700,0,760,20]},
+      {id:'name',text:token,box:[0,50,380,70]}, {id:'ref',text:'1.0 30.0',box:[500,50,580,70]},
+      {id:'unit',text:'U/L',box:[700,50,760,70]},
+    ].map(line=>({...line,confidence:.99}));
+    const [page]=rebuildOcrPages([{pageId:'synthetic',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+    const facts=page.lines.flatMap(l=>l.localObservations);
+    assert.equal(facts.length,token==='合成项目[SYN]18.25'?1:0);
+    if(facts.length) {
+      assert.equal(facts[0].numericValue,18.25);
+      assert.equal(facts[0].referenceLow,1);
+      assert.equal(facts[0].referenceHigh,30);
+      assert.deepEqual(facts[0].sourceMap.result.sourceLineIds,['name']);
+    }
+  }
 }));

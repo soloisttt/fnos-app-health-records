@@ -370,6 +370,14 @@ const extractionNoticeText = computed(() => {
   if (gapPages.length) {
     parts.push(`第 ${gapPages.join("、")} 页表格序号不连续，可能有整行未参与解析`);
   }
+  const layoutPages = (job.layoutWarnings || []).filter(item => item.uncoveredResults || item.uncertainRows).map(item=>item.pageNumber);
+  if (layoutPages.length) {
+    parts.push(`第 ${layoutPages.join("、")} 页存在未解析结果或行列归属不明，请对照原件核对`);
+  }
+  const ocrPages = (job.layoutWarnings || []).filter(item => item.ocrUnresolved || item.ocrUnretried).map(item => item.pageNumber);
+  if (ocrPages.length) parts.push(`第 ${ocrPages.join("、")} 页仍有识别疑点或未完成的局部复核，请对照原图核对`);
+  const pendingVisual = (detail.value?.observations || []).filter(item => item.requiresVisualReview).length;
+  if (pendingVisual) parts.push(`${pendingVisual} 个指标需对照原图核对后进入趋势`);
   return parts.join("；");
 });
 function openUnmatchedCandidatesLog() {
@@ -769,6 +777,7 @@ function selectObservation(item: ReportDetail["observations"][number]) {
   observationSourcePageIndex.value=pageIndex>=0?pageIndex:0;
   observationEditorOpen.value=false;
 }
+const observationEditVersion = ref<number>();
 function openObservationEditor(item?: ReportDetail["observations"][number]) {
   selectedObservationId.value = item?.id || null;
   const evidencePageIndex = item?.evidence?.pageId
@@ -776,6 +785,7 @@ function openObservationEditor(item?: ReportDetail["observations"][number]) {
     : -1;
   observationSourcePageIndex.value = evidencePageIndex >= 0 ? evidencePageIndex : 0;
   editingObservationId.value = item?.id || null;
+  observationEditVersion.value = detail.value?.sourceVersion;
   observationEditorError.value = "";
   observationCatalogQuery.value = item?.itemName || "";
   observationCatalogOptions.value = item?.canonicalKey && item.canonicalName ? [{
@@ -827,7 +837,7 @@ async function saveObservation() {
       : `reports/${encodeURIComponent(props.reportId)}/observations`;
     detail.value = await request<ReportDetail>(path, {
       method: editingObservationId.value ? "PUT" : "POST",
-      body: JSON.stringify(observationForm.value)
+      body: JSON.stringify({ ...observationForm.value, expectedSourceVersion: observationEditVersion.value })
     });
     observationEditorOpen.value = false;
     emit("updated");
@@ -1118,10 +1128,12 @@ async function morphologySaved() {
   emit("updated");
 }
 
+const reportEditVersion = ref<number | null>(null);
 async function openEditReport() {
   const current = source.value;
   if (!current) return;
   const reportId = props.reportId;
+  reportEditVersion.value = detail.value?.sourceVersion ?? null;
   editForm.value = {
     title: current.title || "",
     reportType: current.reportType || "other",
@@ -1159,7 +1171,7 @@ async function saveReportFields() {
   try {
     detail.value = await request<ReportDetail>(`reports/${encodeURIComponent(props.reportId)}`, {
       method: "PUT",
-      body: JSON.stringify(editForm.value)
+      body: JSON.stringify({...editForm.value, expectedSourceVersion:reportEditVersion.value})
     });
     editOpen.value = false;
     emit("updated");
@@ -2651,7 +2663,7 @@ onActivated(() => {
                 <details :key="`standard-${editingObservationId}`" class="observation-editor-section">
                   <summary>标准指标 <span>{{ observationForm.canonicalKey ? '已选择 · 可修改' : '可选 · 未指定' }}</span></summary>
                   <div class="observation-catalog-picker">
-                  <small>没有匹配项可不选，不影响保存核对。</small>
+                  <small>未指定时会自动匹配；未匹配到标准指标仍可保存，符合条件的结果可用于机构内趋势。</small>
                   <div class="observation-catalog-search">
                     <input
                       v-model="observationCatalogQuery"

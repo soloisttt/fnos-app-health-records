@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { closeDatabaseForTests, getDatabase } from '../database/client';
-import { assessTrendAdmission, normalizeReportObservations, previewIndicatorNormalization, listIndicatorNormalizationIssues, resolveIndicatorNormalizationIssue, undoIndicatorGovernanceDecision } from '../services/indicator-normalization.service';
+import { ensureBuiltinIndicatorCatalog, assessTrendAdmission, normalizeReportObservations, previewIndicatorNormalization, listIndicatorNormalizationIssues, resolveIndicatorNormalizationIssue, undoIndicatorGovernanceDecision } from '../services/indicator-normalization.service';
 import { getReportDetail, listTrendSeries, updateTrendPin } from '../services/records.service';
 import { updateManualObservation } from '../services/observation-field-overrides.service';
+import { normalizeAiExtraction, persistAiExtraction } from '../services/ai-extraction.service';
+import { executeAiExtractionPlan } from '../services/ai-extraction-orchestrator.service';
+import { acceptVisionObservations, groupVisionReviewPages } from '../services/ai-vision-review.service';
 
 const user = { id: 'qa-user', displayName: '合成用户', authenticated: true, provider: 'development', isGatewayAdmin: true } as const;
 const raw = {
@@ -29,9 +32,13 @@ test('shared admission requires verified raw numbers and never bypasses exclusio
   // 锚定变体从别名表反向生成：其他形近误读（mL→m1）同样可回指
   assert.equal(assessTrendAdmission({ ...raw, numericValue: 92, resultText: '92', unit: 'mL',
     evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 92 m1' }]) }).kind, 'institution');
-  // 视觉复核来源（source:"vision"）：数值与单位以图片为准，可不同于 OCR 误读文本
+  // 视觉纠正与 OCR 冲突时保留记录，但必须人工确认才能进入趋势
   assert.equal(assessTrendAdmission({ ...raw, numericValue: 130, resultText: '130', unit: 'g/L',
-    evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 158 U/L', source: 'vision' }]) }).kind, 'institution');
+    evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 158 U/L', source: 'vision' }]) }).eligible, false);
+  assert.equal(assessTrendAdmission({ ...raw, numericValue: 130, resultText: '130', unit: 'g/L', manualReviewed:true,
+    evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 158 U/L', source: 'vision' }]) }).eligible, true);
+  assert.equal(assessTrendAdmission({ ...raw,
+    evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 2 U/L', source: 'vision' }]) }).eligible, true);
   // AI 规范化后的单位（10^9/L）可回指 OCR 原文丢上标的形态（109/L）
   assert.equal(assessTrendAdmission({ ...raw, numericValue: 29.59, resultText: '29.59', unit: '10^9/L',
     evidenceJson: JSON.stringify([{ pageNumber: 1, quote: '合成测定项目甲 29.59 109/L' }]) }).kind, 'institution');
@@ -147,5 +154,141 @@ test('raw trend channel shares detail admission, isolates contexts, and responds
     closeDatabaseForTests();
     delete process.env.STORAGE_DIR;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('standard admission preserves detection limits and requires item identity, including trusted aliases', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'health-evidence-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = dir;
+  try {
+    ensureBuiltinIndicatorCatalog();
+    const base = { ...raw, itemName: '丙氨酸氨基转移酶', canonicalKey: 'liver_alt', canonicalName: '丙氨酸氨基转移酶', normalizationQuality: 'high', normalizationMatchedBy: 'exact', hasAiExtraction: 1 };
+    const evidence = (quote: string) => JSON.stringify([{ pageNumber: 1, quote }]);
+    for (const bound of ['<', '>', '≤', '≥', '<=', '>=']) {
+      assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence(`丙氨酸氨基转移酶 ${bound}2 U/L`) }).eligible, false);
+      assert.equal(assessTrendAdmission({ ...base, resultText: `${bound}2`, manualReviewed: true, evidenceJson: evidence(`丙氨酸氨基转移酶 ${bound}2 U/L`) }).eligible, false);
+    }
+    assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('合成另一项目 2 U/L') }).eligible, false);
+    assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('ALT 2 U/L') }).eligible, true);
+    assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('SALT 2 U/L') }).eligible, false);
+    assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('丙氨酸氨基转移酶 2 U/L 参考范围 <2') }).eligible, true);
+    for (const resultText of ['2-3','2～3','2至3','2 ± 0.1','2/3','约2','2 (3)','2 (mg/L)']) {
+      for (const manualReviewed of [false,true]) {
+        assert.equal(assessTrendAdmission({...base,resultText,manualReviewed,evidenceJson:evidence(`ALT ${resultText} U/L`)}).eligible,false,resultText);
+      }
+    }
+    for (const resultText of ['2','2 U/L','2（U/L）↑','2e0','２.０']) {
+      assert.equal(assessTrendAdmission({...base,resultText,evidenceJson:evidence('ALT 2 U/L')}).eligible,true,resultText);
+    }
+    assert.equal(assessTrendAdmission({...base,evidenceJson:evidence('ALT 2-3 U/L')}).eligible,false);
+    assert.equal(assessTrendAdmission({...base,evidenceJson:evidence('ALT 2 U/L 参考范围 2-3')}).eligible,true);
+    assert.equal(assessTrendAdmission({...base,unit:'u/l',resultText:'2 U/L',evidenceJson:evidence('ALT 2 U/L')}).eligible,true);
+    assert.equal(assessTrendAdmission({...base,unit:null,canonicalUnit:'U/L',resultText:'2 U/L',evidenceJson:evidence('ALT 2 U/L')}).eligible,true);
+    assert.equal(assessTrendAdmission({...base,unit:null,canonicalUnit:'U/L',resultText:'2 mg/L',evidenceJson:evidence('ALT 2 mg/L')}).eligible,false);
+    assert.equal(assessTrendAdmission({...base,resultText:'2e3',numericValue:2000,evidenceJson:evidence('ALT 2e3 U/L')}).eligible,true);
+    for (const withCode of [false,true]) {
+      const quote = `${withCode ? 'ABI ' : ''}右踝：1.07 | 左踝：1.08`;
+      const side = {...base,itemName:'右侧踝肱指数',itemCode:'ABI',canonicalKey:'vascular_abi_right',canonicalName:'右侧踝肱指数',unit:null,evidenceJson:evidence(quote)};
+      assert.equal(assessTrendAdmission({...side,resultText:'1.08',numericValue:1.08}).eligible,false);
+      assert.equal(assessTrendAdmission({...side,resultText:'1.07',numericValue:1.07}).eligible,true);
+      const pwv = {...side,itemName:'右侧肱踝脉搏波传导速度',itemCode:'baPWV',unit:'cm/s',evidenceJson:evidence(`${withCode ? 'baPWV ' : ''}右：1315 | 左：1395 | PWV(cm/s)`)};
+      assert.equal(assessTrendAdmission({...pwv,resultText:'1395',numericValue:1395}).eligible,false);
+      assert.equal(assessTrendAdmission({...pwv,resultText:'1315',numericValue:1315}).eligible,true);
+    }
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('field evidence isolates neighbouring results, units and reference columns', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'health-field-evidence-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = directory;
+  try {
+    ensureBuiltinIndicatorCatalog();
+    const base = { ...raw, itemName: 'ALT', itemCode: 'AST', resultText: '40', numericValue: 40,
+      canonicalKey: 'liver_alt', canonicalName: '丙氨酸氨基转移酶', normalizationQuality: 'high', normalizationMatchedBy: 'exact', hasAiExtraction: 1 };
+    const admitted = (quote: string, overrides = {}) => assessTrendAdmission({ ...base, ...overrides, evidenceJson: JSON.stringify([{pageNumber:1,quote}]) }).eligible;
+    assert.equal(admitted('ALT 12 U/L | AST 40 U/L'), false, 'a wrong item code cannot override the printed name');
+    assert.equal(admitted('ALT | 12 | U/L | 0-40'), false, 'reference endpoint is not a result');
+    assert.equal(admitted('ALT | 40 | U/L | 0-40'), true);
+    assert.equal(admitted('ALT 40 U/L | AST <40 U/L'), true, 'a neighbour detection limit does not change ALT');
+    assert.equal(admitted('ALT <40 U/L | AST 40 U/L'), false);
+    assert.equal(admitted('ALT 40-50 U/L'), false);
+    assert.equal(admitted('ALT 40 mg/L | AST 40 U/L'), false, 'units belong to their own value');
+    assert.equal(admitted('ALT 40 mg/L AST 40 U/L'), false, 'inline paragraphs cannot borrow the later unit');
+    for (const quote of ['ALT <1e3 U/L', 'ALT <1,000 U/L', 'ALT 1e3-2e3 U/L', 'ALT 1,000-2,000 U/L']) {
+      assert.equal(admitted(quote, {resultText:'1000',numericValue:1000}), false, quote);
+    }
+    assert.equal(admitted('超敏C反应蛋白 2 mg/L', {itemName:'C反应蛋白',itemCode:null,canonicalKey:'inflammation_crp',canonicalName:'C反应蛋白',resultText:'2',numericValue:2,unit:'mg/L'}), false);
+    for (const result of ['↑40', '40↑', '40 H', '40H', '1,000', '1e3']) {
+      const value = result === '1,000' || result === '1e3' ? 1000 : 40;
+      assert.equal(admitted(`ALT ${result} U/L`, {resultText:result,numericValue:value}), true, result);
+    }
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('pipeline keeps uncertain visual values pending and only converts a printed unit', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'health-field-pipeline-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = directory;
+  try {
+    const db = getDatabase();
+    db.exec(`INSERT INTO users(id,display_name) VALUES('qa-user','合成用户');
+      INSERT INTO health_members(id,display_name,created_by) VALUES('qa-member','合成成员','qa-user');
+      INSERT INTO member_permissions(member_id,user_id,permission,granted_by) VALUES('qa-member','qa-user','manager','qa-user');`);
+    const empty = { ...normalizeAiExtraction({}), provider:'test',model:'test',promptVersion:'test',rawResponseJson:'{}',promptTokens:0,completionTokens:0,elapsedMs:0 };
+    for (const scenario of [
+      {id:'visual-swap',quote:'ALT 12 U/L | AST 37 U/L',name:'ALT',value:37,unit:'U/L',vision:true},
+      {id:'missing-unit',quote:'空腹血糖 90',name:'空腹血糖',value:90,unit:null,vision:false},
+      {id:'printed-unit',quote:'空腹血糖 90 mg/dL',name:'空腹血糖',value:90,unit:null,vision:false},
+    ]) {
+      const {id,quote} = scenario;
+      const pageId = `${id}-page`, jobId = `${id}-ai`, ocrId = `${id}-ocr`;
+      db.prepare("INSERT INTO reports(id,member_id,created_by,report_type,title,status,report_issued_at) VALUES(?,'qa-member','qa-user','laboratory','合成报告','ready','2026-01-01')").run(id);
+      db.prepare("INSERT INTO report_pages(id,report_id,page_number,original_name,storage_path,mime_type,file_size,sha256) VALUES(?,?,1,'synthetic.png','synthetic.png','image/png',1,'synthetic')").run(pageId,id);
+      db.prepare("INSERT INTO processing_jobs(id,report_id,page_id,job_type,status,pipeline_version,deduplication_key) VALUES(?,?,?,'ocr','completed','test',?)").run(ocrId,id,pageId,ocrId);
+      db.prepare("INSERT INTO processing_jobs(id,report_id,job_type,status,pipeline_version,deduplication_key) VALUES(?,?,'ai_extract','processing','test',?)").run(jobId,id,jobId);
+      db.prepare("INSERT INTO ocr_results(id,job_id,page_id,engine,model_version,lines_json) VALUES(?,?,?,'test','test',?)").run(`${id}-result`,ocrId,pageId,JSON.stringify([{id:'l1',text:quote,confidence:1,box:[0,0,1000,20]}]));
+      const generated = { ...empty, ...normalizeAiExtraction({observations:[{itemName:scenario.name,resultText:String(scenario.value),numericValue:scenario.value,unit:scenario.unit,evidence:[{pageNumber:1,quote}]}]}) };
+      let visionCalls = 0;
+      const output = await executeAiExtractionPlan(jobId,id,async()=>generated,{
+        visionReview: async input => {
+          if (!scenario.vision) return null;
+          visionCalls++;
+          const group = groupVisionReviewPages(input.candidates)[0];
+          if (!group) return null;
+          const accepted = acceptVisionObservations(generated.fields.observations,group,input.result);
+          return {...empty,fields:{...empty.fields,observations:accepted.accepted}};
+        },
+      });
+      persistAiExtraction(id,jobId,output.result,output.inputCharacters);
+      const detail = getReportDetail(user,id);
+      const points = listTrendSeries(user,'qa-member').flatMap(series=>series.points).filter(point=>point.reportId===id);
+      assert.equal(detail.observations.length,1,`${id} remains available for review`);
+      if (scenario.id === 'printed-unit') {
+        assert.equal(detail.observations[0].unit,'mg/dL');
+        assert.equal(points.length,1);
+        assert.ok(Math.abs(points[0].numericValue - 90 / 18.018) < 1e-8);
+      } else {
+        assert.equal(points.length,0,`${id} cannot publish an unverified numeric point`);
+        assert.equal(detail.observations[0].normalizationQuality,'low');
+      }
+      if (scenario.vision) {
+        assert.equal(visionCalls,1);
+        assert.equal(output.result.fields.observations[0].evidence[0].source,'vision');
+      }
+    }
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
   }
 });

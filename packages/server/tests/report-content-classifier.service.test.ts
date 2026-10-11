@@ -2,12 +2,36 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyReportContent,
+  hasMedicationContent,
   classifyReportDocument
 } from "../services/report-content-classifier.service.ts";
 import {
   normalizeAiExtraction,
   promptForInput
 } from "../services/ai-extraction.service.ts";
+import { medicationLayouts, nonMedicationLayouts } from "./fixtures/medication-layouts.ts";
+
+test("recognizes medication layouts while preserving clinical document types", () => {
+  for (const layout of medicationLayouts) {
+    assert.equal(hasMedicationContent(layout.pages[0].join("\n")), true, layout.name);
+    assert.equal(classifyReportDocument(layout.pages.map((lines, index) => ({
+      pageNumber: index + 1, text: lines.join("\n"),
+    }))).primaryType, layout.type, layout.name);
+  }
+  for (const lines of nonMedicationLayouts) {
+    assert.equal(hasMedicationContent(lines.join("\n")), false);
+    assert.ok(!classifyReportContent(lines.join("\n")).contentTypes.includes("prescription"));
+  }
+});
+
+test("medication contract handles layout boundaries and original treatment status", () => {
+  const prompt = promptForInput({ reportId: "report", text: "当前用药", inputCharacters: 4,
+    pageCount: 1, route: "narrative", includesMedicationContent: true,
+    primaryContentType: "checkup", documentContentType: "checkup" });
+  for (const rule of ["medications", "多栏", "跨页证据分别保留页码", "规格不是每次剂量", "停用", "过敏史", "context=discharge"]) {
+    assert.ok(prompt.includes(rule), rule);
+  }
+});
 
 test("classifies common single-page medical documents without an AI call", () => {
   assert.equal(classifyReportContent([

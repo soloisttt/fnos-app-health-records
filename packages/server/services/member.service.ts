@@ -27,7 +27,7 @@ type PermissionInput = {
   version?: unknown;
 };
 
-function requireAuthenticated(user: RequestUser) {
+export function requireAuthenticated(user: RequestUser) {
   if (!user.authenticated) throw createError({ statusCode: 401, statusMessage: "请先登录" });
 }
 

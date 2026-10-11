@@ -347,6 +347,7 @@ export type ProcessingJob = {
   unmatchedCandidates?: number | null;
   /* AI 整理完成事件携带的规划期信号：表格序号断档页（可能有整行未参与解析） */
   tableSerialGapPages?: number[];
+  layoutWarnings?: Array<{pageNumber:number;uncoveredResults:number;uncertainRows:number;pendingVisualResults?:number;ocrUnresolved?:number;ocrUnretried?:number}>;
 };
 
 export type ProcessingJobEvent = {
@@ -559,6 +560,7 @@ export type Observation = {
   displayCategory: "standardized" | "medical_candidate" | "technical_measurement" | "qualitative_finding" | "governance_noise";
   displayReason: string | null;
   manualReviewed?: boolean;
+  requiresVisualReview?: boolean;
   manualCreated?: boolean;
   manualCanonicalKey?: string | null;
 };
@@ -1156,6 +1158,7 @@ export type ReportStructuredSection = {
 };
 
 export type ReportDetail = ReportSummary & {
+  sourceVersion: number;
   pageAppend?: {originalRevision:number;recognizedRevision:number|null;state:string;reviewWarnings?:string[]};
   createdAt: string;
   updatedAt: string;

@@ -149,7 +149,11 @@ const groupOptions = computed(() => groups.value.filter(group => group.id !== cu
 const summary = computed(() => mode.value === 'merge' ? `将合并为 1 份报告 · ${props.files.length} 个文件`
   : mode.value === 'independent' ? `将创建 ${props.files.length} 份报告`
   : mode.value === 'custom' ? `已分组 ${groups.value.length} 份报告 · ${unassigned.value.length} 个文件待分组` : '请选择报告组织方式');
-watch(() => buildUploadPlan(props.files.map(file => file.id), mode.value, groups.value.map(group => group.files)), plan => emit('plan', plan), { immediate: true });
+watch(() => buildUploadPlan(props.files.map(file => file.id), mode.value, groups.value.map(group => group.files)), (plan, previous) => {
+  // 相同文件/分组内容不重复回传，避免父组件更新计划后再次触发自身。
+  if (previous && JSON.stringify(plan) === JSON.stringify(previous)) return;
+  emit('plan', plan);
+}, { immediate: true });
 function choose(value: Mode, confirmed = false) {
   if (value === mode.value) return;
   if (!confirmed && mode.value === 'custom' && groups.value.length) { requestedMode.value = value; return; }

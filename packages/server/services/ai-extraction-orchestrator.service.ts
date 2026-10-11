@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { isCurrentResultColumn, mappedOcrMeasurement, mappedOcrUnit, mappedOcrResultCells, splitOcrTableCells } from "./ocr-table-columns";
-import { unitFromResultCell } from "./measurement-units.service";
+import { canonicalMeasurementUnit, unitFromResultCell } from "./measurement-units.service";
 import { cleanOcrResult } from "../utils/ocr-result";
+import { parseExactMeasurement } from "../utils/measurement-bound";
 import { rollbackAfterError, getDatabase } from "../database/client";
 import { createId } from "../utils/identifier";
 import {
@@ -9,6 +10,7 @@ import {
   buildAiExtractionPlan,
   estimateAiUnitOutputTokens,
   localObservationsForLine,
+  observationFieldConfidenceIssue,
   splitAiExtractionUnit,
   type AiExtractionPlan,
   type AiExtractionUnit,
@@ -288,6 +290,7 @@ function inputForUnit(
     promptMode,
     extractionMode: unit.extractionMode,
     route: unit.route,
+    includesMedicationContent: unit.includesMedicationContent,
     allowDocumentFields: unit.allowDocumentFields,
     primaryContentType: unit.classification.primaryType,
     contentTypes: unit.classification.contentTypes,
@@ -502,6 +505,7 @@ function observationKey(item: AiObservation) {
     item.referenceLow,
     item.referenceHigh,
     item.referenceText,
+    correctionExaminationIdentity(item),
     evidence,
   ]
     .join("\u0000")
@@ -726,6 +730,7 @@ function splitColonValueCell(
   cell: string,
   names: string[],
   fragments: string[],
+  allowWhitespace = false,
 ) {
   const lowerCell = cell.normalize("NFKC").toLocaleLowerCase("zh-CN");
   for (const fragment of fragments) {
@@ -735,8 +740,8 @@ function splitColonValueCell(
     const index = lowerCell.indexOf(lowerFragment);
     if (index < 0) continue;
     const after = lowerCell.slice(index + lowerFragment.length);
-    if (!/^[：:]/.test(after)) continue;
-    const remainder = after.replace(/^[：:]\s*/, "").trim();
+    if (!/^[：:]/.test(after) && !(allowWhitespace && /^\s+(?=[↑↓]?\s*(?:<=|>=|[<>≤≥])?\s*[-+]?\d)/.test(after))) continue;
+    const remainder = after.replace(/^[：:\s]+/, "").trim();
     if (!remainder) return null;
     const isFullName = names.some(
       (name) =>
@@ -864,7 +869,7 @@ function coordinateEvidenceForObservation(
   ].map(compactEvidence).filter((name) => name.length >= 2);
   const cells = line.sourceCells.flatMap((cell) => {
     const rect = coordinateRect(cell.box);
-    return rect ? [{ text: cell.text, rect, numbers: evidenceNumbers(cell.text) }] : [];
+    return rect ? [{ text: cell.text, rect, numbers: evidenceNumbers(cell.text), confidence: cell.confidence }] : [];
   });
   const nameCells = cells.filter((cell) => {
     const text = compactEvidence(cell.text);
@@ -880,6 +885,8 @@ function coordinateEvidenceForObservation(
   const valueCells = cells.filter((cell) => cell.numbers.length === 1 && sameEvidenceNumber(cell.numbers[0], target));
   if (valueCells.length !== 1) return null;
   const valueCell = valueCells[0];
+  if (observationFieldConfidenceIssue(line,item).fields.length) return null;
+  if ([nameCell, valueCell].some(cell => cell.confidence != null && cell.confidence < .65)) return null;
   if (valueCell.rect.left < nameCell.rect.right) return null;
   const firstNumericRight = cells
     .filter((cell) => cell.numbers.length > 0 && cell.rect.left >= nameCell.rect.right)
@@ -1134,13 +1141,12 @@ function correctedTableResult(
           : null,
     };
   }
-  const numeric = resultCell.match(/[-+]?\d+(?:\.\d+)?/);
-  if (!numeric) return item;
-  const parsed = Number(numeric[0]);
-  if (!Number.isFinite(parsed)) return item;
-  /* 单位识别统一走共享的字典感知模式（长单位优先），避免本地硬编码清单
-     滞后导致 umol/L 被部分匹配成 l/L。 */
+  /* Parse the complete cell: O.12 or 1O.2 must never become their numeric tail/prefix. */
   const explicitUnit = unitFromResultCell(resultCell);
+  const measuredText = resultCell.replace(/^([↑↓▲▼⬆⬇]?\s*)(?:<=|>=|<|>|≤|≥)\s*/, "$1");
+  const parsed = parseExactMeasurement(measuredText, explicitUnit || item.unit,
+    unit => canonicalMeasurementUnit(unit) || unit.normalize("NFKC").replace(/[μµ]/g,"u").replace(/\s+/g,""));
+  if (parsed === null) return {...item, resultText:resultCell, numericValue:null};
   return {
     ...item,
     resultText: resultCell,
@@ -1215,6 +1221,7 @@ function validatedObservation(
           cells[nameCellIndex],
           names,
           observationNameFragments(names),
+          cells.length > 1,
         )
       : null;
   const resultCells = colonSplit
@@ -1734,7 +1741,8 @@ function mergeObservationPair(left: AiObservation, right: AiObservation) {
     method: fill("method"),
     evidence: uniqueBy(
       [...left.evidence, ...right.evidence],
-      (entry) => `${entry.pageNumber}:${compactEvidence(entry.quote)}`,
+      // A plain quote must not erase visual/manual-review or field-source metadata.
+      (entry) => JSON.stringify(entry),
     ),
   } satisfies AiObservation;
 }
@@ -1750,7 +1758,7 @@ function deduplicateObservationsBySource(
     const result = observationResultIdentity(observation);
     const sources = evidenceSourceKeys(plan, observation);
     const keys = sources.map(
-      (source) => `${source}\u0000${semantic}\u0000${result}\u0000${JSON.stringify(observation.examination || null)}`,
+      (source) => `${source}\u0000${semantic}\u0000${result}\u0000${correctionExaminationIdentity(observation)}`,
     );
     const existingIndex = keys.flatMap((key) => {
       const index = sourceIndex.get(key);
@@ -1776,7 +1784,7 @@ function withSourceDeduplication(
 ) {
   const observations = deduplicateObservationsBySource(
     plan,
-    result.fields.observations,
+    withoutSupersededOcrObservations(plan, result.fields.observations),
   );
   if (observations.length === result.fields.observations.length) return result;
   const normalized = normalizeAiExtraction({
@@ -1794,6 +1802,76 @@ function withSourceDeduplication(
       confidence: normalized.confidence,
     }),
   };
+}
+
+function correctionIdentityText(value: unknown) {
+  return String(value || "").normalize("NFKC").toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
+}
+
+function correctionExaminationIdentity(item: AiObservation) {
+  const fields = ["examinationType", "institution", "reportNumber", "specimen", "method",
+    "sampledAt", "examinedAt", "issuedAt", "timeText"] as const;
+  return JSON.stringify([correctionIdentityText(item.method), ...fields.map(field => correctionIdentityText(item.examination?.[field]))]);
+}
+
+function sameCorrectionExamination(left: AiObservation, right: AiObservation) {
+  return correctionExaminationIdentity(left) === correctionExaminationIdentity(right);
+}
+
+/** Replace only the OCR occurrence explicitly re-read from one unambiguous image region. */
+export function withoutSupersededOcrObservations(plan: AiExtractionPlan, observations: AiObservation[]) {
+  const replacements = observations.flatMap(corrected => corrected.evidence.flatMap(evidence => {
+    const region = evidence.visionRegion;
+    if (evidence.source !== "vision" || evidence.imageOnly || !region?.sourceLineIds.length) return [];
+    const page = plan.pages.find(page => page.pageNumber === evidence.pageNumber);
+    const matches = page?.lines.filter(line => region.sourceLineIds.every(id => line.sourceLineIds.includes(id))) || [];
+    if (matches.length !== 1 || matches[0].id !== region.candidateId) return [];
+    const line = matches[0];
+    const nameCorrection = Boolean(evidence.nameCorrected && line.nameReviewCandidate
+      && correctionIdentityText(line.nameReviewCandidate.suggestedName) === correctionIdentityText(corrected.itemName));
+    const facts = line.localObservationCandidates || localObservationsForLine(line);
+    // Multiple result columns or unparsed rows cannot safely resolve a value conflict by row identity alone.
+    const fact = facts.length === 1 ? facts[0] : null;
+    const ambiguousCells = line.ocrResultAmbiguous && line.sourceCells.length >= 2 ? line.sourceCells : null;
+    const ambiguousCorrection = !evidence.nameCorrected && ambiguousCells
+      && correctionIdentityText(ambiguousCells[0].text) === correctionIdentityText(corrected.itemName)
+      && ambiguousCells[1].sourceLineIds.length > 0
+      && ambiguousCells[1].sourceLineIds.every(id => region.sourceLineIds.includes(id))
+      && parseExactMeasurement(corrected.resultText, corrected.unit) !== null;
+    const valueCorrection = !evidence.nameCorrected && fact
+      && [fact.itemName, fact.normalizedName].some(name => correctionIdentityText(name) === correctionIdentityText(corrected.itemName))
+      && fact.sourceMap.result.sourceLineIds.length > 0
+      && fact.sourceMap.result.sourceLineIds.every(id => region.sourceLineIds.includes(id));
+    return nameCorrection || valueCorrection || ambiguousCorrection
+      ? [{corrected, evidence, page:page!, line, nameCorrection, fact, ambiguousCells:ambiguousCorrection ? ambiguousCells : null}] : [];
+  }));
+  return observations.filter(item => !replacements.some(({corrected,evidence,page,line,nameCorrection,fact,ambiguousCells}) => {
+    if (item === corrected || item.evidence.some(source => source.source === "vision") || !sameCorrectionExamination(item, corrected)) return false;
+    if (nameCorrection) {
+      if (correctionIdentityText(item.itemName) !== correctionIdentityText(line.nameReviewCandidate!.originalName)
+        || correctionIdentityText(item.resultText) !== correctionIdentityText(corrected.resultText)
+        || item.numericValue !== corrected.numericValue
+        || correctionIdentityText(item.unit) !== correctionIdentityText(corrected.unit)) return false;
+    } else if (ambiguousCells) {
+      if (correctionIdentityText(item.itemName) !== correctionIdentityText(ambiguousCells[0].text)
+        || correctionIdentityText(item.resultText) !== correctionIdentityText(ambiguousCells[1].text)
+        || item.numericValue !== null || correctionIdentityText(item.unit) !== correctionIdentityText(corrected.unit)) return false;
+    } else if (!fact || ![fact.itemName, fact.normalizedName].some(name => correctionIdentityText(name) === correctionIdentityText(item.itemName))
+      || correctionIdentityText(item.resultText) !== correctionIdentityText(fact.resultText)
+      || item.numericValue !== fact.numericValue || correctionIdentityText(item.unit) !== correctionIdentityText(fact.unit)) return false;
+    return item.evidence.some(source => {
+      if (source.pageNumber !== evidence.pageNumber) return false;
+      const resultIndices = source.table?.sourceMap?.result.cellIndices || (source.table?.resultColumn ? [source.table.resultColumn.index] : []);
+      const sourceResultIndices = fact?.sourceMap.result.cellIndices || (ambiguousCells ? [ambiguousCells[1].index] : []);
+      if (resultIndices.length && sourceResultIndices.length && !resultIndices.every(index => sourceResultIndices.includes(index))) return false;
+      const ids = [...(source.table?.rowSourceLineIds || []),
+        ...(source.table?.sourceMap?.result.inherited ? [] : source.table?.sourceMap?.result.sourceLineIds || [])];
+      if (ids.length) return ids.every(id => line.sourceLineIds.includes(id));
+      const quote = correctionIdentityText(source.quote);
+      return quote === correctionIdentityText(line.text)
+        && page.lines.filter(candidate => correctionIdentityText(candidate.text) === quote).length === 1;
+    });
+  }));
 }
 
 function compactEvidence(value: unknown) {
@@ -1850,6 +1928,39 @@ function observationMatchesCandidateLine(
   result: AiExtractionResult,
   line: AiExtractionPlan["pages"][number]["lines"][number],
 ) {
+  const local = localObservationsForLine(line);
+  if (local.length > 1) {
+    return local.every(fact => result.fields.observations.some(item =>
+      [item.itemName, item.normalizedName].some(name => name &&
+        [fact.itemName, fact.normalizedName].some(source => compactEvidence(source) === compactEvidence(name)))
+      && observationResultInRegionMatches(fact.resultText, item)
+      && (!fact.examination?.timeText || item.examination?.timeText === fact.examination.timeText)));
+  }
+  // One OCR box can contain several independent name/value cells. Quoting the
+  // whole box for one item does not close the other measurements in that box.
+  const inlineMeasurements = splitOcrTableCells(line.text).filter(cell =>
+    /^[\p{L}][^|]*?[：:\s]+(?:[↑↓]?\s*(?:<=|>=|[<>≤≥])?\s*[-+]?\d|阴性|阳性|正常|异常|未检出)/u.test(cell));
+  if (inlineMeasurements.length > 1) {
+    return inlineMeasurements.every(text => {
+      const pressure = text.match(/(?:血压|\bBP\b)[^\d]{0,16}(\d{2,3})\s*[/／]\s*(\d{2,3})\s*mmHg/i);
+      if (pressure) return [['收缩压', pressure[1]], ['舒张压', pressure[2]]].every(([name, value]) =>
+        result.fields.observations.some(item => item.itemName.includes(name) && item.numericValue === Number(value)));
+      return result.fields.observations.some(item => {
+      const basic = basicMeasurements.find(definition => definition.aliases.test(text));
+      if (basic && item.itemName === basic.name) {
+        const alias = text.match(basic.aliases)!;
+        return observationResultInRegionMatches(text.slice((alias.index || 0) + alias[0].length), item);
+      }
+      const side = text.match(/^(右|左)(?:侧|踝)?[：:]/)?.[1];
+      if (side && vascularMetricFromText(item.itemName) && item.itemName.startsWith(side)) {
+        return observationResultInRegionMatches(text.replace(/^[^：:]+[：:]/, ''), item);
+      }
+      const fragment = { ...line, text, dictionaryFacts: [], projectHeaderCells: undefined, tableHeaderText: null };
+      const name = observationNameMatches(fragment, item);
+      return name.matched && observationResultMatches(text, item, name.names);
+      });
+    });
+  }
   const bloodPressure = line.text
     .normalize("NFKC")
     .match(/(?:血压|\bBP\b)[^\d]{0,16}(\d{2,3})\s*[\/／]\s*(\d{2,3})\s*mmHg/i);
@@ -2225,10 +2336,39 @@ function morphologyMatchesCandidateLine(
 function resultMatchesCandidateLine(
   result: AiExtractionResult,
   line: AiExtractionPlan["pages"][number]["lines"][number],
+  pageNumber: number,
 ) {
+  const source = compactEvidence(line.text);
+  const evidenceSources = (entry: AiEvidence) => [entry.table?.rowSourceLineIds,
+    entry.table?.sourceMap?.item?.inherited ? undefined : entry.table?.sourceMap?.item?.sourceLineIds,
+    entry.table?.sourceMap?.result?.inherited ? undefined : entry.table?.sourceMap?.result?.sourceLineIds,
+    entry.visionRegion?.sourceLineIds,
+  ].filter((ids): ids is string[] => Boolean(ids?.length));
+  const sameSource = (item: { evidence: AiEvidence[] }) => {
+    const pageEvidence = item.evidence.filter(entry => entry.pageNumber === pageNumber);
+    const locatedEvidence = pageEvidence.filter(entry => evidenceSources(entry).length);
+    return (locatedEvidence.length ? locatedEvidence : pageEvidence).some(entry => {
+      // A recommendation can repeat a verified same-page measurement. It is not
+      // a second acquisition; independent measurement rows still require a quote.
+      if (line.contentRole === 'recommendation' || (line.role === 'narrative' && /建议|总检|异常汇总/.test(line.sectionName || ''))) return true;
+      const sourceGroups = evidenceSources(entry);
+      if (sourceGroups.length) return sourceGroups.every(ids => ids.some(id => line.sourceLineIds.includes(id)));
+      const quote = compactEvidence(entry.quote);
+      return quote.length >= 4 && (source.includes(quote) || quote.includes(source));
+    });
+  };
+  const scoped = { ...result, fields: { ...result.fields,
+    observations: result.fields.observations.filter(item => sameSource(item) && (!line.ocrResultAmbiguous
+      || parseExactMeasurement(item.resultText, item.unit) !== null && item.evidence.some(entry =>
+        entry.pageNumber === pageNumber && entry.source === "vision" && !entry.imageOnly
+        && entry.visionRegion?.candidateId === line.id
+        && line.sourceCells[1]?.sourceLineIds.every(id => entry.visionRegion?.sourceLineIds.includes(id))))),
+    morphologyFindings: result.fields.morphologyFindings.filter(sameSource),
+    diagnoses: [], medications: [], procedures: [], vaccinations: [], billingItems: [], billingSummary: null,
+  } };
   return line.candidateKind === "morphology"
-    ? morphologyMatchesCandidateLine(result, line)
-    : observationMatchesCandidateLine(result, line);
+    ? morphologyMatchesCandidateLine(scoped, line)
+    : observationMatchesCandidateLine(scoped, line);
 }
 
 function unitCandidateLines(plan: AiExtractionPlan, unit: AiExtractionUnit) {
@@ -2257,7 +2397,8 @@ function unitCandidateLines(plan: AiExtractionPlan, unit: AiExtractionUnit) {
                   fact.sourceText === line.text,
               )
             : line.candidateKind === unit.extractionMode) &&
-          localObservationsForLine(line).length === 0 &&
+          (localObservationsForLine(line).length === 0 ||
+            (line.expectedLocalObservationCount || 0) > localObservationsForLine(line).length) &&
           unit.text.includes(line.text),
       )
       .map((line) => ({ page, line }));
@@ -2294,6 +2435,21 @@ function measurementShapedNoiseLine(
   );
 }
 
+export function finalLayoutWarnings(plan: AiExtractionPlan, result: AiExtractionResult) {
+  return plan.pages.flatMap(page => {
+      const uncertainRows = page.lines.filter(line=>line.projectHeaderCells && !line.boundary && mappedOcrMeasurement(line.text,line.tableHeaderText)?.result === undefined && line.tableStructureUnsafe && !resultMatchesCandidateLine(result, line, page.pageNumber)).length;
+      const coveredIds = new Set(page.lines.filter(line => resultMatchesCandidateLine(result, line, page.pageNumber)).flatMap(line => line.sourceLineIds));
+      const uncoveredResults = page.uncoveredResultSourceLineIds
+        ? page.uncoveredResultSourceLineIds.filter(id => !coveredIds.has(id)).length : page.uncoveredResultCount || 0;
+      const pendingVisualResults = result.fields.observations.filter(item => item.evidence.some(evidence => evidence.pageNumber === page.pageNumber && evidence.imageOnly)).length;
+      const ocrUnresolved = page.ocrRetryUnresolved || 0;
+      const ocrUnretried = page.ocrRetryRemaining || 0;
+      return uncoveredResults || uncertainRows || pendingVisualResults || ocrUnresolved || ocrUnretried
+        ? [{pageNumber:page.pageNumber,uncoveredResults,uncertainRows,pendingVisualResults,
+          ...(ocrUnresolved ? {ocrUnresolved} : {}), ...(ocrUnretried ? {ocrUnretried} : {})}] : [];
+    });
+}
+
 export function visionReviewCandidates(
   plan: AiExtractionPlan,
   result: AiExtractionResult,
@@ -2309,7 +2465,8 @@ export function visionReviewCandidates(
   )) {
     for (const candidate of unitCandidateLines(plan, unit)) {
       if (candidate.line.candidateKind !== "scalar") continue;
-      if (resultMatchesCandidateLine(result, candidate.line)) continue;
+      if (!candidate.line.nameReviewCandidate && !candidate.line.lowConfidenceFields?.length
+        && resultMatchesCandidateLine(result, candidate.line, candidate.page.pageNumber)) continue;
       if (seen.has(candidate.line.id)) continue;
       seen.add(candidate.line.id);
       candidates.push({
@@ -2327,7 +2484,7 @@ export function visionReviewCandidates(
     for (const line of page.lines) {
       if (seen.has(line.id)) continue;
       if (!measurementShapedNoiseLine(line)) continue;
-      if (resultMatchesCandidateLine(result, line)) continue;
+      if (resultMatchesCandidateLine(result, line, page.pageNumber)) continue;
       seen.add(line.id);
       candidates.push({
         pageId: page.pageId,
@@ -2346,24 +2503,36 @@ export function visionReviewCandidates(
  */
 export function detectTableSerialGapPages(plan: AiExtractionPlan): number[] {
   const gapPages: number[] = [];
+  const precedingSerial = new Map<string, number>();
   for (const page of plan.pages) {
-    const groups = new Map<string, { serials: number[]; counted: number }>();
+    const groups = new Map<string, { serials: Set<number>; counted: Set<number>; unnumbered: number }>();
+    let headerOccurrence = 0;
     for (const line of page.lines) {
+      if (line.boundary) headerOccurrence += 1;
       const header = line.tableHeaderText || "";
       if (!header) continue;
-      const group = groups.get(header) || { serials: [], counted: 0 };
+      const headerSources = line.projectHeaderCells?.flatMap(cell => cell.sourceLineIds)
+        || line.tableHeaderSourceLineIds;
+      const key = `${line.tableHeaderSourcePageNumber ?? page.pageNumber}:${headerSources?.length ? headerSources.join(',') : `${page.pageId}:${headerOccurrence}`}:${header}`;
+      const group = groups.get(key) || { serials: new Set<number>(), counted: new Set<number>(), unnumbered: 0 };
       const serial = line.text.trim().match(/^(\d{1,3})\s*[|｜]/);
-      if (serial) group.serials.push(Number(serial[1]));
+      if (serial) group.serials.add(Number(serial[1]));
       if (line.candidate || localObservationsForLine(line).length > 0) {
-        group.counted += 1;
+        if (serial) group.counted.add(Number(serial[1]));
+        else group.unnumbered += 1;
       }
-      groups.set(header, group);
+      groups.set(key, group);
     }
-    const hasGap = [...groups.values()].some((group) => {
-      if (group.serials.length < 3) return false;
+    let hasGap = false;
+    for (const [key, group] of groups) {
+      if (group.serials.size < 3) continue;
+      const minSerial = Math.min(...group.serials);
       const maxSerial = Math.max(...group.serials);
-      return group.counted < maxSerial;
-    });
+      const previous = precedingSerial.get(key);
+      const start = previous !== undefined && minSerial > previous ? previous + 1 : minSerial;
+      if (group.counted.size + group.unnumbered < maxSerial - start + 1) hasGap = true;
+      precedingSerial.set(key, maxSerial);
+    }
     if (hasGap) gapPages.push(page.pageNumber);
   }
   return gapPages;
@@ -2388,7 +2557,7 @@ function supplementUnits(plan: AiExtractionPlan, result: AiExtractionResult) {
     (item) => item.unitType !== "supplement",
   )) {
     for (const candidate of unitCandidateLines(plan, unit)) {
-      if (resultMatchesCandidateLine(result, candidate.line)) continue;
+      if (resultMatchesCandidateLine(result, candidate.line, candidate.page.pageNumber)) continue;
       if (candidate.line.candidateResolutionReason !== "supplement_required"
         && !(!candidate.line.tableStructureUnsafe && mappedOcrMeasurement(candidate.line.text, candidate.line.tableHeaderText)))
         continue;
@@ -2686,6 +2855,7 @@ function deterministicBasicObservations(
   };
   for (const page of plan.pages) {
     for (const line of page.lines) {
+      if (line.tableStructureUnsafe || line.lowConfidenceFields?.length || line.nameReviewCandidate) continue;
       for (const definition of basicMeasurements) {
         if (existing.has(compactEvidence(definition.name))) continue;
         const alias = line.text.match(definition.aliases);
@@ -2825,6 +2995,7 @@ function deterministicVascularObservations(
   for (const page of plan.pages) {
     let activeMetric: VascularMetric | null = null;
     for (const line of page.lines) {
+      if (line.tableStructureUnsafe || line.lowConfidenceFields?.length || line.nameReviewCandidate) continue;
       const explicitMetric = vascularMetricFromText(line.text);
       if (explicitMetric) activeMetric = explicitMetric;
       const metric = explicitMetric || activeMetric;
@@ -2903,7 +3074,7 @@ function withDeterministicFallback(
   );
   const fieldsWithTables = {
     ...result.fields,
-    observations: [...result.fields.observations, ...tableAdditions],
+    observations: withoutSupersededOcrObservations(plan, [...result.fields.observations, ...tableAdditions]),
   };
   const basicAdditions = deterministicBasicObservations(plan, fieldsWithTables);
   const vascular = deterministicVascularObservations(plan, fieldsWithTables);
@@ -3160,7 +3331,7 @@ function updateCandidateQuality(
     const candidates = unitCandidateLines(plan, unit);
     let matched = 0;
     for (const item of candidates) {
-      const resolved = resultMatchesCandidateLine(result, item.line);
+      const resolved = resultMatchesCandidateLine(result, item.line, item.page.pageNumber);
       const directlyExtracted =
         resolved && resultMatchesLine(result, item.line.text);
       if (resolved) matched += 1;
@@ -3289,10 +3460,13 @@ export function mergeAiExtractionResults(
     {},
     ...results.map((result) => result.fields.clinicians),
   );
-  mergedSource.observations = uniqueBy(
-    results.flatMap((result) => result.fields.observations),
-    observationKey,
-  );
+  const observationsByKey = new Map<string, AiObservation>();
+  for (const observation of results.flatMap(result => result.fields.observations)) {
+    const key = observationKey(observation);
+    const existing = observationsByKey.get(key);
+    observationsByKey.set(key, existing ? mergeObservationPair(existing, observation) : observation);
+  }
+  mergedSource.observations = [...observationsByKey.values()];
   mergedSource.morphologyFindings = uniqueBy(
     results.flatMap((result) => result.fields.morphologyFindings),
     morphologyKey,
@@ -3314,8 +3488,13 @@ export function mergeAiExtractionResults(
         compactEvidence(item.medicationName),
         compactEvidence(item.specification || ""),
         compactEvidence(item.dose || ""),
+        compactEvidence(item.doseUnit || ""),
         compactEvidence(item.frequency || ""),
         compactEvidence(item.route || ""),
+        compactEvidence(item.duration || ""),
+        compactEvidence(item.quantity || ""),
+        compactEvidence(item.quantityUnit || ""),
+        compactEvidence(item.instructions || ""),
       ].join("\u0000"),
   );
   mergedSource.procedures = uniqueBy(
@@ -3834,10 +4013,19 @@ export async function executeAiExtractionPlan(
   const visionCandidates = visionAllowed
     ? visionReviewCandidates(plan, merged)
     : [];
-  if (visionCandidates.length) {
+  const gapPages = new Set(detectTableSerialGapPages(plan));
+  const pageReviews = visionAllowed ? plan.pages.filter(page =>
+    gapPages.has(page.pageNumber) || (page.uncoveredResultCount || 0) > 0
+    || (page.ocrRetryRemaining || 0) > 0
+    || (page.ocrRetryUnresolved || 0) > 0
+    || page.lines.some(line => line.tableStructureUnsafe)
+    || (['no_structure','failed','partial'].includes(page.tableStructureStatus || '')
+      && page.lines.some(line => /阳性|阴性|未检出|检出|结果|results?/i.test(line.text)))
+  ).map(page => ({pageId:page.pageId,pageNumber:page.pageNumber})) : [];
+  if (visionCandidates.length || pageReviews.length) {
     const visionReview = options.visionReview ?? runVisionReview;
     const visionResult = await visionReview(
-      { reportId, result: merged, candidates: visionCandidates },
+      { reportId, result: merged, candidates: visionCandidates, pageReviews },
       options,
     );
     if (visionResult) {
@@ -3868,7 +4056,7 @@ export async function executeAiExtractionPlan(
   ).length;
   for (const unit of supplements) {
     const unresolved = unitCandidateLines(plan, unit).filter(
-      (item) => !resultMatchesCandidateLine(merged, item.line),
+      (item) => !resultMatchesCandidateLine(merged, item.line, item.page.pageNumber),
     ).length;
     if (!unresolved) continue;
     warningUnits += 1;
@@ -3892,6 +4080,7 @@ export async function executeAiExtractionPlan(
     ),
     unmatchedCandidates,
     tableSerialGapPages: detectTableSerialGapPages(plan),
+    layoutWarnings: finalLayoutWarnings(plan, merged),
     warningUnits,
   };
 }

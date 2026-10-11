@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createError } from 'h3';
 import type { RequestUser } from '../domain/request-user';
 import { getAppConfig } from '../utils/runtime-config';
-import { assertMemberManage } from './member.service';
+import { assertMemberManage, requireAuthenticated } from './member.service';
 import { createUploadFromStagedFiles, detectUploadType } from './upload.service';
 
 type StagedManifest = { memberId: string; files: Array<{ originalName: string; size: number; rotation: number }> };
@@ -23,6 +23,7 @@ function stageDirectory(user: RequestUser, key: string) {
   return join(getAppConfig().storageDir, 'upload-staging', createHash('sha256').update(`${user.id}\0${key}`).digest('hex'));
 }
 function readStage(user: RequestUser, key: string) {
+  requireAuthenticated(user);
   const directory = stageDirectory(user, key);
   if (!existsSync(join(directory, 'manifest.json'))) throw createError({ statusCode: 404, statusMessage: '上传暂存不存在，请重新初始化' });
   const text = readFileSync(join(directory, 'manifest.json'), 'utf8');
@@ -67,10 +68,15 @@ export function startStagedUpload(user: RequestUser, key: string, input: StagedM
   });
   return { received };
 }
-export function storeStagedFile(user: RequestUser, key: string, index: number, data: Uint8Array) {
+export function assertStagedFileAccess(user: RequestUser, key: string, index: number) {
   const { directory, manifest } = readStage(user, key);
   const file = Number.isInteger(index) && index >= 0 ? manifest.files[index] : undefined;
-  if (!file || data.byteLength !== file.size) throw createError({ statusCode: 400, data: { code: "UPLOAD_INVALID" }, statusMessage: '文件大小或实际格式与上传要求不符' });
+  if (!file) throw createError({statusCode:400,data:{code:'UPLOAD_INVALID'},statusMessage:'上传文件序号无效'});
+  return {directory, file};
+}
+export function storeStagedFile(user: RequestUser, key: string, index: number, data: Uint8Array) {
+  const { directory, file } = assertStagedFileAccess(user, key, index);
+  if (data.byteLength !== file.size) throw createError({ statusCode: 400, data: { code: "UPLOAD_INVALID" }, statusMessage: '文件大小或实际格式与上传要求不符' });
   if (!detectUploadType(data)) throw createError({ statusCode: 415, data: { code: "FILE_FORMAT_UNSUPPORTED" }, statusMessage: '文件实际格式不受支持' });
   const path = join(directory, `${index}.bin`);
   const hash = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');

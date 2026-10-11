@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { onBeforeRouteLeave, useRouter } from "vue-router";
 import {
   AlertCircle,
   Bot,
@@ -78,6 +79,7 @@ const ai = ref<AiSettings>({
   tasks: [],
   taskBindings: {}
 });
+const router = useRouter();
 const message = ref("");
 const toast = useToast();
 const confirmDialog = useConfirm();
@@ -85,9 +87,12 @@ const loading = ref(true);
 const loadError = ref("");
 const saving = ref(false);
 
-// 编辑器里输入但尚未保存的 Key，以及明确要求清除的 Key
-const apiKeyDrafts = ref<Record<string, string>>({});
-const clearKeyFlags = ref<Record<string, boolean>>({});
+const savedSnapshot = ref("");
+const hasUnsavedSettings = computed(() => Boolean(savedSnapshot.value) && JSON.stringify(ai.value) !== savedSnapshot.value);
+watch(hasUnsavedSettings, (dirty) => { if (dirty) message.value = ""; });
+const editorClearKey = ref(false);
+const editorSnapshot = ref("");
+const hasUnsavedEditor = computed(() => editorOpen.value && (editorClearKey.value || JSON.stringify(editor.value) !== editorSnapshot.value));
 // 已在服务端保存过的配置 id，用于测试连接时复用已存 Key
 const persistedIds = ref<Set<string>>(new Set());
 
@@ -148,6 +153,8 @@ function newProfileId() {
 }
 
 function openEditor(profile?: AiProfile) {
+  if (saving.value) return;
+  editorClearKey.value = false;
   testSteps.value = [];
   editorMessage.value = "";
   showTextModelDropdown.value = false;
@@ -161,7 +168,7 @@ function openEditor(profile?: AiProfile) {
       textModel: profile.textModel,
       visionModel: profile.visionModel,
       visionEnabled: profile.visionEnabled,
-      apiKey: apiKeyDrafts.value[profile.id] || "",
+      apiKey: "",
       apiKeyConfigured: profile.apiKeyConfigured,
       apiKeyMasked: profile.apiKeyMasked
     };
@@ -180,11 +187,15 @@ function openEditor(profile?: AiProfile) {
       apiKeyMasked: ""
     };
   }
+  editorSnapshot.value = JSON.stringify(editor.value);
   editorOpen.value = true;
 }
 
 function closeEditor() {
+  if (saving.value) return;
   editorOpen.value = false;
+  editor.value.apiKey = "";
+  editorClearKey.value = false;
 }
 
 function changeEditorProvider() {
@@ -197,19 +208,14 @@ function changeEditorProvider() {
 }
 
 function clearSavedKey() {
-  clearKeyFlags.value[editorId.value] = true;
-  delete apiKeyDrafts.value[editorId.value];
+  editorClearKey.value = true;
   editor.value.apiKey = "";
   editor.value.apiKeyConfigured = false;
   editor.value.apiKeyMasked = "";
 }
 
-function maskLocal(apiKey: string) {
-  if (apiKey.length <= 8) return "••••••••";
-  return `${apiKey.slice(0, 3)}••••${apiKey.slice(-4)}`;
-}
-
-function applyEditor() {
+async function applyEditor() {
+  if (saving.value) return;
   editorMessage.value = "";
   if (!editor.value.baseUrl.trim()) {
     editorMessage.value = "请填写 API 地址";
@@ -217,8 +223,7 @@ function applyEditor() {
   }
   const label = currentEditorProvider.value?.label || "自定义";
   const typedKey = editor.value.apiKey.trim();
-  if (typedKey) delete clearKeyFlags.value[editorId.value];
-  const cleared = clearKeyFlags.value[editorId.value] === true && !typedKey;
+
   const profile: AiProfile = {
     id: editorId.value,
     name: editor.value.name.trim() || label,
@@ -228,16 +233,21 @@ function applyEditor() {
     baseUrl: editor.value.baseUrl.trim(),
     textModel: editor.value.textModel.trim(),
     visionModel: editor.value.visionModel.trim(),
-    apiKeyConfigured: cleared ? false : editor.value.apiKeyConfigured || Boolean(typedKey),
-    apiKeyMasked: cleared ? "" : typedKey ? maskLocal(typedKey) : editor.value.apiKeyMasked
+    apiKeyConfigured: editor.value.apiKeyConfigured,
+    apiKeyMasked: editor.value.apiKeyMasked
   };
-  const index = ai.value.profiles.findIndex((item) => item.id === profile.id);
-  if (index >= 0) ai.value.profiles.splice(index, 1, profile);
-  else ai.value.profiles.push(profile);
-  if (typedKey) apiKeyDrafts.value[profile.id] = typedKey;
-  if (!ai.value.defaultProfileId) ai.value.defaultProfileId = profile.id;
-  editorOpen.value = false;
-  message.value = "连接配置已更新，点击“保存配置”后生效";
+  const exists = ai.value.profiles.some((item) => item.id === profile.id);
+  const candidate = {
+    ...ai.value,
+    profiles: exists ? ai.value.profiles.map((item) => item.id === profile.id ? profile : item) : [...ai.value.profiles, profile],
+    defaultProfileId: ai.value.defaultProfileId || profile.id
+  };
+  if (await save(candidate, { id: profile.id, apiKey: typedKey, clearApiKey: editorClearKey.value && !typedKey })) {
+    closeEditor();
+    toast.show("AI 配置已保存");
+  } else {
+    editorMessage.value = message.value;
+  }
 }
 
 function removeProfile(profile: AiProfile) {
@@ -259,9 +269,7 @@ function removeProfile(profile: AiProfile) {
           binding.inherited = true;
         }
       }
-      delete apiKeyDrafts.value[profile.id];
-      delete clearKeyFlags.value[profile.id];
-      persistedIds.value.delete(profile.id);
+
       message.value = "连接配置已移除，点击“保存配置”后生效";
     }
   });
@@ -380,15 +388,15 @@ function editableSettings(value: AiSettings): AiSettings {
 function applyLoadedSettings(value: AiSettings) {
   ai.value = editableSettings(value);
   persistedIds.value = new Set(value.profiles.map((profile) => profile.id));
-  apiKeyDrafts.value = {};
-  clearKeyFlags.value = {};
+  savedSnapshot.value = JSON.stringify(ai.value);
 }
 
-async function save() {
+async function save(settings = ai.value, secret?: { id: string; apiKey: string; clearApiKey: boolean }) {
+  if (saving.value) return false;
   saving.value = true; message.value = "";
   try {
     const taskBindings = Object.fromEntries(implementedTasks.value.map((task) => {
-      const binding = ai.value.taskBindings[task.key];
+      const binding = settings.taskBindings[task.key];
       return [
         task.key,
         binding?.profileId
@@ -397,11 +405,11 @@ async function save() {
       ];
     }));
     const body = {
-      enabled: ai.value.enabled,
-      requestTimeoutSeconds: ai.value.requestTimeoutSeconds,
-      extractionDepth: ai.value.extractionDepth,
-      defaultProfileId: ai.value.defaultProfileId,
-      profiles: ai.value.profiles.map((profile) => ({
+      enabled: settings.enabled,
+      requestTimeoutSeconds: settings.requestTimeoutSeconds,
+      extractionDepth: settings.extractionDepth,
+      defaultProfileId: settings.defaultProfileId,
+      profiles: settings.profiles.map((profile) => ({
         id: profile.id,
         name: profile.name,
         provider: profile.provider,
@@ -409,8 +417,8 @@ async function save() {
         baseUrl: profile.baseUrl,
         textModel: profile.textModel,
         visionModel: profile.visionModel,
-        ...(apiKeyDrafts.value[profile.id]?.trim() ? { apiKey: apiKeyDrafts.value[profile.id].trim() } : {}),
-        ...(clearKeyFlags.value[profile.id] && !apiKeyDrafts.value[profile.id]?.trim() ? { clearApiKey: true } : {})
+        ...(secret?.id === profile.id && secret.apiKey ? { apiKey: secret.apiKey } : {}),
+        ...(secret?.id === profile.id && secret.clearApiKey ? { clearApiKey: true } : {})
       })),
       taskBindings
     };
@@ -419,8 +427,9 @@ async function save() {
       body: JSON.stringify(body)
     }));
     message.value = "AI 配置已保存";
+    return true;
   }
-  catch (error) { message.value = error instanceof Error ? error.message : "保存失败"; }
+  catch (error) { message.value = error instanceof Error ? error.message : "保存失败"; return false; }
   finally { saving.value = false; }
 }
 
@@ -436,6 +445,28 @@ async function loadSettings() {
   }
 }
 
+onBeforeRouteLeave((to) => {
+  if (saving.value) return false;
+  if (!hasUnsavedSettings.value && !hasUnsavedEditor.value) return true;
+  confirmDialog.ask({
+    title: "还有未保存的 AI 配置",
+    message: "离开后将丢弃本次修改，实际调用仍使用已保存的配置。",
+    confirmText: "放弃修改并离开",
+    run: async () => {
+      savedSnapshot.value = JSON.stringify(ai.value);
+      closeEditor();
+      await router.push(to.fullPath);
+    }
+  });
+  return false;
+});
+
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!saving.value && !hasUnsavedSettings.value && !hasUnsavedEditor.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 // 点击外部关闭模型下拉框
 const handleClickOutside = (event: MouseEvent) => {
   const target = event.target as HTMLElement;
@@ -448,10 +479,12 @@ const handleClickOutside = (event: MouseEvent) => {
 onMounted(() => {
   void loadSettings();
   document.addEventListener("click", handleClickOutside);
+  window.addEventListener("beforeunload", beforeUnload);
 });
 
 onUnmounted(() => {
   document.removeEventListener("click", handleClickOutside);
+  window.removeEventListener("beforeunload", beforeUnload);
 });
 </script>
 
@@ -463,7 +496,7 @@ onUnmounted(() => {
       {{ loadError }}<button class="error-retry" type="button" @click="loadSettings">重试</button>
     </p>
     <template v-else>
-      <section class="settings-band">
+      <section class="settings-band" :inert="saving">
         <header><Plug :size="21" /><div><h3>连接配置</h3><p>每份配置包含地址、Key 和模型，可添加任意多份</p></div></header>
         <div v-if="ai.profiles.length" class="ai-profile-list">
           <article v-for="profile in ai.profiles" :key="profile.id" class="ai-profile-row">
@@ -484,7 +517,7 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section class="settings-band">
+      <section class="settings-band" :inert="saving">
         <header><Bot :size="21" /><div><h3>模型配置</h3><p>使用兼容 Chat Completions 的服务</p></div></header>
         <div class="settings-form">
           <label class="toggle-row"><div><strong>启用 AI 整理</strong><span>识别后的文本由 AI 整理为结构化字段</span></div><input v-model="ai.enabled" class="switch" type="checkbox" /></label>
@@ -509,7 +542,7 @@ onUnmounted(() => {
               { value: 'overview', label: '概览（默认，更省 Token）' },
               { value: 'detailed', label: '详细（含叙事章节与遗漏复核）' }
             ]" aria-label="AI 解析程度" />
-            <small class="field-hint">概览模式仍逐项提取指标和形态发现并保留证据校验，但合并解析单元、跳过叙事章节和遗漏复核，Token 消耗更低；对新上传和重新整理的报告生效</small>
+            <small class="field-hint">概览模式仍逐项提取指标、形态发现，以及处方、门诊记录和出院带药等明确用药内容，并保留证据校验；跳过其他叙事页面和常规遗漏复核，Token 消耗更低。对新上传和重新整理的报告生效</small>
           </label>
           <section v-if="implementedTasks.length" class="ai-task-bindings">
             <header><strong>场景模型</strong><span>默认继承上方默认连接，也可为单个场景指定其他连接</span></header>
@@ -531,9 +564,10 @@ onUnmounted(() => {
               />
             </article>
           </section>
-          <p v-if="message" class="form-message">{{ message }}</p>
+          <p v-if="hasUnsavedSettings" class="form-message" role="status">有未保存的修改，点击“保存配置”后生效</p>
+          <p v-if="message" class="form-message" role="status">{{ message }}</p>
           <div class="form-actions">
-            <button class="primary-button" type="button" :disabled="saving" @click="save">
+            <button class="primary-button" type="button" :disabled="saving" @click="save()">
               <LoaderCircle v-if="saving" class="spin-icon" :size="17" />
               <Save v-else :size="17" />
               {{ saving ? "保存中" : "保存配置" }}
@@ -551,7 +585,8 @@ onUnmounted(() => {
             <div><Plug :size="20" /><h3>{{ persistedIds.has(editorId) ? "编辑连接配置" : "添加连接配置" }}</h3></div>
             <button type="button" title="关闭" @click="closeEditor"><X :size="19" /></button>
           </header>
-          <div class="ai-profile-editor-form settings-form">
+          <div class="ai-profile-editor-form settings-form" :inert="saving">
+            <small class="field-hint">保存后立即生效，无需再次保存；同时保存本页的默认连接和场景设置。测试连接不会保存修改。</small>
             <label>
               <span>服务商预设</span>
               <FormSelect
@@ -651,20 +686,23 @@ onUnmounted(() => {
           <p v-if="editorMessage" class="form-message ai-editor-message">{{ editorMessage }}</p>
 
           <footer class="ai-editor-footer">
-            <button type="button" class="soft-action-button" :disabled="testing" @click="test">
+            <button type="button" class="soft-action-button" :disabled="saving || testing" @click="test">
               <LoaderCircle v-if="testing" class="spin-icon" :size="15" />
               <TestTubeDiagonal v-else :size="15" />
               快速测试
             </button>
-            <button type="button" class="soft-action-button" :disabled="enhancedTesting" @click="testEnhanced">
+            <button type="button" class="soft-action-button" :disabled="saving || enhancedTesting" @click="testEnhanced">
               <LoaderCircle v-if="enhancedTesting" class="spin-icon" :size="15" />
               <TestTubeDiagonal v-else :size="15" />
               完整测试
             </button>
-            <button v-if="supportsVision && editor.visionModel.trim()" type="button" class="soft-action-button" :disabled="testing" @click="testVision">测试视觉</button>
+            <button v-if="supportsVision && editor.visionModel.trim()" type="button" class="soft-action-button" :disabled="saving || testing" @click="testVision">测试视觉</button>
             <span class="spacer"></span>
-            <button type="button" @click="closeEditor">取消</button>
-            <button type="button" class="primary-button" @click="applyEditor">确定</button>
+            <button type="button" :disabled="saving" @click="closeEditor">取消</button>
+            <button type="button" class="primary-button" :disabled="saving" @click="applyEditor">
+              <LoaderCircle v-if="saving" class="spin-icon" :size="17" />
+              {{ saving ? "保存中" : "保存配置" }}
+            </button>
           </footer>
         </section>
       </div>

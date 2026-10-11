@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { closeDatabaseForTests, getDatabase } from "../database/client.ts";
 import type { RequestUser } from "../domain/request-user.ts";
-import { runFileGarbageCollection } from "../services/file-gc.service.ts";
+import { runFileGarbageCollection, scanOrphanStorageFiles, enqueueFileGarbage } from "../services/file-gc.service.ts";
+import { reportPagePreviewPaths } from '../utils/report-page-previews';
 import {
   deleteReportPage,
   getReportDetail,
@@ -65,13 +66,28 @@ test("keeps a shared original until its final page is purged and removes page th
     `).run(sharedRelativePath, `thumbnails/${upload.reportId}/${detail.pages[1].id}.jpg`, detail.pages[1].id);
     rmSync(secondOriginal, { force: true });
 
+    const deletedPreviews = reportPagePreviewPaths(upload.reportId,detail.pages[0].id);
+    const retainedPreviews = reportPagePreviewPaths(upload.reportId,detail.pages[1].id);
+    const orphan = `previews/${upload.reportId}/deleted-before-upgrade.r90.jpg`;
+    for (const path of [...deletedPreviews,...retainedPreviews,orphan]) {
+      mkdirSync(dirname(join(storageDir,path)),{recursive:true});
+      writeFileSync(join(storageDir,path),'synthetic preview');
+    }
+
     deleteReportPage(manager, upload.reportId, detail.pages[0].id);
     db.prepare("UPDATE file_gc_queue SET not_before = datetime('now', '-1 minute')").run();
     const firstGc = runFileGarbageCollection();
-    assert.equal(firstGc.deleted, 1);
+    assert.equal(firstGc.deleted, 1 + deletedPreviews.length);
     assert.equal(firstGc.retained, 1);
     assert.equal(existsSync(firstThumbnail), false);
     assert.equal(existsSync(firstOriginal), true);
+    assert.ok(deletedPreviews.every(path => !existsSync(join(storageDir,path))));
+    assert.ok(retainedPreviews.every(path => existsSync(join(storageDir,path))));
+    enqueueFileGarbage(retainedPreviews.map(storagePath => ({storagePath,fileKind:'other'})), 'test_current_page',db,0);
+    assert.equal(runFileGarbageCollection().retained,retainedPreviews.length);
+    assert.equal(scanOrphanStorageFiles(0).queued,1);
+    assert.equal(runFileGarbageCollection().deleted,1);
+    assert.equal(existsSync(join(storageDir,orphan)),false);
 
     trashReport(manager, upload.reportId);
     db.prepare("UPDATE reports SET purge_after = datetime('now', '-1 minute') WHERE id = ?").run(upload.reportId);
@@ -79,7 +95,7 @@ test("keeps a shared original until its final page is purged and removes page th
     assert.equal(cleanup.deleted, 1);
     db.prepare("UPDATE file_gc_queue SET not_before = datetime('now', '-1 minute') WHERE completed_at IS NULL").run();
     const finalGc = runFileGarbageCollection();
-    assert.equal(finalGc.deleted, 2);
+    assert.equal(finalGc.deleted, 2 + retainedPreviews.length);
     assert.equal(existsSync(firstOriginal), false);
     assert.equal(existsSync(secondThumbnail), false);
     const remainingReport = db.prepare("SELECT COUNT(*) AS count FROM reports WHERE id = ?")

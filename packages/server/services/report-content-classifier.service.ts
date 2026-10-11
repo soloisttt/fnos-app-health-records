@@ -12,7 +12,35 @@ export const reportContentTypes = [
   "other"
 ] as const;
 
-export const reportContentClassifierVersion = "local-content-router-v1";
+export const reportContentClassifierVersion = "local-content-router-v2-medications";
+
+const medicationHeading = /处方笺|处方信息|(?:普通|电子|门诊|住院)处方|用药清单|药物清单|用药记录|出院用药|出院带药|用药医嘱|长期医嘱|临时医嘱|当前用药/;
+const medicationUsage = /用法(?:用量)?|每次剂量|给药途径|(?:口服|静滴|静注|外用|皮下注射|肌内注射|局部封闭).{0,30}(?:每日|每次|即刻|\b(?:qd|bid|tid|qid|prn|stat)\b)/i;
+const medicationProduct = /[\u3400-\u9fffA-Za-z]{2,}(?:片|胶囊|颗粒|注射液|口服液|滴眼液|软膏|乳膏)|药品名称|药物名称/;
+const nonMedicationDocument = /药品说明书|药物说明书|不良反应.{0,80}禁忌/;
+
+function medicationText(value: string) {
+  return value.normalize("NFKC").replace(/(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, "").replace(/\s+/g, " ");
+}
+
+/** Routing signals only: never infer a drug, a dose, or a treatment from them. */
+export function hasMedicationContent(value: string) {
+  const text = medicationText(value);
+  if (nonMedicationDocument.test(text)) return false;
+  if (medicationHeading.test(text)) return true;
+  const usage = medicationUsage.test(text);
+  // Purchasing a drug does not establish a prescription or administration.
+  if (/收费|费用清单|结算单|发票/.test(text) && !usage) return false;
+  return medicationProduct.test(text) && (usage ||
+    /(?:药品名称|药物名称).{0,60}规格.{0,60}数量/.test(text));
+}
+
+export function hasMedicationContinuation(value: string) {
+  const text = medicationText(value);
+  return !nonMedicationDocument.test(text) &&
+    !/过敏史|过敏原|药物过敏/.test(text) &&
+    (medicationUsage.test(text) || (medicationProduct.test(text) && /\d+(?:\.\d+)?\s*(?:mg|g|ml|μg|ug|片|粒|支|袋)(?![A-Za-z])/i.test(text)));
+}
 
 export type ReportContentType = typeof reportContentTypes[number];
 
@@ -88,7 +116,7 @@ const rules: ClassificationRule[] = [
   {
     type: "prescription",
     signals: [
-      { pattern: /处方笺|电子处方|门诊处方|住院处方/, weight: 10, reason: "处方标题" },
+      { pattern: /处\s*方\s*笺|电子处方|门诊处方|住院处方|普通处方|处方信息|用药清单|药物清单/, weight: 10, reason: "处方标题" },
       { pattern: /药品名称|药物名称|用法用量|每次剂量|给药途径/, weight: 6, reason: "处方字段" },
       { pattern: /规格.{0,20}(?:剂量|频次|数量)|(?:口服|静滴|静注|外用).{0,20}(?:每日|每次)/, weight: 4, reason: "用药信息" }
     ]
@@ -120,6 +148,7 @@ function scoreText(value: string) {
   const scores: Partial<Record<ReportContentType, number>> = {};
   const reasons = new Map<ReportContentType, string[]>();
   for (const rule of rules) {
+    if (rule.type === "prescription" && !hasMedicationContent(value)) continue;
     let score = 0;
     const matchedReasons: string[] = [];
     for (const signal of rule.signals) {
@@ -130,6 +159,17 @@ function scoreText(value: string) {
     if (!score) continue;
     scores[rule.type] = score;
     reasons.set(rule.type, matchedReasons);
+  }
+  if (hasMedicationContent(value)) {
+    scores.prescription = Math.max(scores.prescription || 0, 8);
+    if (!reasons.has("prescription")) reasons.set("prescription", ["明确用药内容"]);
+    // Embedded medication tables must not rename the enclosing clinical record.
+    for (const [type, title] of [
+      ["outpatient", /门诊病历|门诊记录/],
+      ["inpatient", /入院记录|出院记录|出院小结|住院病案/],
+    ] as const) {
+      if (title.test(text)) scores[type] = Math.max(scores[type] || 0, scores.prescription + 1);
+    }
   }
   return { scores, reasons };
 }

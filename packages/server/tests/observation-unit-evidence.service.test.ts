@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeDatabaseForTests, getDatabase } from '../database/client.ts';
-import { normalizeObservation } from '../services/indicator-normalization.service.ts';
+import { assessTrendAdmission, normalizeObservation } from '../services/indicator-normalization.service.ts';
+import { linkedObservationUnitQuotes } from '../services/observation-unit-evidence.service.ts';
 
 test('unit evidence follows verified row columns and inherited headers, never unrelated pages or invented units', () => {
   const dir = mkdtempSync(join(tmpdir(), 'unit-evidence-'));
@@ -48,5 +49,16 @@ test('unit evidence follows verified row columns and inherited headers, never un
     assert.ok(['high','medium'].includes(normalizeObservation({...row,evidenceJson:JSON.stringify(linked)}).quality));
     linked[0].table.headerSourcePageNumber = 3;
     assert.match(normalizeObservation({...row,evidenceJson:JSON.stringify(linked)}).excludedReason || '', /单位无法回指/);
+    const sharedQuote = 'ALT | 40 | mg/L | AST | 40 | U/L';
+    db.prepare("UPDATE ocr_results SET lines_json = ? WHERE page_id = 'p2'").run(JSON.stringify([{id:'row',text:sharedQuote}]));
+    const structured = {pageNumber:2,quote:sharedQuote,table:{rowSourceLineIds:['row'],headerSourceLineIds:[],
+      sourceMap:{item:{text:'ALT',sourceLineIds:['row'],cellIndices:[0]},result:{text:'40',sourceLineIds:['row'],cellIndices:[1]},
+        unit:{text:'mg/L',sourceLineIds:['row'],cellIndices:[2],inherited:false}}}};
+    const admission = (entry: typeof structured) => assessTrendAdmission({reportId:'r',itemName:'ALT',resultText:'40',numericValue:40,unit:'U/L',
+      canonicalKey:'liver_alt',canonicalName:'丙氨酸氨基转移酶',normalizationQuality:'high',normalizationMatchedBy:'exact',hasAiExtraction:1,
+      evidenceJson:JSON.stringify([entry])});
+    assert.equal(admission(structured).eligible,false,'linked OCR row must not lend AST unit to ALT');
+    structured.table.sourceMap.unit.text='U/L';
+    assert.deepEqual(linkedObservationUnitQuotes('r',JSON.stringify([structured])),[],'declared cell must contain its unit');
   } finally { closeDatabaseForTests(); delete process.env.STORAGE_DIR; rmSync(dir,{recursive:true,force:true}); }
 });

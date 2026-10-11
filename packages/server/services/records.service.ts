@@ -64,6 +64,7 @@ import type {
 import { isAiReportStructuredSectionCompatible } from "../domain/health-record";
 import { getAppConfig } from "../utils/runtime-config";
 import { createId } from "../utils/identifier";
+import { reportPagePreviewPaths } from '../utils/report-page-previews';
 import { schemaVersion } from "../database/schema";
 import { assertMemberAccess, assertMemberManage, memberAccessSql } from "./member.service";
 import { assessReportMemberIdentity } from "./report-member-identity.service";
@@ -1282,7 +1283,7 @@ export function getReportDetail(
         hasAiExtraction: number;
         dictionaryReferenceJson: string | null;
       };
-      const evidence = parseJson<Array<{ pageNumber?: number; quote?: string; confidence?: number }> | null>(
+      const evidence = parseJson<Array<{ pageNumber?: number; quote?: string; confidence?: number; imageOnly?: boolean; nameCorrected?: boolean; ocrLowConfidence?: boolean }> | null>(
         row.evidenceJson,
         null,
       );
@@ -1364,6 +1365,7 @@ export function getReportDetail(
           : row.canonicalValue,
         manualReviewed: Boolean(row.manualReviewed),
         manualCreated: Boolean(row.manualCreated),
+        requiresVisualReview: !row.manualReviewed && Array.isArray(evidence) && evidence.some(entry => entry.imageOnly === true || entry.nameCorrected === true || entry.ocrLowConfidence === true),
         referenceLow: reference.low,
         referenceHigh: reference.high,
         referenceText: reference.text,
@@ -2589,11 +2591,8 @@ function purgeTrashedReport(
   }
   const pages = reportPageRows(reportId);
   // Only known derivatives for this report; no global scan or eager deletion.
-  const derivedFiles = pages.flatMap(page => [
-    pdfPreviewRelativePath(reportId, page.id),
-    ...[0, 90, 180, 270].map(rotation => pdfPreviewRelativePath(reportId, page.id, rotation)),
-    ...[0, 90, 180, 270].map(rotation => join("previews", "vision", reportId, `${page.id}.r${rotation}.jpg`))
-  ]).filter(path => existsSync(join(getAppConfig().storageDir, path)));
+  const derivedFiles = pages.flatMap(page => reportPagePreviewPaths(reportId, page.id))
+    .filter(path => existsSync(join(getAppConfig().storageDir, path)));
   const exportDirectory = join(getAppConfig().storageDir, "report-exports");
   if (existsSync(exportDirectory)) {
     for (const name of readdirSync(exportDirectory)) {
@@ -3783,6 +3782,12 @@ export function updateReportFields(
   );
   db.exec("BEGIN IMMEDIATE");
   try {
+    if (input.expectedSourceVersion !== undefined) {
+      const current = db.prepare('SELECT source_version AS version FROM reports WHERE id=?').get(reportId) as {version:number};
+      if (!Number.isInteger(input.expectedSourceVersion) || input.expectedSourceVersion !== current.version) {
+        throw createError({statusCode:409,statusMessage:'报告已更新，请刷新后重新校对，当前输入尚未保存'});
+      }
+    }
     db.prepare(`UPDATE reports SET ${setClauses.join(", ")} WHERE id = ?`).run(
       ...values,
       reportId,
@@ -4276,8 +4281,7 @@ export function deleteReportPage(
       [
         { storagePath: page.storagePath, fileKind: "original" },
         { storagePath: page.thumbnailPath, fileKind: "thumbnail" },
-        ...[undefined, 0, 90, 180, 270]
-          .map(rotation => pdfPreviewRelativePath(reportId, pageId, rotation))
+        ...reportPagePreviewPaths(reportId, pageId)
           .filter(relativePath => existsSync(storagePath(relativePath)))
           .map(relativePath => ({ storagePath: relativePath, fileKind: "other" as const })),
       ],

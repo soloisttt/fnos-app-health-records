@@ -84,6 +84,34 @@ test("detects supported formats from file signatures", () => {
   assert.equal(detectUploadType(Buffer.from("plain text")), null);
 });
 
+test('completed extraction exposes only valid layout warning counts', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'upload-layout-warning-'));
+  process.env.STORAGE_DIR = directory;
+  try {
+    const db = getDatabase();
+    db.prepare('INSERT INTO users (id, display_name, is_gateway_admin) VALUES (?, ?, 1)').run(manager.id, 'Test');
+    db.prepare("INSERT INTO health_members (id, display_name, relationship, created_by) VALUES ('layout-member', 'Test', 'self', ?)").run(manager.id);
+    db.prepare("INSERT INTO member_permissions (member_id, user_id, permission, granted_by) VALUES ('layout-member', ?, 'manager', ?)").run(manager.id, manager.id);
+    const upload = createUpload(manager, 'layout-member', [{ originalName: 'synthetic.png', data: pngBytes() }]);
+    db.prepare("INSERT INTO processing_jobs(id,report_id,job_type,status,pipeline_version,deduplication_key) VALUES('layout-job',?,'ai_extract','completed','test','layout-job')").run(upload.reportId);
+    db.prepare("INSERT INTO processing_job_events(id,job_id,report_id,event_type,status,detail_json) VALUES('layout-event','layout-job',?,'completed','completed',?)")
+      .run(upload.reportId, JSON.stringify({planHash:'test',layoutWarnings:[
+        {pageNumber:1,uncoveredResults:2,uncertainRows:1,extra:'synthetic private text'},
+        {pageNumber:-1,uncoveredResults:2,uncertainRows:1},
+        {pageNumber:2,uncoveredResults:'3',uncertainRows:1}, null,
+      ]}));
+    const { listProcessingJobs } = await import('../services/upload.service');
+    const job = listProcessingJobs(manager, upload.reportId).find(job=>job.id==='layout-job');
+    assert.ok(job && 'layoutWarnings' in job);
+    assert.deepEqual(job.layoutWarnings,
+      [{pageNumber:1,uncoveredResults:2,uncertainRows:1}]);
+  } finally {
+    closeDatabaseForTests();
+    delete process.env.STORAGE_DIR;
+    rmSync(directory, {recursive:true,force:true});
+  }
+});
+
 test('processing failure display uses public decode code without changing persisted retry code', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'upload-error-display-'));
   process.env.STORAGE_DIR = directory;

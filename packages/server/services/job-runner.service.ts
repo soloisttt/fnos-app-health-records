@@ -912,6 +912,7 @@ function completeJob(job: JobRow, response: WorkerResponse) {
         typeof ocrMeta.imageCoverage === "number"
           ? ocrMeta.imageCoverage
           : undefined,
+      tableRetryBudget: response.lines?.[0]?.tableRetryBudget,
       elapsedMs: response.elapsedMs,
       workerRssBytes: response.workerRssBytes,
       workerPeakRssBytes: response.workerPeakRssBytes,
@@ -1318,6 +1319,7 @@ export async function processNextJob(
             warningUnits: execution.warningUnits,
             unmatchedCandidates: execution.unmatchedCandidates,
             tableSerialGapPages: execution.tableSerialGapPages,
+            layoutWarnings: execution.layoutWarnings,
             promptTokens: extraction.promptTokens,
             completionTokens: extraction.completionTokens,
             elapsedMs: extraction.elapsedMs,

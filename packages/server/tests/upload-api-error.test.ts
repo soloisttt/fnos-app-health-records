@@ -15,6 +15,7 @@ import { toApiErrorPayload } from '../utils/api-error';
 for (const body of ['', 'broken multipart', '{}']) {
   test(`multipart route rejects malformed or empty payload (${body.length} bytes)`, async () => {
     const app = new H3({ onError: errorHandler });
+    app.use(event => {event.context.requestUser = {id:'synthetic-user',authenticated:true,provider:'local',displayName:'Synthetic',isGatewayAdmin:false};});
     app.post('/api/uploads', uploads);
     const response = await app.request('http://localhost/api/uploads', {
       method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=test' }, body

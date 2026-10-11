@@ -214,6 +214,12 @@ const ocrEmptyWarning = computed(() => {
 });
 const accept = ".heic,.heif,.jpg,.jpeg,.png,.webp,.pdf,image/heic,image/heif,image/jpeg,image/png,image/webp,application/pdf";
 const localSelectionBytes = computed(() => selectedLocalFiles.value.reduce((sum, file) => sum + file.size, 0));
+// 缓存列表引用，避免分组组件回传计划时重新生成 props 并触发渲染循环。
+const localOrganizerFiles = computed(() => selectedLocalFiles.value.map(file => ({ id: `${file.rootId}:${file.path}`, name: file.name })));
+const selectableLocalEntries = computed(() => localEntries.value.filter(entry => entry.type === "file" && (entry.size || 0) <= 40 * 1024 * 1024));
+const selectedLocalKeys = computed(() => new Set(selectedLocalFiles.value.map(file => `${file.rootId}:${file.path}`)));
+const allCurrentLocalSelected = computed(() => selectableLocalEntries.value.length > 0 && selectableLocalEntries.value.every(isLocalSelected));
+
 const currentLocalRoot = computed(() => localRoots.value.find((root) => root.id === localCurrent.value?.rootId) || null);
 const localBreadcrumbs = computed(() => {
   const segments = (localCurrent.value?.path || "").split("/").filter(Boolean);
@@ -508,7 +514,7 @@ function clearQueue() {
 
 function isLocalSelected(entry: LocalImportEntry) {
   if (!localCurrent.value) return false;
-  return selectedLocalFiles.value.some((file) => file.rootId === localCurrent.value?.rootId && file.path === entry.path);
+  return selectedLocalKeys.value.has(`${localCurrent.value.rootId}:${entry.path}`);
 }
 
 async function loadLocalDirectory(rootId?: string, path = "") {
@@ -587,6 +593,31 @@ function toggleLocalFile(entry: LocalImportEntry) {
     name: entry.name,
     size: entry.size || 0
   });
+}
+
+function toggleCurrentLocalFiles() {
+  if (!localCurrent.value || localBrowserLoading.value || localImporting.value) return;
+  const rootId = localCurrent.value.rootId;
+  localError.value = "";
+  if (allCurrentLocalSelected.value) {
+    const paths = new Set(selectableLocalEntries.value.map(entry => entry.path));
+    selectedLocalFiles.value = selectedLocalFiles.value.filter(file => file.rootId !== rootId || !paths.has(file.path));
+    return;
+  }
+  const added = selectableLocalEntries.value.filter(entry => !isLocalSelected(entry)).map(entry => ({
+    rootId, path: entry.path, name: entry.name, size: entry.size || 0
+  }));
+  if (selectedLocalFiles.value.length + added.length > 1000) {
+    localError.value = "一次导入最多选择 1000 个文件，请减少已选文件后重试";
+    return;
+  }
+  if (localSelectionBytes.value + added.reduce((sum, file) => sum + file.size, 0) > 2 * 1024 * 1024 * 1024) {
+    localError.value = "一次导入总大小不能超过 2 GB，请减少已选文件后重试";
+    return;
+  }
+  selectedLocalFiles.value = [...selectedLocalFiles.value, ...added];
+  const oversized = localEntries.value.filter(entry => entry.type === "file" && (entry.size || 0) > 40 * 1024 * 1024).length;
+  if (oversized) localError.value = `已跳过 ${oversized} 个超过 40 MB 的文件`;
 }
 
 async function submitLocalImport() {
@@ -883,6 +914,11 @@ onActivated(() => {
               <button v-if="localRoots.length > 1" type="button" @click="loadLocalDirectory()">切换目录</button>
             </div>
 
+            <div v-if="localCurrent && !localBrowserLoading && selectableLocalEntries.length" class="local-file-selection-actions">
+              <button class="soft-action-button" type="button" :disabled="localImporting" @click="toggleCurrentLocalFiles">{{ allCurrentLocalSelected ? "取消当前目录选择" : "全选当前目录" }}</button>
+              <small>仅选择当前列表中的文件，不含子目录{{ localTruncated ? "；当前仅显示前 500 项" : "" }}</small>
+            </div>
+
             <div v-if="localBrowserLoading" class="local-file-empty"><LoaderCircle class="spin-icon" :size="24" /><span>正在读取目录</span></div>
             <div v-else-if="localError && !localRoots.length" class="local-file-empty is-error"><CircleAlert :size="24" /><span>{{ localError }}</span></div>
             <div v-else-if="!localCurrent && !localRoots.length" class="local-file-empty">
@@ -930,7 +966,7 @@ onActivated(() => {
               </template>
               <p v-if="localTruncated" class="local-file-limit">目录内容较多，仅显示前 500 项，请进入更具体的子目录。</p>
             </div>
-            <UploadOrganizer :files="selectedLocalFiles.map(file => ({ id: `${file.rootId}:${file.path}`, name: file.name }))" @mode="localOrganizationMode = $event" @plan="localOrganizationPlan = $event" />
+            <UploadOrganizer :files="localOrganizerFiles" @mode="localOrganizationMode = $event" @plan="localOrganizationPlan = $event" />
           </div>
 
           <p v-if="(localError || localAvailability?.message) && localRoots.length" class="local-file-error">{{ localError || localAvailability?.message }}</p>

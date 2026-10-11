@@ -8,10 +8,14 @@ import { maxUploadFileBytes } from "../../../shared/upload-limits";
 import { createUploadFromStagedFiles } from "../../services/upload.service";
 import { ok } from "../../utils/api-response";
 import { getRequestUser } from "../../utils/request-user";
+import { requireAuthenticated } from '../../services/member.service';
 
 const maxRequestBytes = 205 * 1024 * 1024;
 
-export default defineEventHandler(async (event) => withMultipartUpload(event, {
+export default defineEventHandler(async (event) => {
+  const user = getRequestUser(event);
+  requireAuthenticated(user);
+  return withMultipartUpload(event, {
   requestBytes: maxRequestBytes, fileBytes: maxUploadFileBytes, files: 1000,
   sizeMessage: '单文件上限 40 MB，单次请求上限 205 MB'
 }, ({ fields, files: receivedFiles }) => {
@@ -41,7 +45,8 @@ export default defineEventHandler(async (event) => withMultipartUpload(event, {
   if (requestKey && (!Array.isArray(expectedPages) || expectedPages.length !== files.length || expectedPages.some((page, index) => page.size !== files[index]?.size))) {
     throw createError({ statusCode: 400, data: { code: "UPLOAD_INVALID" }, statusMessage: '文件清单与接收内容不一致，请重试整份报告' });
   }
-  const result = createUploadFromStagedFiles(getRequestUser(event), memberId, files, requestKey);
+  const result = createUploadFromStagedFiles(user, memberId, files, requestKey);
   setResponseStatus(event, 201);
   return ok(result);
-}));
+  });
+});

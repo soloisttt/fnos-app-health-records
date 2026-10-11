@@ -4,6 +4,7 @@ import { createError } from "h3";
 import type { RequestUser } from "../domain/request-user";
 import { createId } from "../utils/identifier";
 import { assertMemberManage } from "./member.service";
+import { medicationSourceIdentity, originalMedicationIdentity } from '../utils/medication-source-identity';
 
 export const clinicalFactTypes = [
   "diagnosis",
@@ -231,10 +232,11 @@ export function updateClinicalFact(
   const db = getDatabase();
   db.exec("BEGIN IMMEDIATE");
   try {
+    const manualFields = protectedManualFields(type, id);
     db.prepare(`UPDATE ${configs[type].table} SET ${assignments.join(", ")},
-      source = 'manual', manual_fields_json = '["*"]', is_deleted = 0,
+      source = 'manual', manual_fields_json = ?, is_deleted = 0,
       updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-      .run(...fields.values(), id);
+      .run(...fields.values(), JSON.stringify(manualFields), id);
     appendAudit(user, "update", type, id, fact.reportId, [...fields.keys()]);
     db.exec("COMMIT");
   } catch (error) {
@@ -251,8 +253,8 @@ export function deleteClinicalFact(user: RequestUser, rawType: unknown, id: stri
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(`UPDATE ${configs[type].table} SET
-      source = 'manual', manual_fields_json = '["*","deleted"]', is_deleted = 1,
-      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
+      source = 'manual', manual_fields_json = ?, is_deleted = 1,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(JSON.stringify([...protectedManualFields(type, id), 'deleted']), id);
     appendAudit(user, "delete", type, id, fact.reportId, []);
     db.exec("COMMIT");
   } catch (error) {
@@ -260,4 +262,10 @@ export function deleteClinicalFact(user: RequestUser, rawType: unknown, id: stri
     throw error;
   }
   return { id, reportId: fact.reportId, type };
+}
+
+function protectedManualFields(type: ClinicalFactType, id: string) {
+  if (type !== 'medication') return ['*'];
+  const row = getDatabase().prepare('SELECT * FROM report_medications WHERE id=?').get(id) as Record<string, unknown>;
+  return ['*', originalMedicationIdentity(String(row.manual_fields_json)) || medicationSourceIdentity(row)];
 }

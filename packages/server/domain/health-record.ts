@@ -67,6 +67,7 @@ export type Observation = {
   displayCategory: "standardized" | "medical_candidate" | "technical_measurement" | "qualitative_finding" | "governance_noise";
   displayReason: string | null;
   manualReviewed?: boolean;
+  requiresVisualReview?: boolean;
   manualCreated?: boolean;
   manualCanonicalKey?: string | null;
 };

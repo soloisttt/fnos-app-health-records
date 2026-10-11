@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { duplicatedOcrCodeName, duplicatedOcrResultName, recoverHeaderAlignedTable, validOcrTableCell, type OcrTableCell } from "./ocr-table-structure";
-import { isExplicitOcrTableHeader, isCurrentResultColumn, splitOcrTableCells, mappedOcrMeasurement, ocrProjectColumnGroups } from "./ocr-table-columns";
+import { measurementEvidenceRegions } from '../utils/measurement-bound';
+import { duplicatedOcrCodeName, duplicatedOcrResultName, recoverHeaderAlignedTable, uncoveredOcrResultIds, validOcrTableCell, type OcrTableCell } from "./ocr-table-structure";
+import { normalizeOcrTableHeader, isExplicitOcrTableHeader, isCurrentResultColumn, splitOcrTableCells, mappedOcrMeasurement, ocrProjectColumnGroups } from "./ocr-table-columns";
 import {
   measurementUnitPattern,
   inferUnknownUnit,
@@ -25,6 +26,8 @@ import {
 } from "./observation-reference.service";
 import {
   classifyReportContent,
+  hasMedicationContent,
+  hasMedicationContinuation,
   classifyReportDocument,
   mergeContentClassifications,
   type ReportContentClassification,
@@ -32,7 +35,7 @@ import {
 } from "./report-content-classifier.service";
 
 export const aiInputPlanningPolicy = {
-  version: "ocr-unit-plan-v21",
+  version: "ocr-unit-plan-v25-field-review",
   targetCharacters: 8_000,
   maxPagesPerUnit: 12,
   maxSparsePagesPerUnit: 24,
@@ -41,6 +44,8 @@ export const aiInputPlanningPolicy = {
 } as const;
 
 type RawOcrLine = {
+  tableRetryBudget?: { rowRemaining?: number; cellRemaining?: number; imageRemaining?: number;
+    rowUnresolved?: number; cellUnresolved?: number; imageUnresolved?: number };
   tableUnsafe?: boolean;
   tableCell?: unknown;
   id?: unknown;
@@ -93,9 +98,11 @@ export type PlannedOcrCell = {
   text: string;
   sourceLineIds: string[];
   box: unknown;
+  confidence?: number | null;
 };
 
 export type LocalObservationSourceRef = {
+  confidence?: number | null;
   text: string;
   sourceLineIds: string[];
   cellIndices: number[];
@@ -132,6 +139,12 @@ export type LocalObservationFact = {
 };
 
 export type PlannedOcrLine = {
+  /** An aligned numeric-looking OCR cell still contains an unresolved letter/digit ambiguity. */
+  ocrResultAmbiguous?: true;
+  nameReviewCandidate?: OcrNameReviewCandidate;
+  lowConfidenceFields?: Array<'item' | 'result' | 'unit' | 'qualifier'>;
+  /** Parsed source maps retained for field review even when local admission fails. */
+  localObservationCandidates?: LocalObservationFact[];
   tableStructureUnsafe?: boolean;
   id: string;
   sourceLineIds: string[];
@@ -175,6 +188,11 @@ function lineNeedsAiScalarExtraction(line: PlannedOcrLine) {
 }
 
 export type RebuiltOcrPage = {
+  medicationContent?: boolean;
+  ocrRetryRemaining?: number;
+  ocrRetryUnresolved?: number;
+  uncoveredResultCount?: number;
+  uncoveredResultSourceLineIds?: string[];
   pageId: string;
   pageNumber: number;
   lineCount: number;
@@ -197,6 +215,7 @@ export type RebuiltOcrPage = {
 };
 
 export type AiExtractionUnit = {
+  includesMedicationContent?: boolean;
   unitKey: string;
   inputHash: string;
   unitType: "complete_pages" | "page_chunk" | "supplement";
@@ -417,6 +436,8 @@ function sha256(value: string) {
 }
 
 type DictionaryAliasRow = Omit<DictionaryCandidateFact, "sectionHints"> & {
+  aliasSource?: string;
+  aliasScope?: string;
   normalizedAlias: string;
   sectionHintsJson: string;
 };
@@ -447,7 +468,7 @@ function activeDictionaryAliases() {
       `
     SELECT c.canonical_key AS canonicalKey, c.display_name AS displayName,
       CASE WHEN c.observation_kind = 'categorical' THEN 'categorical' ELSE 'quantitative' END AS kind,
-      c.value_type AS valueType, a.alias_name AS alias, a.normalized_alias AS normalizedAlias,
+      c.value_type AS valueType, a.alias_name AS alias, a.normalized_alias AS normalizedAlias, a.source AS aliasSource, a.scope AS aliasScope,
       c.section_hints_json AS sectionHintsJson
     FROM indicator_aliases a
     JOIN indicator_catalog c ON c.id = a.indicator_id
@@ -510,6 +531,55 @@ function prepareDictionaryAliases(aliases: DictionaryAliasRow[]) {
 }
 
 type PreparedDictionaryAliases = ReturnType<typeof prepareDictionaryAliases>;
+
+export type OcrNameReviewCandidate = {
+  originalName: string;
+  suggestedName: string;
+  canonicalKey: string;
+  sourceLineIds: string[];
+};
+
+function confusableNameCharacter(value: string) {
+  if ('γy'.includes(value)) return 'γ';
+  if ('αa'.includes(value)) return 'α';
+  if ('βb'.includes(value)) return 'β';
+  if ('0o'.includes(value)) return '0';
+  if ('1il'.includes(value)) return '1';
+  return value;
+}
+
+function nameReviewCandidate(name: string, aliases: PreparedDictionaryAliases, sourceLineIds: string[] = []): OcrNameReviewCandidate | null {
+  const compact = compactDictionaryText(name);
+  // Keep short codes, independently known names and all clinical modifiers
+  // intact. Only one visually confusable character in a descriptive name may
+  // propose a review; a suggestion never changes the OCR or dictionary.
+  if (compact.length < 5 || !/[\u3400-\u9fff]{2}/u.test(compact)
+    || exactDictionaryFactsForName(name, aliases).length) return null;
+  const matches = new Map<string, PreparedDictionaryAlias>();
+  for (const alias of aliases.prepared) {
+    if (alias.aliasSource === 'ai_suggestion' || (alias.aliasScope && alias.aliasScope !== 'global')
+      || alias.compact.length !== compact.length) continue;
+    let differences = 0;
+    for (let index = 0; index < compact.length; index++) {
+      if (compact[index] === alias.compact[index]) continue;
+      if (confusableNameCharacter(compact[index]) !== confusableNameCharacter(alias.compact[index])) {
+        differences = 2;
+        break;
+      }
+      differences++;
+      if (differences > 1) break;
+    }
+    if (differences === 1) matches.set(alias.canonicalKey, alias);
+  }
+  if (matches.size !== 1) return null;
+  const alias = [...matches.values()][0];
+  return { originalName: name, suggestedName: alias.displayName, canonicalKey: alias.canonicalKey, sourceLineIds };
+}
+
+/** Validate a narrowly scoped OCR spelling suggestion against the installed trusted dictionary. */
+export function trustedOcrNameReviewCandidate(name: string): OcrNameReviewCandidate | null {
+  return nameReviewCandidate(name, prepareDictionaryAliases(activeDictionaryAliases()));
+}
 
 /*
  * 单字中文别名（当前主要是钾、钠、氯、钙、磷、镁）不能在叙述文本中做
@@ -1155,6 +1225,15 @@ function regionRoleForHeading(text: string): OcrContentRole | null {
   return null;
 }
 
+function hasLowConfidenceMeasurementCell(line: PlannedOcrLine) {
+  return Boolean(line.projectHeaderCells?.some((header, index) => {
+    const measurementField = /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目|单位)$/.test(normalizeOcrTableHeader(header.text))
+      || isCurrentResultColumn(header.text);
+    const confidence = line.sourceCells[index]?.confidence;
+    return measurementField && confidence != null && confidence < .65;
+  }));
+}
+
 function visualSourceCells(
   ordered: PlannedOcrLine[],
   finalText: string,
@@ -1166,6 +1245,7 @@ function visualSourceCells(
       text,
       sourceLineIds: [...line.sourceLineIds],
       box: line.box,
+      confidence: line.confidence,
     }));
   });
   const finalCells = splitTableCells(finalText);
@@ -1177,6 +1257,7 @@ function visualSourceCells(
     text,
     sourceLineIds: expanded[index]?.sourceLineIds || fallbackSourceLineIds,
     box: expanded[index]?.box ?? ordered[0]?.box ?? null,
+    confidence: expanded[index]?.confidence ?? null,
   }));
 }
 
@@ -1684,7 +1765,9 @@ function mergeVisualRow(
   const provisionalCandidate =
     boundary === "section" || nonResultNoise || metadataRow
       ? false
-      : morphology || isCandidateRow(text, unitPattern) || dictionaryResult;
+      : morphology || isCandidateRow(text, unitPattern) || dictionaryResult
+        || suspiciousAlignedResult(sourceCells, unitPattern);
+  const uncertainResult = provisionalCandidate && suspiciousAlignedResult(sourceCells, unitPattern);
   const content = classifyOcrContent({
     text,
     boundary,
@@ -1747,10 +1830,30 @@ function mergeVisualRow(
     boundary,
     role,
     contentRole: content.contentRole,
-    candidateResolutionReason: content.candidateResolutionReason,
+    candidateResolutionReason: uncertainResult ? 'ambiguous_layout' : content.candidateResolutionReason,
+    ...(uncertainResult ? {tableStructureUnsafe:true,ocrResultAmbiguous:true as const} : {}),
     localObservation: null,
     localObservations: [],
   };
+}
+
+function suspiciousAlignedResult(cells: PlannedOcrCell[], unitPattern: RegExp) {
+  if (cells.length < 2 || cells.length > 5) return false;
+  const [name, result] = cells;
+  if (!/\p{L}{2}/u.test(name.text) || /[。；;：:]/.test(name.text)
+    || /^(?:姓名|年龄|性别|出生日期|联系电话|样本编号|报告编号|设备型号|标本|签名|审核)$/.test(name.text.trim())
+    || metadataCandidatePattern.test(name.text) || isNonResultNoise(name.text)) return false;
+  const nameBox = boxRect(name.box), resultBox = boxRect(result.box);
+  if (!nameBox || !resultBox || nameBox.right > resultBox.left
+    || verticalOverlap(nameBox,resultBox) < .5
+    || name.sourceLineIds.some(id => result.sourceLineIds.includes(id))) return false;
+  const value = result.text.normalize('NFKC').trim();
+  const match = value.match(/^(?:[<>≤≥]=?\s*)?[-+]?([\dOoIl]+(?:\.[\dOoIl]+)?)(.*)$/);
+  if (!match || !/\d/.test(match[1]) || (match[1].match(/[OoIl]/g) || []).length !== 1) return false;
+  const suffix = match[2].trim().replace(/[↑↓HL]$/i,'').trim();
+  if (suffix && !new RegExp(`^(?:${unitPattern.source})$`,'iu').test(suffix)) return false;
+  // Store an uncertain region only; never substitute characters in a result.
+  return true;
 }
 
 function isNonResultNoise(text: string) {
@@ -1960,6 +2063,18 @@ function repairDetachedMeasurementValueRows(
   return repaired;
 }
 
+function canJoinWrappedTableName(first: string, second: string, aliases: PreparedDictionaryAliases) {
+  const facts = exactDictionaryFactsForName(first.trim() + second.trim(), aliases);
+  const firstFacts = exactDictionaryFactsForName(first, aliases);
+  const secondFacts = exactDictionaryFactsForName(second, aliases);
+  // Unfamiliar names remain candidates. Two independently known identities
+  // must never turn into a new name merely because their boxes are adjacent.
+  return facts.length <= 1 && (facts.length > 0 || (!firstFacts.length && !secondFacts.length))
+    && !(!facts.length && /^(?:请|建议|备注|说明|参考|审核|签名|报告|咨询)/.test(second.trim()))
+    && !(firstFacts.length && secondFacts.length)
+    && firstFacts.every(fact => fact.canonicalKey === facts[0]?.canonicalKey);
+}
+
 /* 只恢复两行项目名与右侧单一数值，不推断多结果表或任意合并单元格。
  * 在视觉分行前拼接名称，保留两段原始来源；结果、单位和范围仍走原有坐标分行。
  */
@@ -1970,23 +2085,17 @@ function mergeWrappedTableNames(
   const positioned = lines.map((line) => ({ line, rect: boxRect(line.box) }));
   const pairs: Array<{ first: PlannedOcrLine; second: PlannedOcrLine; box: number[] }> = [];
   for (const { line: first, rect: a } of positioned) {
-    if (!a || first.boundary || !/^[\p{L}]{2,}$/u.test(first.text.trim())) continue;
+    if (!a || first.boundary || !/^[\p{L}\p{N}（）().+%\/-]{2,}$/u.test(first.text.trim())
+      || !/\p{L}/u.test(first.text)) continue;
     for (const { line: second, rect: b } of positioned) {
-      if (!b || second.boundary || !/^[\p{L}]+$/u.test(second.text.trim())) continue;
+      if (!b || second.boundary || !/^[\p{L}\p{N}（）().+%\/-]+$/u.test(second.text.trim())) continue;
       const height = Math.min(rectHeight(a), rectHeight(b));
       if (
-        height <= 0 || b.top < a.bottom || b.top - a.bottom > height * 0.7 ||
+        height <= 0 || b.top < a.bottom - height * 0.2 || b.top - a.bottom > height * 0.7 ||
         Math.abs(a.left - b.left) > height * 0.6 ||
         horizontalOverlap(a, b) < 0.7
       ) continue;
-      const facts = exactDictionaryFactsForName(first.text.trim() + second.text.trim(), aliases);
-      if (facts.length !== 1) continue;
-      const firstFacts = exactDictionaryFactsForName(first.text, aliases);
-      const secondFacts = exactDictionaryFactsForName(second.text, aliases);
-      if (
-        (firstFacts.length && secondFacts.length) ||
-        firstFacts.some((fact) => fact.canonicalKey !== facts[0].canonicalKey)
-      ) continue;
+      if (!canJoinWrappedTableName(first.text, second.text, aliases)) continue;
       const right = Math.max(a.right, b.right);
       const band = positioned.filter(({ line, rect }) =>
         line !== first && line !== second && rect &&
@@ -1997,7 +2106,7 @@ function mergeWrappedTableNames(
       const values = band.filter(({ line }) => isStrictVisualNumericCell(line));
       if (values.length !== 1) continue;
       const value = values[0].rect!;
-      if (value.top < a.top || value.bottom > b.bottom) continue;
+      if (value.top < a.top - height * 0.25 || value.bottom > b.bottom + height * 0.25) continue;
       // 结果必须是项目名右侧第一列；拒绝预测值/实测值等多个纯数值列。
       if (band.some(({ rect }) => rect!.left < value.left)) continue;
       pairs.push({ first, second, box: [a.left, a.top, right, b.bottom] });
@@ -2798,6 +2907,16 @@ function parseReferenceCell(
   unitPattern: RegExp,
   patientSex?: PatientSex | null,
 ) {
+  // Two complete ordered numbers in an explicit reference cell remain
+  // separable even when OCR drops the dash. Never split fused digit strings.
+  const spacedRange = value.normalize('NFKC').trim().match(/^([-+]?\d+(?:\.\d+)?)\s+([-+]?\d+(?:\.\d+)?)$/);
+  if (spacedRange && Number(spacedRange[1]) <= Number(spacedRange[2])) {
+    return {low:Number(spacedRange[1]),high:Number(spacedRange[2]),text:value.normalize('NFKC').trim()};
+  }
+  const printed = value.normalize('NFKC').replace(/\s+/g,'').trim();
+  if (/^(?:阴性|阳性|弱阳性|正常|异常|未见(?:异常)?|未检出|可见)$/.test(printed)) {
+    return {low:null,high:null,text:printed};
+  }
   /*
    * 参考范围常带粘连单位（125~350 10^9/L），不先剥离的话
    * "10^9/L" 的数字会被并进上限（35010）。先去掉已知单位再解析数值。
@@ -2924,8 +3043,14 @@ function conservativeUnknownUnit(value: string) {
 }
 
 function knownUnitFromResult(value: string, unitPattern: RegExp) {
+  if (/^(?:阴性|阳性|弱阳性|正常|异常|未见(?:异常)?|未检出|可见)$/.test(value.trim())) return null;
   const matched = value.match(unitPattern)?.[0];
   return matched ? matched.replace(/\s+/g, "") : null;
+}
+
+function minimumKnownConfidence(cells: Array<{ confidence?: number | null }>) {
+  const known = cells.flatMap(cell => typeof cell.confidence === 'number' && Number.isFinite(cell.confidence) ? [cell.confidence] : []);
+  return known.length ? Math.min(...known) : null;
 }
 
 function sourceRefForCells(
@@ -2956,6 +3081,7 @@ function sourceRefForCells(
     .join(" | ");
   return {
     text,
+    confidence: minimumKnownConfidence(options.inherited ? headerCells : [...cells,...headerCells]),
     sourceLineIds: sourceLineIds.length
       ? sourceLineIds
       : [...line.sourceLineIds],
@@ -2974,6 +3100,7 @@ function inheritedHeaderSourceRef(
   const sourceLineIds = headerCells[headerIndex]?.sourceLineIds || [];
   return {
     text,
+    confidence: headerCells[headerIndex]?.confidence ?? null,
     sourceLineIds: [...sourceLineIds],
     cellIndices: [headerIndex],
     inherited: true,
@@ -3164,7 +3291,11 @@ function parseLocalObservation(
     )
       return null;
   }
-  const unitIndex = tableHeader?.findIndex((cell) => /单位/.test(cell)) ?? -1;
+  let unitIndex = tableHeader?.findIndex((cell) => /单位/.test(cell)) ?? -1;
+  if (!tableHeader && dictionary && cells.length <= 4 && resultIndex === nameIndex + 1
+    && new RegExp(`^(?:${unitPattern.source})$`,'iu').test(cells[resultIndex + 1]?.trim() || '')) {
+    unitIndex = resultIndex + 1;
+  }
   const referenceIndex =
     tableHeader?.findIndex(
       (cell) => referenceColumnRole(cell) === "explicit",
@@ -3175,7 +3306,7 @@ function parseLocalObservation(
     ) ?? -1;
   const abnormalMarker =
     abnormalIndex >= 0 ? cells[abnormalIndex]?.trim() || null : null;
-  const adjacentReferenceIndex = resultIndex + 1;
+  const adjacentReferenceIndex = unitIndex === resultIndex + 1 ? unitIndex + 1 : resultIndex + 1;
   const adjacentReferenceValue = cells[adjacentReferenceIndex] || null;
   const adjacentReferenceHeader = tableHeader?.[adjacentReferenceIndex] || null;
   const inferredReference =
@@ -3296,9 +3427,9 @@ function parseLocalObservation(
     referenceIndex >= 0 && Boolean(cells[referenceIndex]);
   const inferredReferenceIndex =
     referenceIndex < 0 &&
-    cells[resultIndex + 1] &&
+    cells[adjacentReferenceIndex] &&
     (inferredReference.low !== null || inferredReference.high !== null)
-      ? resultIndex + 1
+      ? adjacentReferenceIndex
       : -1;
   const referenceSource = reference.text
     ? explicitReference
@@ -4095,13 +4226,16 @@ function alignedRowCellIndexes(
 }
 
 function credibleRepeatedTableUnit(value: string, unitPattern: RegExp) {
-  const normalized = value.normalize("NFKC").replace(/\s+/g, "").trim();
+  const normalized = value.normalize("NFKC").replace(/\s+/g, "").trim()
+    .replace(/^([munpμµ]?m)o1\/(?=[lL]$)/, '$1ol/')
+    .replace(/\/([munpμµ]?)[lL]{2}$/, '/$1L');
   /* g/L 的 g 被 OCR 成 9 后会形成 9/L；它不是可信单位，宁可留空也不能入库。 */
   if (/^9\/[lL]$/.test(normalized)) return null;
-  return (
-    knownUnitFromResult(normalized, unitPattern) ||
-    conservativeUnknownUnit(normalized)
-  );
+  if (new RegExp(`^(?:${unitPattern.source})$`, 'iu').test(normalized)) return normalized;
+  // An explicit unit cell must be consumed in full. A substring such as g or
+  // mm inside ug/mL or mmo1/L is a different physical unit, not a fallback.
+  if (/^[A-Za-zμµΩ°℃%‰][A-Za-z0-9μµΩ°℃%‰/·²³^().\-]*$/.test(normalized)) return normalized;
+  return null;
 }
 
 function parseRepeatedMeasurementPanelObservations(
@@ -4523,7 +4657,7 @@ function parseExplicitBloodPressureObservations(
   return observations;
 }
 
-function parseLocalObservations(
+function parseLocalObservationsUnchecked(
   line: PlannedOcrLine,
   pageNumber: number,
   section: string | null,
@@ -4637,6 +4771,91 @@ function parseLocalObservations(
   return single ? [single] : [];
 }
 
+export function observationFieldConfidenceIssue(
+  line: PlannedOcrLine,
+  observation: { itemName: string; normalizedName?: string | null; itemCode?: string | null; resultText?: string; unit?: string | null },
+) {
+  const names = [observation.itemName, observation.normalizedName, observation.itemCode]
+    .filter((name): name is string => Boolean(name)).map(compactDictionaryText);
+  let facts = (line.localObservationCandidates || localObservationsForLine(line)).filter(fact =>
+    [fact.itemName, fact.normalizedName, fact.sourceMap.item.text].some(name => names.includes(compactDictionaryText(name))));
+  const exactValue = facts.filter(fact => observation.resultText && fact.resultText === observation.resultText);
+  if (exactValue.length) facts = exactValue;
+  const fields = new Set<'item' | 'result' | 'unit' | 'qualifier'>();
+  for (const fact of facts) for (const field of ['item','result','unit','qualifier'] as const) {
+    const confidence = fact.sourceMap[field]?.confidence;
+    if (confidence != null && confidence < .65) fields.add(field);
+  }
+  const references = facts.flatMap(fact => fact.sourceMap.reference ? [fact.sourceMap.reference] : []);
+  // An AI response may fill a unit which the conservative local parser left
+  // empty, or read a suspicious result that could not form a local fact.
+  const itemIndex = line.sourceCells.findIndex(cell => names.includes(compactDictionaryText(cell.text)));
+  if (itemIndex >= 0) {
+    const headers = line.projectHeaderCells?.map(cell => cell.text)
+      || (line.tableHeaderText ? splitTableCells(line.tableHeaderText) : []);
+    const resultIndexes = headers.flatMap((header,index) => isCurrentResultColumn(header) ? [index] : []);
+    const resultIndex = resultIndexes.length === 1 ? resultIndexes[0] : itemIndex + 1;
+    const unitIndex = headers.findIndex(header => normalizeOcrTableHeader(header) === '单位');
+    const unitCell = unitIndex >= 0 ? line.sourceCells[unitIndex]
+      : observation.unit ? line.sourceCells.slice(resultIndex,resultIndex+3).find(cell =>
+        compactDictionaryText(cell.text) === compactDictionaryText(observation.unit!)) : undefined;
+    const add = (field: 'item' | 'result' | 'unit', cell?: PlannedOcrCell) => {
+      if (cell?.confidence != null && cell.confidence < .65) fields.add(field);
+    };
+    add('item', line.sourceCells[itemIndex]);
+    add('result', line.sourceCells[resultIndex]);
+    if (observation.unit) add('unit', unitCell);
+    const printedReferenceIndex = headers.findIndex(header => referenceColumnRole(header) === 'explicit');
+    const referenceIndex = printedReferenceIndex >= 0 ? printedReferenceIndex
+      : !headers.length ? line.sourceCells.findIndex((cell,index) => index > resultIndex && index <= resultIndex + 2
+        && canUseAdjacentReferenceCell({value:cell.text})
+        && line.sourceCells.slice(resultIndex+1,index).every(previous => previous === unitCell
+          || /^[↑↓HL]$/i.test(previous.text.trim()))) : -1;
+    if (referenceIndex >= 0 && line.sourceCells[referenceIndex]) references.push({
+      ...sourceRefForCells(line,[referenceIndex],line.sourceCells[referenceIndex].text),
+    });
+  }
+  if (itemIndex < 0 && !facts.length) {
+    const printedNames = [observation.itemName, observation.normalizedName, observation.itemCode]
+      .filter((name): name is string => Boolean(name));
+    const inlineCells = line.sourceCells.filter(cell => measurementEvidenceRegions(cell.text,printedNames).length);
+    if (inlineCells.length === 1 && inlineCells[0].confidence != null && inlineCells[0].confidence < .65) {
+      fields.add('item');
+      fields.add('result');
+      if (observation.unit) fields.add('unit');
+    }
+  }
+  return { fields: [...fields], referenceConfidence: minimumKnownConfidence(references) };
+}
+
+function parseLocalObservations(...args: Parameters<typeof parseLocalObservationsUnchecked>) {
+  const [line] = args;
+  // Parsing determines field ownership before acceptance. A low row mean must
+  // not erase that ownership, and uncertain layout facts never get admitted.
+  const inspectionArgs: Parameters<typeof parseLocalObservationsUnchecked> = [...args];
+  inspectionArgs[0] = { ...line, confidence: null, tableStructureUnsafe: false };
+  const facts = parseLocalObservationsUnchecked(...inspectionArgs);
+  line.localObservationCandidates = facts;
+  const weakFields = new Set<'item' | 'result' | 'unit' | 'qualifier'>();
+  for (const fact of facts) {
+    for (const field of ['item','result','unit','qualifier'] as const) {
+      const confidence = fact.sourceMap[field]?.confidence;
+      if (confidence != null && confidence < .65) weakFields.add(field);
+    }
+  }
+  if (weakFields.size) {
+    // Preserve the entire multi-value row for review when even one acquisition
+    // is uncertain. Otherwise the accepted subset could close the candidate.
+    line.lowConfidenceFields = [...weakFields];
+    line.candidateResolutionReason = 'ambiguous_layout';
+    return [];
+  }
+  if (line.tableStructureUnsafe) return [];
+  return facts.map(fact => fact.sourceMap.reference?.confidence != null && fact.sourceMap.reference.confidence < .65
+    ? { ...fact, referenceLow: null, referenceHigh: null } : fact);
+}
+
+
 type NamedReferenceThreshold = {
   itemKey: string;
   operator: "<" | "<=" | "≤" | ">" | ">=" | "≥";
@@ -4749,18 +4968,16 @@ function enrichLocalObservationsWithNamedReferences(lines: PlannedOcrLine[]) {
       const referenceText = cellIndices
         .map((index) => splitTableCells(referenceLine!.text)[index])
         .join(" | ");
+      const referenceSource = sourceRefForCells(referenceLine!, cellIndices, referenceText);
+      const referenceTrusted = referenceSource.confidence == null || referenceSource.confidence >= .65;
       return {
         ...observation,
-        referenceLow: lower?.value ?? null,
-        referenceHigh: upper?.value ?? null,
+        referenceLow: referenceTrusted ? lower?.value ?? null : null,
+        referenceHigh: referenceTrusted ? upper?.value ?? null : null,
         referenceText,
         sourceMap: {
           ...observation.sourceMap,
-          reference: sourceRefForCells(
-            referenceLine!,
-            cellIndices,
-            referenceText,
-          ),
+          reference: referenceSource,
         },
       };
     });
@@ -4806,7 +5023,7 @@ function annotatePageLines(
     const enclosingHeader = { tableHeader, tableHeaderCells, tableHeaderSourcePageNumber };
     if (line.projectHeaderCells) {
       tableHeaderCells = line.projectHeaderCells;
-      tableHeader = tableHeaderCells.map(cell => cell.text);
+      tableHeader = tableHeaderCells.map(cell => normalizeOcrTableHeader(cell.text));
       tableHeaderSourcePageNumber = pageNumber;
     }
     if (line.boundary === "section") {
@@ -4823,7 +5040,7 @@ function annotatePageLines(
       tableHeaderCells = null;
       role = "section_heading";
     } else if (line.boundary === "table_header") {
-      tableHeader = splitTableCells(line.text);
+      tableHeader = splitTableCells(line.text).map(normalizeOcrTableHeader);
       tableHeaderCells = line.sourceCells;
       tableHeaderSourcePageNumber = pageNumber;
       narrativeActive = false;
@@ -4857,9 +5074,27 @@ function annotatePageLines(
       section && reportSection && !section.includes(reportSection)
         ? `${reportSection} / ${section}`
         : section || reportSection;
-    const effectiveLine = stripTrailingAdministrativeLabelCells(
+    let effectiveLine = stripTrailingAdministrativeLabelCells(
       stripTcdGraphicLabelCells(line, section, reportSection),
     );
+    // A continuation can reuse a preceding page's column meanings only when
+    // every OCR cell still aligns with the original printed column starts.
+    // Keep the header's original page/source IDs; unaligned rows stay for AI.
+    if (inheritContext && !effectiveLine.projectHeaderCells && !effectiveLine.boundary
+      && tableHeaderSourcePageNumber !== pageNumber && tableHeaderCells
+      && effectiveLine.sourceCells.length === tableHeaderCells.length
+      && effectiveLine.sourceCells.every((cell, index) => {
+        const source = boxRect(cell.box), header = boxRect(tableHeaderCells![index].box);
+        const precedingSource = index ? boxRect(effectiveLine.sourceCells[index - 1].box) : null;
+        const precedingHeader = index ? boxRect(tableHeaderCells![index - 1].box) : null;
+        return source && header && Math.abs(source.left - header.left)
+          <= Math.max(rectHeight(source), rectHeight(header)) * 1.5
+          && (!index || precedingSource && precedingHeader
+            && source.left > precedingSource.left && header.left > precedingHeader.left);
+      })) {
+      effectiveLine = { ...effectiveLine, projectHeaderCells: tableHeaderCells };
+      effectiveLine.tableStructureUnsafe ||= hasLowConfidenceMeasurementCell(effectiveLine);
+    }
     const filteredDeviceParameter =
       isPulmonaryDeviceDerivedParameter(
         effectiveLine.text,
@@ -4893,7 +5128,7 @@ function annotatePageLines(
       (line.role === "noise" &&
         line.contentRole === "chart_axis" &&
         !line.candidate);
-    const tableMeasurement = line.projectHeaderCells && !line.tableStructureUnsafe && !line.boundary
+    const tableMeasurement = effectiveLine.projectHeaderCells && !effectiveLine.tableStructureUnsafe && !line.boundary
       && effectiveLine.sourceCells.length === tableHeader?.length
       ? mappedOcrMeasurement(effectiveLine.text, tableHeader?.join(" | ")) : null;
     const structuredCandidate = Boolean(tableMeasurement
@@ -4961,7 +5196,7 @@ function annotatePageLines(
       localObservation: null,
       localObservations: [],
     };
-    const localObservations = parseLocalObservations(
+    let localObservations = parseLocalObservations(
       withRole,
       pageNumber,
       sectionName,
@@ -4972,6 +5207,18 @@ function annotatePageLines(
       unitPattern,
       patientSex,
     );
+    if (candidateKind === 'scalar') {
+      const name = localObservations[0]?.itemName
+        || mappedOcrMeasurement(withRole.text, tableHeader?.join(' | '))?.name
+        || skipLeadingSerialCell(splitTableCells(withRole.text))[0];
+      const review = name ? nameReviewCandidate(name.trim(), aliases,
+        withRole.sourceCells.find(cell => cell.text.trim() === name.trim())?.sourceLineIds || withRole.sourceLineIds) : null;
+      if (review) {
+        withRole.nameReviewCandidate = review;
+        withRole.candidateResolutionReason = 'ambiguous_layout';
+        localObservations = [];
+      }
+    }
     const expectedLocalObservationCount =
       candidateKind === "scalar"
         ? repeatedMeasurementHeaderGroups(tableHeader).length
@@ -5130,7 +5377,7 @@ function unitFromRanges(
       // 体检报告里被误判为门诊/住院的检查表格页不再整页送入 narrative 单元。
       const narrativeWholePage =
         route === "narrative" &&
-        page.classification.contentTypes.some(
+        (page.medicationContent || page.classification.contentTypes.some(
           (type) =>
             [
               "outpatient",
@@ -5141,7 +5388,7 @@ function unitFromRanges(
               "vaccination",
             ].includes(type) &&
             (documentPrimaryType === undefined || type === documentPrimaryType),
-        );
+        ));
       const texts: string[] = [];
       if (route === "scalar" || route === "morphology") {
         /*
@@ -5221,6 +5468,7 @@ function unitFromRanges(
       route,
       allowDocumentFields ? "document" : "facts",
       documentScalarCandidates ? "with-scalars" : "",
+      ranges.some(range => pages.find(page => page.pageId === range.pageId)?.medicationContent) ? "with-medications" : "",
       text,
     ].join("\u0000"),
   );
@@ -5299,6 +5547,8 @@ function unitFromRanges(
     extractionMode,
     route,
     allowDocumentFields,
+    includesMedicationContent: route === "narrative" && ranges.some(range =>
+      pages.find(page => page.pageId === range.pageId)?.medicationContent),
     classification,
     pageNumbers: [...new Set(ranges.map((range) => range.pageNumber))],
     pageRanges: ranges,
@@ -5601,7 +5851,8 @@ function parseLines(
 ) {  let parsed: RawOcrLine[] = [];
   try {
     const candidate = JSON.parse(value) as unknown;
-    parsed = Array.isArray(candidate) ? recoverHeaderAlignedTable(candidate as RawOcrLine[]) : [];
+    parsed = Array.isArray(candidate) ? recoverHeaderAlignedTable(candidate as RawOcrLine[],
+      (first, second) => canJoinWrappedTableName(first, second, aliases)) : [];
   } catch {
     parsed = [];
   }
@@ -5682,10 +5933,13 @@ function parseLines(
       const members = group.filter(item => item.cell.column === index).map(item => item.line)
         .sort((a, b) => (boxRect(a.box)?.top ?? a.index) - (boxRect(b.box)?.top ?? b.index));
       return { index, text: members.map(item => item.text).join(" "),
-        sourceLineIds: members.flatMap(item => item.sourceLineIds), box: members[0]?.box ?? null };
+        sourceLineIds: members.flatMap(item => item.sourceLineIds), box: members[0]?.box ?? null,
+        confidence: members.some(item => item.confidence !== null)
+          ? Math.min(...members.flatMap(item => item.confidence === null ? [] : [item.confidence])) : null };
     });
     const headerGroup = [...tableGroups.values()].filter(items =>
       items[0].cell.table === group[0].cell.table && items[0].cell.row <= group[0].cell.row
+      && (group[0].cell.headerRow === undefined || items[0].cell.row === group[0].cell.headerRow)
       && items[0].cell.columns === count
     ).sort((a, b) => b[0].cell.row - a[0].cell.row).find(items => {
       const text = Array.from({ length: count }, (_, column) => items.filter(item => item.cell.column === column).map(item => item.line.text).join(' ')).join(' | ');
@@ -5719,9 +5973,15 @@ function parseLines(
       // OCR occasionally emits both "项目名12.3" and an overlapping "12.3".
       // Remove only the duplicate suffix proved by that independent result box.
       const nameIndex = headerCells.findIndex(cell => /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目)$/.test(cell.text));
+      if (nameIndex >= 0) sourceCells[nameIndex].text = sourceCells[nameIndex].text.replace(/(?<=\p{Script=Han})\s+(?=\p{Script=Han})/gu, '');
       const resultIndexes = headerCells.flatMap((cell, index) => isCurrentResultColumn(cell.text) ? [index] : []);
       if (nameIndex >= 0 && resultIndexes.length === 1) {
         const name = sourceCells[nameIndex], result = sourceCells[resultIndexes[0]];
+        const glued = !result.text && name.text.match(/^(.+\[[A-Za-z][A-Za-z0-9.\/%# -]*\])\s*([<>≤≥]?\s*\d+(?:\.\d+)?)$/);
+        if (glued && !row.tableStructureUnsafe) {
+          sourceCells[nameIndex] = { ...name, text:glued[1] };
+          sourceCells[resultIndexes[0]] = { ...name, index:resultIndexes[0], text:glued[2] };
+        }
         const nameBox = boxRect(name.box), resultBox = boxRect(result.box);
         const deduplicatedName = duplicatedOcrResultName(name.text, result.text);
         if (deduplicatedName
@@ -5770,7 +6030,19 @@ function parseLines(
     ),
     aliases,
     unitPattern,
-  ).map(line => ({ ...line, tableStructureUnsafe: parsed.some(raw => raw.tableUnsafe && line.sourceLineIds.includes(String(raw.id))) }));
+  ).map(line => {
+    // Recover field confidence by original OCR source IDs, including synthetic
+    // body-composition/bone-score cells that were assembled before this stage.
+    const withConfidence = (cell: PlannedOcrCell): PlannedOcrCell => ({ ...cell,
+      confidence: minimumKnownConfidence(lines.filter(raw => cell.sourceLineIds.includes(raw.id))),
+    });
+    const enriched = { ...line, sourceCells: line.sourceCells.map(withConfidence),
+      ...(line.projectHeaderCells ? {projectHeaderCells: line.projectHeaderCells.map(withConfidence)} : {}),
+    };
+    return { ...enriched, tableStructureUnsafe: enriched.tableStructureUnsafe ||
+      parsed.some(raw => raw.tableUnsafe && line.sourceLineIds.includes(String(raw.id)))
+      || hasLowConfidenceMeasurementCell(enriched) };
+  });
 }
 
 function repeatedLineFingerprint(value: string) {
@@ -5946,6 +6218,8 @@ export function rebuildOcrPages(
     endedWithCandidate: false,
   };
   const pages = rows.map((row): RebuiltOcrPage => {
+    let rawCoverageLines: RawOcrLine[] = [];
+    try { const raw = JSON.parse(row.linesJson); if (Array.isArray(raw)) rawCoverageLines = raw.filter(line=>line && typeof line === "object"); } catch { /* Invalid OCR already degrades to an empty page. */ }
     const parsed = parseLines(
       row.linesJson,
       row.pageNumber,
@@ -6028,6 +6302,16 @@ export function rebuildOcrPages(
       repeatedRemovedLineCount: 0,
       noiseRemovedLineCount: 0,
       tableStructureStatus: readTableStructureStatus(row.linesJson),
+      ocrRetryRemaining: rawCoverageLines.reduce((remaining, line) => Math.max(remaining,
+        Math.max(0, Number(line.tableRetryBudget?.rowRemaining) || 0)
+          + Math.max(0, Number(line.tableRetryBudget?.cellRemaining) || 0)
+          + Math.max(0, Number(line.tableRetryBudget?.imageRemaining) || 0)), 0),
+      ocrRetryUnresolved: rawCoverageLines.reduce((remaining, line) => Math.max(remaining,
+        Math.max(0, Number(line.tableRetryBudget?.rowUnresolved) || 0)
+          + Math.max(0, Number(line.tableRetryBudget?.cellUnresolved) || 0)
+          + Math.max(0, Number(line.tableRetryBudget?.imageUnresolved) || 0)), 0),
+      uncoveredResultCount: uncoveredOcrResultIds(rawCoverageLines, new Set(lines.filter(line=>line.candidate || line.localObservations.length).flatMap(line=>line.sourceLineIds))).length,
+      uncoveredResultSourceLineIds: uncoveredOcrResultIds(rawCoverageLines, new Set(lines.filter(line=>line.candidate || line.localObservations.length).flatMap(line=>line.sourceLineIds))),
       text,
       lines,
       classification: classifyReportContent(text),
@@ -6513,6 +6797,15 @@ export function planRebuiltOcrPages(
   extractionDepth: AiExtractionDepth = "detailed",
   options: { maxOutputTokens?: number } = {},
 ): AiExtractionPlan {
+  let previousMedicationPage: number | null = null;
+  pages = pages.map(page => {
+    const medicationContent = hasMedicationContent(page.text) ||
+      (previousMedicationPage === page.pageNumber - 1 &&
+        ["other", "prescription", "outpatient", "inpatient"].includes(page.classification.primaryType) &&
+        hasMedicationContinuation(page.text));
+    previousMedicationPage = medicationContent ? page.pageNumber : null;
+    return { ...page, medicationContent };
+  });
   const baseUnits: AiExtractionUnit[] = [];
   let pendingPages: RebuiltOcrPage[] = [];
   const flushPending = () => {
@@ -6597,18 +6890,20 @@ export function planRebuiltOcrPages(
         );
   /*
    * 概览模式：指标仍逐行提取（与详细模式同一解析契约），并保留形态发现单元；
-   * 不生成叙事章节单元，也不做补充复核；文档概况单元保持现状。
+   * 概览只保留明确用药页及相邻续页的叙事单元，避免临床记录的用药被跳过。
    * 合并单元已在同一契约内输出形态发现，不再单独生成形态单元。
    */
-  const narrativeUnits = extractionDepth === "overview"
-    ? []
-    : packNarrativeUnits(baseUnits, pages, documentClassification.primaryType);
+  const narrativeBaseUnits = extractionDepth === "overview"
+    ? baseUnits.map(unit => ({ ...unit, pageRanges: unit.pageRanges.filter(range =>
+        pages.find(page => page.pageId === range.pageId)?.medicationContent) }))
+    : baseUnits;
+  const narrativeUnits = packNarrativeUnits(narrativeBaseUnits, pages, documentClassification.primaryType);
   const morphologyUnits =
     extractionDepth === "overview" && mergedOverviewUnit
       ? []
       : packMorphologyUnits(baseUnits, pages);
   const units = mergedOverviewUnit
-    ? [mergedOverviewUnit]
+    ? [mergedOverviewUnit, ...narrativeUnits]
     : [documentUnit!, ...scalarUnits, ...narrativeUnits, ...morphologyUnits];
   const localFactsHash = sha256(
     JSON.stringify(
