@@ -1,5 +1,5 @@
 import { getDatabase } from '../../../database/client';
-import { recordFeedbackStates, syncFeedbackUpdates, type FeedbackList, type FeedbackState } from '../../../services/feedback-sync.service';
+import { recordFeedbackStates, type FeedbackList, type FeedbackState } from '../../../services/feedback-sync.service';
 import { getFeedbackInstallation } from '../../../services/feedback-installation.service';
 import { validateFeedbackEnvironment } from '../../../services/feedback-validation';
 import { createError, defineEventHandler, getHeader, getQuery, getRouterParam, setHeader } from 'h3';
@@ -24,11 +24,10 @@ export default defineEventHandler(async event => {
       params.set(key,value);
     }
     const db=getDatabase(),clientId=getFeedbackInstallation(db);
-    if(path==='/tickets' && !['number','q','status','category'].some(key=>params.has(key))) {
+    if(path==='/tickets') {
       const page=Number(params.get('page') || 1),pageSize=Number(params.get('pageSize') || 20);
       if(!Number.isInteger(page) || page<1 || page>10000 || !Number.isInteger(pageSize) || pageSize<1 || pageSize>50) throw createError({statusCode:400,statusMessage:'分页参数无效'});
-      const result=await syncFeedbackUpdates(db);
-      return ok({...result,items:result.items.slice((page-1)*pageSize,page*pageSize),page,pageSize});
+      params.set('page',String(page));params.set('pageSize',String(pageSize));
     }
     const result=await sendFeedbackRequest(path+(params.size?'?'+params:''));
     if(path==='/tickets') recordFeedbackStates(db,clientId,(result as FeedbackList).items);
