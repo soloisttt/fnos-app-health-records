@@ -55,16 +55,22 @@ async function load() {
   }
 }
 
+/** 把当前报告挂到指定病程。加锁与错误处理交给调用方。 */
+async function linkReportTo(episodeId: string, episodeTitle: string) {
+  await request<CaseEpisodeDetail>(`episodes/${episodeId}/links`, {
+    method: "POST",
+    body: JSON.stringify({ factType: "report", factId: props.reportId }),
+  });
+  emit("linked", episodeTitle);
+}
+
+/** 从列表里点某条病程直接加入。 */
 async function attach(episode: CaseEpisode) {
   if (!props.reportId || saving.value) return;
   saving.value = true;
   error.value = "";
   try {
-    await request<CaseEpisodeDetail>(`episodes/${episode.id}/links`, {
-      method: "POST",
-      body: JSON.stringify({ factType: "report", factId: props.reportId }),
-    });
-    emit("linked", episode.title);
+    await linkReportTo(episode.id, episode.title);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加入病程失败";
   } finally {
@@ -74,25 +80,36 @@ async function attach(episode: CaseEpisode) {
 
 async function createAndAttach() {
   if (!props.memberId || saving.value) return;
-  if (!newTitle.value.trim()) {
+  const title = newTitle.value.trim();
+  if (!title) {
     error.value = "病程标题不能为空";
     return;
   }
+  const onset = (newOnsetAt.value || "").slice(0, 10);
+
+  /* 已有同名同起病日期的病程时直接复用，避免反复点「创建并加入」堆出一串一模一样的病程 */
+  const existing = episodes.value.find(
+    (item) => item.title.trim() === title && (item.onsetAt ?? "").slice(0, 10) === onset,
+  );
+  if (existing) {
+    creating.value = false;
+    await attach(existing);
+    return;
+  }
+
   saving.value = true;
   error.value = "";
   try {
     const created = await request<CaseEpisodeDetail>("episodes", {
       method: "POST",
-      body: JSON.stringify({
-        memberId: props.memberId,
-        title: newTitle.value,
-        onsetAt: newOnsetAt.value || null,
-      }),
+      body: JSON.stringify({ memberId: props.memberId, title, onsetAt: onset || null }),
     });
     newTitle.value = "";
     newOnsetAt.value = "";
     creating.value = false;
-    await attach(created.episode);
+    /* 这里不能复用 attach()：此时 saving 仍为 true，会被它开头的防重复判断直接挡掉，
+       导致「病程建好了但报告没挂上、界面也无反馈」。 */
+    await linkReportTo(created.episode.id, created.episode.title);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "新建病程失败";
   } finally {

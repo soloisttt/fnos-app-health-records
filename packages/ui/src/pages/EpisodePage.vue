@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onActivated, ref, watch } from "vue";
 import { ArrowLeft, CheckCircle2, ClipboardList, Plus, Trash2 } from "@lucide/vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
@@ -174,17 +174,23 @@ function symptomMeta(item: CaseSymptom) {
 }
 
 async function load(memberId: string, keepDetailId?: string) {
-  detail.value = null;
-  episodes.value = [];
   if (!memberId) {
+    detail.value = null;
+    episodes.value = [];
     loading.value = false;
     return;
   }
   loading.value = true;
   error.value = "";
   try {
-    episodes.value = await request<CaseEpisode[]>(`episodes?memberId=${encodeURIComponent(memberId)}`);
-    if (keepDetailId) await openEpisode(keepDetailId, true);
+    const list = await request<CaseEpisode[]>(`episodes?memberId=${encodeURIComponent(memberId)}`);
+    episodes.value = list;
+    /* 详情仍在列表里就顺手刷新它，否则回到列表视图（切换成员、病程被删等） */
+    if (keepDetailId && list.some((item) => item.id === keepDetailId)) {
+      await openEpisode(keepDetailId, true);
+    } else {
+      detail.value = null;
+    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载病程失败";
   } finally {
@@ -335,6 +341,19 @@ watch(
   (memberId) => void load(memberId),
   { immediate: true },
 );
+
+/* AppShell 用 KeepAlive 缓存路由页面：从报告详情页「加入病程」后切回病程页时，
+   组件不会重新创建，必须主动重拉，否则看到的是缓存里的旧列表。 */
+let activatedOnce = false;
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true;
+    return;
+  }
+  const memberId = app.selectedMemberId.value;
+  if (!memberId) return;
+  void load(memberId, detail.value?.episode.id);
+});
 </script>
 
 <template>

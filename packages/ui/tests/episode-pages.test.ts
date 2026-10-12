@@ -185,6 +185,121 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(wrapper.html()).toContain("10月呼吸道感染");
   });
 
+  it("「创建并加入」必须同时完成新建与挂载（不能被自身的防重复锁挡住）", async () => {
+    const calls: string[] = [];
+    mocked.request.mockImplementation(async (path: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path.startsWith("episodes?memberId")) return [];
+      if (path === "episodes") {
+        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], links: [], linkedFacts: [] };
+      }
+      if (path.startsWith("episodes/") && path.endsWith("/links")) {
+        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], links: [], linkedFacts: [] };
+      }
+      return [];
+    });
+
+    const Linker = (await import("../src/components/ReportEpisodeLinker.vue")).default;
+    const wrapper = mount(Linker, {
+      props: { open: false, reportId: "report-1", memberId: member.id },
+      attachTo: document.body,
+    });
+    await wrapper.setProps({ open: true });
+    await settle();
+
+    const footerButton = (text: string) =>
+      [...document.querySelectorAll(".episode-linker-footer button")].find((el) =>
+        el.textContent?.includes(text),
+      ) as HTMLButtonElement | undefined;
+
+    footerButton("新建病程")!.click();
+    await settle();
+
+    const input = document.querySelector(".episode-linker-body input") as HTMLInputElement;
+    input.value = "10月呼吸道感染";
+    input.dispatchEvent(new Event("input"));
+    await settle();
+
+    footerButton("创建并加入")!.click();
+    await settle();
+
+    expect(calls).toContain("POST episodes");
+    expect(
+      calls.some((call) => call.startsWith("POST episodes/") && call.endsWith("/links")),
+      "新建之后必须继续把报告挂上去",
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("同名同起病日期的病程已存在时，创建并加入改为复用而不是再建一条", async () => {
+    const calls: string[] = [];
+    mocked.request.mockImplementation(async (path: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path.startsWith("episodes?memberId")) {
+        return [
+          {
+            id: "ep-1",
+            memberId: member.id,
+            title: "10月呼吸道感染",
+            status: "active",
+            onsetAt: "2026-10-09",
+            resolvedAt: null,
+            causeText: null,
+            summary: null,
+            createdBy: "user-a",
+            createdAt: "2026-10-09T00:00:00.000Z",
+            updatedAt: "2026-10-09T00:00:00.000Z",
+            symptomCount: 0,
+            linkCount: 0,
+          },
+        ];
+      }
+      return { episode: { id: "ep-1", title: "10月呼吸道感染" }, symptoms: [], links: [], linkedFacts: [] };
+    });
+
+    /* 真实路径：弹窗会用报告的诊断与日期预填标题与起病日期 */
+    const Linker = (await import("../src/components/ReportEpisodeLinker.vue")).default;
+    const wrapper = mount(Linker, {
+      props: {
+        open: false,
+        reportId: "report-1",
+        memberId: member.id,
+        suggestTitle: "10月呼吸道感染",
+        suggestOnsetAt: "2026-10-09",
+      },
+      attachTo: document.body,
+    });
+    await wrapper.setProps({ open: true });
+    await settle();
+
+    const footerButton = (text: string) =>
+      [...document.querySelectorAll(".episode-linker-footer button")].find((el) =>
+        el.textContent?.includes(text),
+      ) as HTMLButtonElement | undefined;
+
+    footerButton("新建病程")!.click();
+    await settle();
+    footerButton("创建并加入")!.click();
+    await settle();
+
+    expect(calls, "已有同名同起病日期的病程，不应再建一条").not.toContain("POST episodes");
+    expect(
+      calls.some((call) => call.includes("episodes/ep-1/links")),
+      "应直接挂到已有病程上",
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("切回病程页会重新拉取列表（KeepAlive 缓存下不会一直显示旧数据）", async () => {
+    const wrapper = await mountUnderShell("episodes");
+    const countList = () =>
+      mocked.request.mock.calls.filter(([path]) => String(path).startsWith("episodes?")).length;
+    const before = countList();
+    await switchTo("diseases");
+    await switchTo("episodes");
+    expect(countList()).toBeGreaterThan(before);
+  });
+
   it("疾病页在过渡层内能渲染出内容", async () => {
     const wrapper = await mountUnderShell("diseases");
     const html = wrapper.html();

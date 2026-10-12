@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowLeft, Activity, Search, X } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
@@ -191,6 +191,18 @@ watch(
   (memberId) => void load(memberId),
   { immediate: true },
 );
+
+/* 页面被 KeepAlive 缓存：在报告页识别、加病程之后切回来时要重算目录，
+   否则列表一直是缓存里的旧快照。 */
+let activatedOnce = false;
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true;
+    return;
+  }
+  const memberId = app.selectedMemberId.value;
+  if (memberId) void load(memberId);
+});
 </script>
 
 <template>
