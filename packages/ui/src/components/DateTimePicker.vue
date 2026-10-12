@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { CalendarDays, Check, X } from "@lucide/vue";
 import { useScrollLock } from "../composables/useScrollLock";
 import { DATE_WHEEL_ITEM_HEIGHT, dateWheelStep, dateWheelIndex, clampCalendarDay } from "../utils/date-wheel";
+import { resolveFloatingPanelPosition } from "../utils/floating-panel-position";
 
 const props = defineProps<{
   modelValue: string | null;
@@ -328,12 +329,19 @@ function cancel() {
 function updatePanelPosition() {
   if (!open.value || !root.value) return;
   const trigger = root.value.getBoundingClientRect();
-  const panelWidth = Math.min(460, window.innerWidth - 32);
-  const left = Math.max(16, Math.min(trigger.left, window.innerWidth - panelWidth - 16));
-  panelStyle.value = {
-    top: `${trigger.bottom + 8}px`,
-    left: `${left}px`,
-  };
+  /* 用 offsetWidth/offsetHeight 取实测尺寸：不受面板进场动画的 transform 缩放影响。
+     尚未渲染时按桌面端常见尺寸兜底。 */
+  const panelEl = layer.value?.querySelector<HTMLElement>(".datetime-picker-panel") ?? null;
+  const panelWidth = panelEl?.offsetWidth || Math.min(340, window.innerWidth - 32);
+  const panelHeight = panelEl?.offsetHeight || 300;
+  const placement = resolveFloatingPanelPosition({
+    trigger: { top: trigger.top, bottom: trigger.bottom, left: trigger.left },
+    panelWidth,
+    panelHeight,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+  panelStyle.value = { top: `${placement.top}px`, left: `${placement.left}px` };
 }
 
 // 点击外部关闭
