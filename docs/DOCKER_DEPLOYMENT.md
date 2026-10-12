@@ -184,7 +184,7 @@ TRUST_PROXY=1 docker compose up -d
 
 ## 升级与回滚
 
-后续发布只提供精确版本标签（例如 `0.2.11`）和稳定版的 `latest`，预发布版本只提供精确版本标签。历史 `v版本号`、`0.2`、`sha-*` 和签名标签不会自动删除；已有部署若使用这些别名，建议改用精确版本号。`sha256-….sig` 是签名产物，不能作为应用镜像启动。
+后续发布只提供精确版本标签（例如 `0.2.12`）和稳定版的 `latest`，预发布版本只提供精确版本标签。历史 `v版本号`、`0.2`、`sha-*` 和签名标签不会自动删除；已有部署若使用这些别名，建议改用精确版本号。`sha256-….sig` 是签名产物，不能作为应用镜像启动。
 
 正式环境建议固定版本，不要长期依赖 `latest`：
 
@@ -209,7 +209,7 @@ HEALTH_RECORDS_VERSION=<version> docker compose up -d
 后续发布的镜像仍由 GitHub Actions 使用 Cosign 签名，签名文件独立附在对应 GitHub Release 中，不再生成 Docker Hub 签名标签。下载同一版本的 `docker-image-<version>.sig`、`.pem` 和 `.json`，使用 Cosign v2.5.2 验证签名、发布身份和镜像 digest：
 
 ```bash
-VERSION=0.2.11 # 替换为要验证的版本
+VERSION=0.2.12 # 替换为已发布且要验证的版本
 DIGEST='sha256:...' # 从该版本 Release 复制完整 digest
 cosign verify \
   --signature "docker-image-${VERSION}.sig" \

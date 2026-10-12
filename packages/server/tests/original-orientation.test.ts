@@ -19,7 +19,7 @@ test('original orientation fits portrait and landscape pages without clipping ro
   assert.equal(originalOrientationLayout(400, 0, 0, true), null);
 });
 
-test('all original comparison views support four viewing angles and keep stale OCR markers hidden', () => {
+test('all original comparison views support four viewing angles and use aligned OCR coordinates', () => {
   const source = readFileSync('packages/ui/src/components/ReportDetail.vue', 'utf8');
   const component = readFileSync('packages/ui/src/components/OriginalOrientation.vue', 'utf8');
   assert.equal((source.match(/<OriginalOrientation\b/g) || []).length, 3);
@@ -30,6 +30,7 @@ test('all original comparison views support four viewing angles and keep stale O
   assert.match(component, /rotation.value = props.initialRotation \|\| 0/);
   assert.match(component, /@click.stop="rotation = \(rotation \+ 90\) % 360"/);
   assert.match(component, /RotateCw/);
-  assert.match(source, /!currentOriginalPage.ocrStale/);
+  assert.doesNotMatch(source, /&& !currentOriginalPage.ocrStale/);
+  assert.match(source, /!ocrDetailPage.orientationChanged/);
   assert.doesNotMatch(component, /request\(|fetch\(|rotateSavedPage/);
 });

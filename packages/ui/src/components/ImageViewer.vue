@@ -32,6 +32,7 @@ const emit = defineEmits<{ close: [] }>();
 
 const viewerIndex = ref(0);
 const viewerScale = ref(1);
+// 保留累计角度，让 CSS 在跨过一整圈时仍按顺时针 90° 插值。
 const viewerRotation = ref(0);
 const viewerImmersive = ref(false);
 const viewerHighRes = ref(false);
@@ -52,7 +53,7 @@ const ocrOn = ref(true);
 const viewerPage = computed(() => props.pages[viewerIndex.value] || null);
 const viewerUsingPreview = computed(() => Boolean(viewerPage.value?.previewUrl) && !viewerHighRes.value);
 const viewerDisplayRotation = computed(() =>
-  (viewerRotation.value - (viewerUsingPreview.value ? viewerPage.value?.previewRotation || 0 : 0) + 360) % 360
+  viewerRotation.value - (viewerUsingPreview.value ? viewerPage.value?.previewRotation || 0 : 0)
 );
 const viewerDisplaySrc = computed(() => {
   const page = viewerPage.value;
@@ -106,6 +107,8 @@ function prepareViewerPage(index: number) {
   const probe = new Image();
   probe.onload = () => {
     if (seq !== viewerPreloadSeq) return;
+    viewerNaturalW.value = probe.naturalWidth;
+    viewerNaturalH.value = probe.naturalHeight;
     viewerHighResLoading.value = false;
     viewerHighRes.value = true;
     viewerLoadFailed.value = false;
@@ -135,7 +138,7 @@ function zoomViewer(direction: -1 | 1) {
 }
 
 function rotateViewer() {
-  viewerRotation.value = (viewerRotation.value + 90) % 360;
+  viewerRotation.value += 90;
   setViewerScale(1);
   resetViewerCanvasScroll();
 }
@@ -331,6 +334,7 @@ watch(
 );
 
 function onViewerImageLoad(event: Event) {
+  if (event.target !== viewerImgEl.value) return;
   viewerLoading.value = false;
   viewerLoadFailed.value = false;
   const img = event.target as HTMLImageElement;
@@ -338,7 +342,8 @@ function onViewerImageLoad(event: Event) {
   viewerNaturalH.value = img.naturalHeight || 0;
 }
 
-function onViewerImageError() {
+function onViewerImageError(event: Event) {
+  if (event.target !== viewerImgEl.value) return;
   viewerLoading.value = false;
   viewerHighResLoading.value = false;
   viewerLoadFailed.value = true;
@@ -363,10 +368,11 @@ function handleViewerKeydown(event: KeyboardEvent) {
   event.preventDefault();
 }
 
+// 在首帧渲染前准备目标页和方向，避免先显示默认方向再触发旋转动画。
+prepareViewerPage(Math.min(Math.max(props.startIndex || 0, 0), Math.max(props.pages.length - 1, 0)));
 useScrollLock(computed(() => true));
 
 onMounted(async () => {
-  prepareViewerPage(Math.min(Math.max(props.startIndex || 0, 0), Math.max(props.pages.length - 1, 0)));
   window.addEventListener("keydown", handleViewerKeydown);
   await nextTick();
   const el = viewerCanvasEl.value;
@@ -445,6 +451,7 @@ onBeforeUnmount(() => {
         <div v-if="viewerHighResLoading" class="viewer-preview-badge"><LoaderCircle class="spin-icon" :size="13" />正在加载高清图…</div>
         <div
           v-if="viewerPage && !viewerLoadFailed"
+          :key="`${viewerPage.key}:${viewerDisplaySrc}`"
           class="viewer-image-frame"
           :style="[viewerFitStyle, { transform: `translate(-50%, -50%) translate3d(${viewerPanX}px, ${viewerPanY}px, 0) scale(${viewerScale}) rotate(${viewerDisplayRotation}deg)` }]"
         >

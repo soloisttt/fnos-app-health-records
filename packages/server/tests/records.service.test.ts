@@ -1814,7 +1814,7 @@ test("heals legacy PDF OCR coordinate space with page rotation", async () => {
     `).run(manager.id, manager.id);
     const upload = createUpload(manager, "records-member", [{ originalName: "ocr.png", data: pngBytes() }]);
     const page = db.prepare("SELECT id FROM report_pages WHERE report_id = ?").get(upload.reportId) as { id: string };
-    db.prepare("UPDATE report_pages SET mime_type = 'application/pdf', storage_path = 'reports/legacy/source.pdf', source_page_number = 1, rotation = 90 WHERE id = ?")
+    db.prepare("UPDATE report_pages SET mime_type = 'application/pdf', storage_path = 'reports/legacy/source.pdf', source_page_number = 1, rotation = 90, ocr_rotation = 0 WHERE id = ?")
       .run(page.id);
     const job = db.prepare("SELECT id FROM processing_jobs WHERE report_id = ? AND job_type = 'ocr'")
       .get(upload.reportId) as { id: string };
