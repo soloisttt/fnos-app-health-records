@@ -206,21 +206,22 @@ HEALTH_RECORDS_VERSION=<version> docker compose up -d
 
 ## 镜像签名验证
 
-后续发布的镜像仍由 GitHub Actions 使用 Cosign 签名，签名文件独立附在对应 GitHub Release 中，不再生成 Docker Hub 签名标签。下载同一版本的 `docker-image-<version>.sig`、`.pem` 和 `.json`，使用 Cosign v2.5.2 验证签名、发布身份和镜像 digest：
+后续发布的镜像仍由 GitHub Actions 使用 Cosign 签名，签名文件独立附在对应 GitHub Release 中，不再生成 Docker Hub 签名标签。下载同一版本的 `docker-image-<version>.sig`、`.pem`、`.json` 和 `.bundle.json`，使用 Cosign v2.5.2 验证签名、发布身份和镜像 digest：
 
 ```bash
 VERSION=0.2.12 # 替换为已发布且要验证的版本
 DIGEST='sha256:...' # 从该版本 Release 复制完整 digest
-cosign verify \
-  --signature "docker-image-${VERSION}.sig" \
-  --certificate "docker-image-${VERSION}.pem" \
-  --payload "docker-image-${VERSION}.json" \
+cosign verify-blob --offline \
+  --bundle "docker-image-${VERSION}.bundle.json" \
   --certificate-identity "https://github.com/timor-m/fnos-app-health-records/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  "docker.io/timorm/fnos-app-health-records@${DIGEST}"
+  "docker-image-${VERSION}.json"
+# 验证签名后，还必须核对声明中的镜像仓库与 digest。
+node scripts/verify-image-claim.mjs "docker-image-${VERSION}.json" \
+  "docker.io/timorm/fnos-app-health-records" "${DIGEST}"
 ```
 
-若发布由手动运行工作流触发，证书身份中的 `refs/tags/v版本号` 应替换为该次运行实际使用的 ref（例如 `refs/heads/main`）。验证期间需要访问镜像仓库及 Sigstore 服务；验证通过后可使用相同 digest 拉取镜像。历史版本仍使用原来的仓库签名方式。
+若发布由手动运行工作流触发，证书身份中的 `refs/tags/v版本号` 应替换为该次运行实际使用的 ref（例如 `refs/heads/main`）。上述 Node.js 脚本来自本仓库；两步均成功才算通过验证。透明日志记录使用 bundle 校验，信任根首次初始化仍可能需要访问 Sigstore 服务；验证通过后可使用相同 digest 拉取镜像。历史版本仍使用原来的仓库签名方式。
 
 ## 数据备份
 

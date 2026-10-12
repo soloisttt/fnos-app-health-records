@@ -244,7 +244,7 @@ npm run release:notes
 - `vX.Y.Z` Tag 先构建 fnOS `.fpk`，再通过 Buildx 发布 `linux/amd64`、`linux/arm64` 的 Docker Hub 多架构镜像，最后创建同时包含 `.fpk`、镜像地址和 digest 的 GitHub Release。
 - Docker 镜像仅发布精确版本 `X.Y.Z`；稳定版本额外更新 `latest`，预发布版本不更新 `latest`。不再生成 `vX.Y.Z`、`X.Y` 或短提交 SHA 镜像标签；Git Release tag 仍使用 `vX.Y.Z`。镜像版本与 `.fpk` 版本都只取自同一个 `package.json`。已有 Docker Hub 标签不会自动删除，使用旧标签的部署需先改为精确版本。
 - 镜像发布启用 OCI 源码、版本、许可证标签、SBOM 和 GitHub Actions provenance。发布前应确认 Docker Hub Access Token 和 GitHub Actions Secrets 配置正确。
-- Cosign v2.5.2 按多架构镜像 digest 签名，使用 `--upload=false` 避免把签名存入 Docker Hub。签名 `.sig`、证书 `.pem` 和已签名的 digest 声明 `.json` 在发布作业中验证后，作为 GitHub Release 附件保存；不新增签名仓库或凭据。验证方法见 [Docker 部署](DOCKER_DEPLOYMENT.md#镜像签名验证)。
+- Cosign v2.5.2 按多架构镜像 digest 签名，使用 `--upload=false` 避免把签名存入 Docker Hub。签名 `.sig`、证书 `.pem`、已签名的 digest 声明 `.json` 和透明日志凭证 `.bundle.json` 在发布作业中验证后，作为 GitHub Release 附件保存；不新增签名仓库或凭据。验证方法见 [Docker 部署](DOCKER_DEPLOYMENT.md#镜像签名验证)。
 
 本地完整发布：
 

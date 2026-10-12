@@ -161,7 +161,9 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p dist
-          cosign sign --yes --upload=false \
+          cosign sign --yes --upload=false --tlog-upload=true \
+            --sign-container-identity "${IMAGE}" \
+            --bundle "dist/docker-image-${VERSION}.bundle.json" \
             --output-signature "dist/docker-image-${VERSION}.sig" \
             --output-certificate "dist/docker-image-${VERSION}.pem" \
             --output-payload "dist/docker-image-${VERSION}.json" \
@@ -174,13 +176,12 @@ jobs:
           DIGEST: ${{ steps.docker-build.outputs.digest }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          cosign verify \
-            --signature "dist/docker-image-${VERSION}.sig" \
-            --certificate "dist/docker-image-${VERSION}.pem" \
-            --payload "dist/docker-image-${VERSION}.json" \
+          cosign verify-blob --offline \
+            --bundle "dist/docker-image-${VERSION}.bundle.json" \
             --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${IMAGE}@${DIGEST}"
+            "dist/docker-image-${VERSION}.json"
+          node scripts/verify-image-claim.mjs "dist/docker-image-${VERSION}.json" "${IMAGE}" "${DIGEST}"
 
       - name: Upload Docker signature artifacts
         uses: actions/upload-artifact@v4
@@ -190,6 +191,7 @@ jobs:
             dist/docker-image-${{ needs.prepare.outputs.version }}.sig
             dist/docker-image-${{ needs.prepare.outputs.version }}.pem
             dist/docker-image-${{ needs.prepare.outputs.version }}.json
+            dist/docker-image-${{ needs.prepare.outputs.version }}.bundle.json
           if-no-files-found: error
 
   publish:
@@ -228,7 +230,7 @@ jobs:
           ```
 
           完整安装和回滚说明见 `docs/DOCKER_DEPLOYMENT.md`。
-          本次镜像签名、证书及 digest 声明作为 `docker-image-版本号.sig`、`.pem`、`.json` 附件提供；验证方法见该文档“镜像签名验证”。
+          本次镜像签名、证书及 digest 声明作为 `docker-image-版本号.sig`、`.pem`、`.json` 及透明日志凭证 `.bundle.json` 附件提供；验证方法见该文档“镜像签名验证”。
           EOF
 
       - name: Create GitHub release
@@ -244,3 +246,4 @@ jobs:
             dist/docker-image-${{ needs.prepare.outputs.version }}.sig
             dist/docker-image-${{ needs.prepare.outputs.version }}.pem
             dist/docker-image-${{ needs.prepare.outputs.version }}.json
+            dist/docker-image-${{ needs.prepare.outputs.version }}.bundle.json
