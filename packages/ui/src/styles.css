@@ -391,14 +391,15 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 /* ---------- 条目卡片列表 ----------
    一行一条独立成卡（浅底、描边、圆角、条目间留白），与总览页「最近报告」观感一致；
    用于疾病目录、病程列表、报告归集等需要逐条明显区分的场景。 */
+/* 标题下缘到首条的留白，与末条到卡片下缘的留白保持 12px，左右同为 14px */
 .entry-list-card > header {
-  min-height: 46px; padding: 10px 14px; border-bottom: 0;
+  min-height: 44px; padding: 12px 14px; border-bottom: 0;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .entry-list-card > header > div { min-width: 0; display: flex; align-items: center; gap: 7px; color: var(--brand); }
 .entry-list-card > header h3 { font-size: 14px; line-height: 1.2; color: var(--ink); }
 .entry-list-card > header .count-label { padding-top: 0; }
-.entry-list-body { padding: 0 10px 10px; display: grid; gap: 8px; }
+.entry-list-body { padding: 0 14px 12px; display: grid; gap: 8px; }
 .entry-list-body--bare { padding: 0; }
 .entry-row {
   width: 100%; min-height: 56px; padding: 12px 14px;
