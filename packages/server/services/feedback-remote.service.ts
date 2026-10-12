@@ -1,12 +1,13 @@
 import { createError } from 'h3';
+import { getAppConfig } from '../utils/runtime-config';
 import { getFeedbackInstallation } from './feedback-installation.service';
-export const feedbackServiceBase = 'https://health.lby.link/api/v1/health/feedback';
-export async function sendFeedbackRequest(path: string, options: {method?:'GET'|'POST';body?:BodyInit;key?:string;json?:boolean}={}, dependencies={fetch:globalThis.fetch,identity:getFeedbackInstallation}) {
-  const headers: Record<string,string>={'x-client-id':dependencies.identity()};
+export const feedbackServiceBase = 'https://gateway.lby.link/health/v1';
+export async function sendFeedbackRequest(path: string, options: {method?:'GET'|'POST';body?:BodyInit;key?:string;json?:boolean;signal?:AbortSignal}={}, dependencies={fetch:globalThis.fetch,identity:getFeedbackInstallation}) {
+  const headers: Record<string,string>={'x-client-id':dependencies.identity(),'x-version':getAppConfig().appVersion};
   if(options.key) headers['Idempotency-Key']=options.key;
   if(options.json) headers['Content-Type']='application/json';
   let response: Response;
-  try {response=await dependencies.fetch(feedbackServiceBase+path,{method:options.method||'GET',headers,body:options.body,redirect:'error',signal:AbortSignal.timeout(30000)});}
+  try {response=await dependencies.fetch(feedbackServiceBase+(path === '/upload' ? '/feedback-attachments' : path.replace(/^\/tickets(?=\/|\?|$)/, '/feedbacks')),{method:options.method||'GET',headers,body:options.body,redirect:'error',signal:options.signal ? AbortSignal.any([options.signal,AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000)});}
   catch {throw createError({statusCode:502,statusMessage:'暂时无法连接反馈服务，请稍后重试，填写内容已保留'});}
   let payload: {success?:boolean;data?:unknown};
   try {payload=await response.json();} catch {throw createError({statusCode:502,statusMessage:'反馈服务响应异常，请稍后重试'});}

@@ -12,17 +12,11 @@ export function createFeedbackOperation() {
   const keys=new Map<string,{signature:string;key:string}>();
   return {key(action:string,signature:string) {const prior=keys.get(action);if(prior?.signature===signature) return prior.key;const key=createUuid();keys.set(action,{signature,key});return key;},clear(action?:string){if(action)keys.delete(action);else keys.clear();}};
 }
-// Read the current persisted identity for each operation, including after backup restore.
-// Coalesce concurrent reads only; never persist the credential in browser storage.
-let identityRequest: Promise<{clientId:string}> | undefined;
-export async function requestFeedback<T>(path:string,init?:RequestInit):Promise<T> {
-  const pending=identityRequest ??= request<{clientId:string}>('feedback/identity');
-  let identity: {clientId:string};
-  try {identity=await pending;} finally {if(identityRequest===pending) identityRequest=undefined;}
-  if(!/^[A-Za-z0-9_-]{43}$/.test(identity.clientId)) throw new Error('应用安装标识无效，请稍后重试');
-  const headers:Record<string,string>={};
-  new Headers(init?.headers).forEach((value,key)=>{headers[key.toLowerCase()]=value;});
-  headers['x-client-id']=identity.clientId;
-  return request<T>('feedback/'+path,{...init,headers});
+// Installation identity and version are injected by the local backend.
+export function requestFeedback<T>(path:string,init?:RequestInit):Promise<T> {
+  const headers=new Headers(init?.headers);
+  headers.delete('x-client-id');headers.delete('x-version');
+  const safe:Record<string,string>={};headers.forEach((value,key)=>{safe[key.toLowerCase()]=value;});
+  return request<T>('feedback/'+path,{...init,headers:safe});
 }
 export function postFeedback<T>(path:string,body:unknown,key:string) {return requestFeedback<T>(path,{method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify(body)});}

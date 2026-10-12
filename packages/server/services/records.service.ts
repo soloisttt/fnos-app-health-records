@@ -1,3 +1,4 @@
+import { listFeedbackNotifications, updateFeedbackNotification } from './feedback-sync.service';
 import { preserveFeedbackInstallation } from './feedback-installation.service';
 import { assertRestoreAdministrator, restoreAccessPolicy, type RestoreAccessPolicy } from './restore-access.service';
 import { evaluateDuplicatePair } from "./report-duplicate-evidence";
@@ -6064,7 +6065,7 @@ export function updateReminderStatus(
 export function listAppNotifications(user: RequestUser, memberId?: string) {
   if (!user.authenticated) return [];
   if (memberId) assertMemberAccess(user, memberId);
-  return getDatabase()
+  const reportNotifications = getDatabase()
     .prepare(
       `
     SELECT n.id, n.member_id AS memberId, n.report_id AS reportId, n.type, n.title,
@@ -6080,6 +6081,8 @@ export function listAppNotifications(user: RequestUser, memberId?: string) {
   `,
     )
     .all(user.id, memberId || null, memberId || null);
+  return [...reportNotifications, ...listFeedbackNotifications(user)].sort((a, b) =>
+    Number(b.status === 'unread') - Number(a.status === 'unread') || String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
 export function updateAppNotificationStatus(
@@ -6089,6 +6092,7 @@ export function updateAppNotificationStatus(
 ) {
   if (!["unread", "read", "archived"].includes(status))
     throw createError({ statusCode: 400, statusMessage: "通知状态无效" });
+  if (notificationId.startsWith('feedback_notice_')) return updateFeedbackNotification(user, notificationId, status);
   const notification = getDatabase()
     .prepare("SELECT member_id AS memberId FROM app_notifications WHERE id = ?")
     .get(notificationId) as { memberId: string } | undefined;

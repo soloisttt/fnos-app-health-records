@@ -1,3 +1,4 @@
+import { recordFeedbackStates,listFeedbackNotifications,updateFeedbackNotification } from '../services/feedback-sync.service';
 import { getFeedbackInstallation,readFeedbackInstallation } from '../services/feedback-installation.service';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -376,4 +377,17 @@ test('full backup restore retains feedback identity and old backups preserve the
  const plan=preflightStoredBackup(admin,newBackup.id);
  restoreBackup(admin,newBackup.id,plan.token);
  assert.equal(readFeedbackInstallation(getDatabase()),id);
+}));
+
+test('full backup restores feedback state and per-admin notification read position',()=>setup((_dir,admin)=>{
+ const db=getDatabase(),id=getFeedbackInstallation();
+ recordFeedbackStates(db,id,[{number:'B0001',status:'received',version:1}]);
+ recordFeedbackStates(db,id,[{number:'B0001',status:'confirmed',version:2}]);
+ const notice=listFeedbackNotifications(admin)[0];updateFeedbackNotification(admin,String(notice.id),'archived');
+ const backup=createFullBackup(admin);
+ recordFeedbackStates(db,id,[{number:'B0001',status:'in_progress',version:3}]);assert.equal(listFeedbackNotifications(admin).length,1);
+ const plan=preflightStoredBackup(admin,backup.id);restoreBackup(admin,backup.id,plan.token);
+ assert.equal(listFeedbackNotifications(admin).length,0);
+ assert.equal(getDatabase().prepare('SELECT status FROM feedback_sync_state').get()?.status,'confirmed');
+ recordFeedbackStates(getDatabase(),id,[{number:'B0001',status:'confirmed',version:2}]);assert.equal(listFeedbackNotifications(admin).length,0);
 }));

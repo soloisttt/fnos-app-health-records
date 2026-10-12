@@ -1,3 +1,5 @@
+import { getDatabase } from '../../../database/client';
+import { recordFeedbackStates, syncFeedbackUpdates, type FeedbackList, type FeedbackState } from '../../../services/feedback-sync.service';
 import { getFeedbackInstallation } from '../../../services/feedback-installation.service';
 import { validateFeedbackEnvironment } from '../../../services/feedback-validation';
 import { createError, defineEventHandler, getHeader, getQuery, getRouterParam, setHeader } from 'h3';
@@ -21,7 +23,16 @@ export default defineEventHandler(async event => {
       if(!allowed.includes(key) || typeof value!=='string' || value.length>120) throw createError({statusCode:400,statusMessage:'查询参数无效'});
       params.set(key,value);
     }
-    return ok(await sendFeedbackRequest(path+(params.size?'?'+params:'')));
+    const db=getDatabase(),clientId=getFeedbackInstallation(db);
+    if(path==='/tickets' && !['number','q','status','category'].some(key=>params.has(key))) {
+      const page=Number(params.get('page') || 1),pageSize=Number(params.get('pageSize') || 20);
+      if(!Number.isInteger(page) || page<1 || page>10000 || !Number.isInteger(pageSize) || pageSize<1 || pageSize>50) throw createError({statusCode:400,statusMessage:'分页参数无效'});
+      const result=await syncFeedbackUpdates(db);
+      return ok({...result,items:result.items.slice((page-1)*pageSize,page*pageSize),page,pageSize});
+    }
+    const result=await sendFeedbackRequest(path+(params.size?'?'+params:''));
+    if(path==='/tickets') recordFeedbackStates(db,clientId,(result as FeedbackList).items);
+    return ok(result);
   }
   if(event.req.method!=='POST' || !(path==='/upload' || path==='/tickets' || new RegExp('^'+ticket+'/(messages|resolution)$').test(path))) throw createError({statusCode:404,statusMessage:'反馈接口不存在'});
   const key=getHeader(event,'idempotency-key') || '';
@@ -42,5 +53,8 @@ export default defineEventHandler(async event => {
   const allowed=path==='/tickets'?['category','title','description','reproductionSteps','attachmentIds','environment']:path.endsWith('/messages')?['content','attachmentIds']:['action','expectedVersion','content'];
   if(Object.keys(body).some(k=>!allowed.includes(k))) throw createError({statusCode:400,statusMessage:'反馈包含不支持的字段'});
   if(path==='/tickets') {validateFeedbackEnvironment(body.environment);body.appKey='health-records';}
-  return ok(await sendFeedbackRequest(path,{method:'POST',key,json:true,body:JSON.stringify(body)}));
+  const db=getDatabase(),clientId=getFeedbackInstallation(db);
+  const result=await sendFeedbackRequest(path,{method:'POST',key,json:true,body:JSON.stringify(body)});
+  if(path==='/tickets' || path.endsWith('/resolution')) recordFeedbackStates(db,clientId,[result as FeedbackState],false);
+  return ok(result);
 });

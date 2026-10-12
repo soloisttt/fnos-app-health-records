@@ -84,8 +84,9 @@ test("never reuses a connection rejected for an unsupported schema version", asy
 
 test("closes an explicitly repaired connection when migration fails and safely reopens after recovery", async () => withDatabase(() => {
   const db = getDatabase();
-  db.exec(`UPDATE schema_migrations SET checksum = '' WHERE version = 17;
-    INSERT INTO schema_migrations(version) VALUES (19);
+  db.exec(`UPDATE schema_migrations SET checksum = '' WHERE version IN (17,19);
+    DROP TABLE institution_trend_auto_decisions; DROP TABLE institution_trend_auto_rules;
+    DROP TABLE institution_trend_observations; DROP TABLE institution_trend_projects;
     CREATE TRIGGER fail_migration BEFORE INSERT ON schema_migrations WHEN NEW.version = 17
     BEGIN SELECT RAISE(ABORT, 'fixture migration failure'); END`);
   closeDatabaseForTests();
@@ -97,7 +98,7 @@ test("closes an explicitly repaired connection when migration fails and safely r
   try { repair.exec("DROP TRIGGER fail_migration"); } finally { repair.close(); }
   const recovered = getDatabase();
   assert.equal(getUnreleasedSchemaMaintenance(), null);
-  assert.equal(recovered.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 18);
+  assert.equal(recovered.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 19);
   assert.equal(recovered.prepare("SELECT COUNT(*) AS n FROM reports").get()?.n, 1);
 }));
 

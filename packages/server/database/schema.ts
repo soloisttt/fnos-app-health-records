@@ -1,3 +1,4 @@
+import { feedbackNotificationsSchemaSql } from "./feedback-notifications";
 import { reportExaminationDraftSql } from "./report-examination-draft";
 import { reportDuplicateDraftSql } from "./report-duplicate-draft";
 import { pageAppendSchemaSql } from "./page-append-draft";
@@ -586,6 +587,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   detail_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+${feedbackNotificationsSchemaSql}
 ${uploadReceiptSchemaSql}
 ${pageAppendSchemaSql}
 ${reportDuplicateDraftSql}

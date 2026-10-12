@@ -1,3 +1,4 @@
+import { getAppConfig } from '../utils/runtime-config';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { H3 } from 'h3';
@@ -13,7 +14,7 @@ test('local authenticated route forwards only feedback operations and edited ima
  const dir=mkdtempSync(join(tmpdir(),'feedback-route-')),env={...process.env},originalFetch=globalThis.fetch;
  process.env.STORAGE_DIR=dir;process.env.DISABLE_JOB_RUNNER='true';
  const calls:{url:string;headers:Headers;body?:BodyInit|null}[]=[];
- globalThis.fetch=async(url,init)=>{calls.push({url:String(url),headers:new Headers(init?.headers),body:init?.body});return Response.json({success:true,data:String(url).endsWith('/upload')?{id:1,url:'/uploads/example.png',relativePath:'private'}:{items:[],total:0}});};
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),headers:new Headers(init?.headers),body:init?.body});return Response.json({success:true,data:String(url).endsWith('/feedback-attachments')?{id:1,url:'/uploads/example.png',relativePath:'private'}:init?.method==='POST'?{number:'B0001',status:'received',version:1}:{items:[],total:0}});};
  let authenticated=false;
  const app=new H3();app.use(e=>{e.context.requestUser={id:'synthetic',authenticated};});app.all('/api/feedback/**:path',handler);
  try {
@@ -26,7 +27,7 @@ test('local authenticated route forwards only feedback operations and edited ima
 
   assert.equal((await app.request('http://localhost/api/feedback/admin')).status,404);assert.equal(calls.length,0);
   assert.equal((await app.request('http://localhost/api/feedback/tickets?page=1')).status,200);
-  assert.equal(calls[0].url,'https://health.lby.link/api/v1/health/feedback/tickets?page=1');const id=calls[0].headers.get('x-client-id');assert.match(id!,/^[A-Za-z0-9_-]{43}$/);assert.equal(id,identity);
+  assert.equal(calls[0].url,'https://gateway.lby.link/health/v1/feedbacks?page=1&pageSize=50');const id=calls[0].headers.get('x-client-id');assert.match(id!,/^[A-Za-z0-9_-]{43}$/);assert.equal(id,identity);assert.equal(calls[0].headers.get('x-version'),getAppConfig().appVersion);
   const form=new FormData();form.set('file',new Blob(['edited-synthetic-image'],{type:'image/png'}),'private-original-name.png');
   const uploaded=await app.request('http://localhost/api/feedback/upload',{method:'POST',headers:{'Idempotency-Key':'upload-test','x-client-id':'untrusted','cookie':'private'},body:form});assert.equal(uploaded.status,200);assert.deepEqual((await uploaded.json()).data,{id:1,url:'/uploads/example.png'});
   assert.equal(calls[1].headers.get('x-client-id'),id);assert.equal(calls[1].headers.get('cookie'),null);const file=(calls[1].body as FormData).get('file') as File;assert.equal(file.name,'screenshot.png');assert.equal(await file.text(),'edited-synthetic-image');assert.deepEqual(readdirSync(join(dir,'uploads')),[]);

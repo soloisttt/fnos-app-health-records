@@ -21,7 +21,7 @@ test("v17 draft completion preserves manual associations and defaults to disable
     const upgraded = getDatabase();
     assert.ok(upgraded.prepare("SELECT id FROM institution_trend_projects WHERE id = 'p'").get());
     assert.equal((upgraded.prepare('SELECT COUNT(*) AS n FROM institution_trend_auto_rules').get() as {n:number}).n,0);
-    assert.ok(readdirSync(join(dir,'backups','db')).some(name => name.includes('v17-to-v18')));
+    assert.ok(readdirSync(join(dir,'backups','db')).some(name => name.includes('v17-to-v19')));
   } finally { closeDatabaseForTests(); delete process.env.STORAGE_DIR; rmSync(dir,{recursive:true,force:true}); }
 });
 
@@ -30,7 +30,7 @@ test("existing v18 test databases are rejected without renumbering or deleting d
   process.env.STORAGE_DIR = dir;
   try {
     const db = getDatabase();
-    db.exec(`DELETE FROM schema_migrations WHERE version=18; INSERT INTO schema_migrations(version,name,checksum) VALUES (18,'add_institution_trend_auto_rules','manual:018-institution-trend-auto-rules');
+    db.exec(`DELETE FROM schema_migrations WHERE version>=18; INSERT INTO schema_migrations(version,name,checksum) VALUES (18,'add_institution_trend_auto_rules','manual:018-institution-trend-auto-rules');
       INSERT INTO users(id,display_name) VALUES ('keep','fixture');`);
     closeDatabaseForTests();
     assert.throws(() => getDatabase(), /schema v18 conflicts/);
@@ -57,9 +57,9 @@ test("v16 upgrades with backup and preserves existing rows; latest schema reopen
     const upgraded = getDatabase();
     assert.ok(upgraded.prepare("SELECT id FROM users WHERE id = 'keep'").get());
     assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE name = 'institution_trend_projects'").get());
-    assert.equal((upgraded.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number }).v, 18);
+    assert.equal((upgraded.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number }).v, 19);
     assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE name = 'upload_receipts'").get());
-    assert.ok(readdirSync(join(dir, 'backups', 'db')).some(name => name.includes('v16-to-v18')));
+    assert.ok(readdirSync(join(dir, 'backups', 'db')).some(name => name.includes('v16-to-v19')));
     closeDatabaseForTests();
     assert.ok(getDatabase().prepare("SELECT id FROM users WHERE id = 'keep'").get());
   } finally {

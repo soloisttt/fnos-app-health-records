@@ -66,7 +66,7 @@ test("initializes the health records schema with WAL", () => {
       assert.equal(duplicateDecisionColumns.some((column) => column.name === columnName), true, `missing duplicate decision column ${columnName}`);
       assert.equal(duplicateHistoryColumns.some((column) => column.name === columnName), true, `missing duplicate history column ${columnName}`);
     }
-    assert.equal(schemaVersion, 18);
+    assert.equal(schemaVersion, 19);
     const organizationIndex = db.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'index' AND name = 'reports_organization_idx'
@@ -144,7 +144,7 @@ test("migrates an existing v1 database to PDF source page columns", () => {
     ]) {
       assert.equal(normalizationColumns.some((column) => column.name === columnName), true, `missing column ${columnName}`);
     }
-    assert.equal(schemaVersion, 18);
+    assert.equal(schemaVersion, 19);
     const upgrades = getDatabase().prepare("SELECT COUNT(*) AS count FROM app_upgrade_history WHERE status = 'completed'").get() as
       { count: number };
     assert.equal(upgrades.count, 1);

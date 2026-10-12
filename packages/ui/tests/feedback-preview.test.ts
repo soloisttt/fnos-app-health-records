@@ -26,7 +26,7 @@ describe("feedback service UI", () => {
     expect(wrapper.find(".success-card").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("DEMO-");
     expect((wrapper.get("form input").element as HTMLInputElement).value).toBe("界面建议");
-    expect(request.mock.calls.every(call => typeof call[0] === "string" && (call[0] === "feedback-diagnostics" || call[1]?.headers?.["x-client-id"] === "a".repeat(43)))).toBe(true);
+    expect(request.mock.calls.every(call => typeof call[0] === "string" && (call[0] === "feedback-diagnostics" || call[1]?.headers?.["x-client-id"] === undefined))).toBe(true);
     wrapper.unmount();
   });
   it("keeps the list visible and preserves a draft when dismissed", async () => {
@@ -101,7 +101,7 @@ describe("feedback service UI", () => {
     await flushPromises();
     expect(wrapper.findAll(".attachment-tile")).toHaveLength(5);
     expect(wrapper.find(".success-card").exists()).toBe(false);
-    expect(request.mock.calls.every(call => typeof call[0] === "string" && (call[0] === "feedback-diagnostics" || call[1]?.headers?.["x-client-id"] === "a".repeat(43)))).toBe(true);
+    expect(request.mock.calls.every(call => typeof call[0] === "string" && (call[0] === "feedback-diagnostics" || call[1]?.headers?.["x-client-id"] === undefined))).toBe(true);
     wrapper.unmount();
     expect(revoke).toHaveBeenCalledTimes(6);
   });

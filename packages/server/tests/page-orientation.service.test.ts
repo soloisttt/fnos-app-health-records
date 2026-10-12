@@ -100,19 +100,19 @@ test('formal v18 migration backfills old OCR orientation once and preserves inst
 });
 
 
-test('v17 installation upgrades to v18 with a backup and preserves data on repeat startup', () => {
+test('v17 installation upgrades through v18 to v19 with a backup and preserves data on repeat startup', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orientation-v18-upgrade-'));
   const previous = process.env.STORAGE_DIR;
   process.env.STORAGE_DIR = dir;
   try {
     const db = getDatabase();
-    db.exec("DELETE FROM schema_migrations WHERE version=18; ALTER TABLE report_pages DROP COLUMN ocr_rotation; INSERT INTO users(id,display_name) VALUES('migration-fixture','fixture')");
+    db.exec("DELETE FROM schema_migrations WHERE version>=18; ALTER TABLE report_pages DROP COLUMN ocr_rotation; INSERT INTO users(id,display_name) VALUES('migration-fixture','fixture')");
     closeDatabaseForTests();
     const upgraded = getDatabase();
-    assert.equal(upgraded.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()!.v, 18);
+    assert.equal(upgraded.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()!.v, 19);
     assert.ok(upgraded.prepare('PRAGMA table_info(report_pages)').all().some(c => c.name === 'ocr_rotation'));
     assert.ok(upgraded.prepare("SELECT id FROM users WHERE id='migration-fixture'").get());
-    assert.ok(readdirSync(join(dir, 'backups/db')).some(name => name.includes('v17-to-v18')));
+    assert.ok(readdirSync(join(dir, 'backups/db')).some(name => name.includes('v17-to-v19')));
     closeDatabaseForTests();
     assert.ok(getDatabase().prepare("SELECT id FROM users WHERE id='migration-fixture'").get());
   } finally {

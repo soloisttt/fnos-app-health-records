@@ -746,11 +746,11 @@ test("existing database receives missing page append tables with backup and no s
     );
     assert.equal(
       db.prepare("SELECT MAX(version) AS n FROM schema_migrations").get()!.n,
-      18,
+      19,
     );
     assert.ok(
       readdirSync(join(env.directory, "backups/db")).some((name) =>
-        name.includes("v18-to-v18"),
+        name.includes("v19-to-v19"),
       ),
     );
     assert.equal(db.prepare("SELECT * FROM reports").all().length, 1);

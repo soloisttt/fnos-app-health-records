@@ -47,7 +47,7 @@ test('notes draft upgrades existing v17 with backup, indexes, FK and no schema r
   closeDatabaseForTests();
   const upgraded = getDatabase();
   assert.ok(readdirSync(join(root, 'backups/db')).length);
-  assert.equal(upgraded.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()?.v, 18);
+  assert.equal(upgraded.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()?.v, 19);
   assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM reports').get()?.n, 2);
   upgraded.exec(reportNotesSchemaSql); upgraded.exec(reportNotesSchemaSql);
   assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE name='report_notes_report_idx'").get());

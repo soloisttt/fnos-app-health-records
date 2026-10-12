@@ -1233,9 +1233,10 @@ export type Reminder = {
 
 export type AppNotification = {
   id: string;
-  memberId: string;
+  memberId: string | null;
   reportId: string | null;
-  type: "report_processed" | "report_failed";
+  type: "report_processed" | "report_failed" | "feedback_updated";
+  feedbackNumber?: string;
   title: string;
   message: string | null;
   severity: "info" | "success" | "warning" | "error";

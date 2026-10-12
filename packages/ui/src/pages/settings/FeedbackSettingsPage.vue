@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useRoute } from "vue-router";
+import { useAppContext } from "../../composables/useAppContext";
 import { computed, nextTick, onMounted, watch, onDeactivated, onBeforeUnmount, ref } from "vue";
 import { ArrowLeft, CircleHelp, Lightbulb, Check, ChevronRight, Copy, MessageSquare, ImagePlus, Plus, Search, X } from "@lucide/vue";
 import FeedbackImageEditor from "../../components/FeedbackImageEditor.vue";
@@ -11,6 +13,8 @@ import { requestFeedback, feedbackStatus, feedbackCategory, feedbackImageUrl, cr
 import { createUuid } from "../../utils/uuid";
 import { useToast } from "../../composables/useToast";
 
+const app = useAppContext();
+const route = useRoute();
 type Attachment = { file: File; url: string };
 type Feedback = { raw:FeedbackTicket; images?: {url:string}[]; id:string; title:string; category:string; status:string; description:string; reply:string };
 const mine = ref<Feedback[]>([]);
@@ -26,7 +30,7 @@ async function loadList() {
   const seq=++listSequence;loading.value=true;listError.value='';
   const params=new URLSearchParams({page:String(page.value),pageSize:'20'});
   if(query.value.trim()) params.set(/^(?:[BSO]\d{4,20}|FB-\d{4}-\d{6,20})$/i.test(query.value.trim())?'number':'q',/^(?:[BSO]\d|FB-)/i.test(query.value.trim())?query.value.trim().toUpperCase():query.value.trim());
-  try {const result=await requestFeedback<{items:FeedbackTicket[];total:number}>('tickets?'+params);if(seq===listSequence){mine.value=result.items.map(present);total.value=result.total;}}
+  try {const result=await requestFeedback<{items:FeedbackTicket[];total:number}>('tickets?'+params);if(seq===listSequence){mine.value=result.items.map(present);total.value=result.total;void app.refreshReminderCount();}}
   catch(e){if(seq===listSequence) listError.value=e instanceof Error?e.message:'反馈加载失败';}
   finally {if(seq===listSequence) loading.value=false;}
 }
@@ -58,6 +62,14 @@ function modalKeydown(event: KeyboardEvent) {
   else if (!event.shiftKey && (document.activeElement === last || document.activeElement === modalPanel.value)) { event.preventDefault(); first?.focus(); }
 }
 const selected = ref<Feedback | null>(null);
+watch(() => route?.query.feedback, async number => {
+  if (typeof number !== 'string' || !/^(?:[BSO]\d{4,20}|FB-\d{4}-\d{6,20})$/.test(number)) return;
+  try {
+    const result = await requestFeedback<FeedbackTicket>('tickets/'+number+'?eventPage=1&eventPageSize=10');
+    if (route?.query.feedback !== number) return;
+    selected.value=present(result);eventPage.value=1;screen.value='detail';detailError.value='';
+  } catch (cause) { detailError.value=cause instanceof Error ? cause.message : '反馈详情加载失败';toast.show(detailError.value); }
+}, { immediate: true });
 const attachments = ref<Attachment[]>([]);
 const editingImage = ref<Attachment | null>(null);
 function saveEditedImage(file: File) {

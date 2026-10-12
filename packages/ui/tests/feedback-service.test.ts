@@ -10,14 +10,14 @@ const ticket={number:'B0001',title:'测试反馈',category:'problem',status:'rel
 function render(){return mount(Page,{global:{stubs:{SubPageHeader:true,Teleport:true,FeedbackImageEditor:true}}});}
 beforeEach(()=>{request.mockReset();request.mockImplementation(async(path:string)=>path==='feedback-diagnostics'?{}:path.includes('?page=')?{items:[],total:0}:ticket);});
 describe('live feedback workflows',()=>{
- it('loads feedback lazily on page mount and submits only approved fields with installation header',async()=>{
-  const page=render();await flushPromises();expect(request).toHaveBeenCalledWith('feedback/tickets?page=1&pageSize=20',expect.objectContaining({headers:{'x-client-id':'a'.repeat(43)}}));
+ it('loads feedback lazily on page mount and submits only approved fields without exposing installation identity',async()=>{
+  const page=render();await flushPromises();expect(request).toHaveBeenCalledWith('feedback/tickets?page=1&pageSize=20',expect.objectContaining({headers:{}}));
   await page.get('.feedback-primary').trigger('click');await flushPromises();
   await page.get('form input').setValue('测试反馈');await page.get('form textarea').setValue('合成描述');
   await page.findAll('.type-options button')[1].trigger('click');
   await page.get('form').trigger('submit');await flushPromises();
   const [,options]=request.mock.calls.find(c=>c[0]==='feedback/tickets')!;
-  expect(JSON.parse(options.body).category).toBe('suggestion');expect(JSON.parse(options.body).reproductionSteps).toBeUndefined();expect(options.headers['idempotency-key']).toBeTruthy();expect(options.headers['x-client-id']).toBe('a'.repeat(43));expect(page.get('.number-box').text()).toContain('B0001');page.unmount();
+  expect(JSON.parse(options.body).category).toBe('suggestion');expect(JSON.parse(options.body).reproductionSteps).toBeUndefined();expect(options.headers['idempotency-key']).toBeTruthy();expect(options.headers['x-client-id']).toBeUndefined();expect(page.get('.number-box').text()).toContain('B0001');page.unmount();
  });
  it('shows real progress and version, sends user confirmation with optimistic version',async()=>{
   request.mockImplementation(async(path:string)=>path.includes('?page=')?{items:[ticket],total:1}:ticket);

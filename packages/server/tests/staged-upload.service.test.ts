@@ -28,8 +28,8 @@ test('30 images plus PDF finalize atomically, preserve order and retry without d
     // Exercise the previous-version migration independently, without changing old migrations.
     db.exec('DROP TABLE upload_receipts');
     closeDatabaseForTests(); db = getDatabase();
-    assert.ok(readdirSync(join(directory, 'backups', 'db')).some(name => name.includes('v18-to-v18')));
-    assert.equal((db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version, 18);
+    assert.ok(readdirSync(join(directory, 'backups', 'db')).some(name => name.includes('v19-to-v19')));
+    assert.equal((db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version, 19);
     db.exec(uploadReceiptSchemaSql); db.exec(uploadReceiptSchemaSql);
     const key = 'test-upload-request-0001';
     const buffers = [...Array.from({ length: 30 }, () => png), Buffer.from('%PDF-1.4\n%%EOF')];
