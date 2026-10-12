@@ -187,21 +187,19 @@ watch(
           <div><Activity :size="18" /><h3>疾病目录</h3></div>
           <span class="count-label">共 {{ filtered.length }} 项</span>
         </header>
-        <div class="entry-list-body">
+        <div class="entry-grid">
           <button
             v-for="entry in filtered"
             :key="`${entry.kind}:${entry.name}`"
-            class="entry-row"
+            class="entry-tile"
             type="button"
             @click="openEntry(entry)"
           >
-            <span class="entry-row-main">
+            <span class="entry-tile-head">
               <strong>{{ entry.name }}</strong>
-              <span>{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
-            </span>
-            <span class="entry-row-side">
               <span class="chip status-label" :class="kindChip(entry)">{{ kindLabel(entry) }}</span>
             </span>
+            <span class="entry-tile-meta">{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
           </button>
         </div>
       </section>
