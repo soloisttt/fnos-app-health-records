@@ -10,8 +10,10 @@ import {
   excludeCatalogEntry,
   listCatalogHiddenEntries,
   restoreCatalogEntry,
+  createMedication,
   createSymptom,
   deleteEpisode,
+  deleteMedication,
   deleteSymptom,
   getEpisode,
   linkEpisodeFact,
@@ -114,6 +116,38 @@ test("症状可增改删，且只读账号不能修改", () => {
 
     const afterDelete = deleteSymptom(owner, symptomId);
     assert.equal(afterDelete.symptoms.length, 0);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("手动补录的用药可增删，只读账号不能修改", () => {
+  const { storageDir, owner, viewer } = setup("medication-crud");
+  try {
+    const episode = createEpisode(owner, "member", { title: "咳嗽" });
+    const afterCreate = createMedication(owner, episode.episode.id, {
+      name: "氨溴特罗口服溶液",
+      dose: "5ml",
+      frequency: "bid",
+      route: "口服",
+      startAt: "2026-10-09",
+    });
+    assert.equal(afterCreate.medications.length, 1);
+    assert.equal(afterCreate.medications[0]!.name, "氨溴特罗口服溶液");
+    assert.equal(afterCreate.medications[0]!.dose, "5ml");
+    assert.equal(afterCreate.medications[0]!.startAt, "2026-10-09");
+    assert.equal(afterCreate.medications[0]!.source, "manual", "手动补录的用药来源应为 manual");
+    assert.equal(afterCreate.medications[0]!.reportId, null, "手动补录不挂在任何报告上");
+
+    assert.throws(
+      () => createMedication(viewer, episode.episode.id, { name: "布洛芬" }),
+      /管理权限|仅有管理/,
+    );
+    assert.throws(() => createMedication(owner, episode.episode.id, { name: "   " }), /不能为空/);
+
+    const afterDelete = deleteMedication(owner, afterCreate.medications[0]!.id);
+    assert.equal(afterDelete.medications.length, 0);
+    assert.throws(() => deleteMedication(owner, afterCreate.medications[0]!.id), /不存在/);
   } finally {
     teardown(storageDir);
   }

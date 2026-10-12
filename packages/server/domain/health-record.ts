@@ -251,6 +251,25 @@ export type CaseSymptom = {
   manualFields: string[];
 };
 
+/** 手动补录的用药（报告里没抽到、或医生口头嘱咐的药）；字段对齐 report_medications。 */
+export type CaseMedication = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  name: string;
+  dose: string | null;
+  doseUnit: string | null;
+  frequency: string | null;
+  route: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  description: string | null;
+  source: CaseSymptomSource;
+  reportId: string | null;
+  evidence: ClinicalEvidence;
+  manualFields: string[];
+};
+
 export const caseEpisodeLinkFactTypes = [
   "report",
   "diagnosis",

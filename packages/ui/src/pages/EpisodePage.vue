@@ -5,7 +5,15 @@ import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
 import { request } from "../utils/api";
-import type { CaseEpisode, CaseEpisodeDetail, CaseEpisodeLinkFactType, CaseSymptom, EpisodeLinkedFact } from "../types/api";
+import type {
+  CaseEpisode,
+  CaseEpisodeDetail,
+  CaseEpisodeLinkFactType,
+  CaseMedication,
+  CaseSymptom,
+  EpisodeLinkedFact,
+} from "../types/api";
+import { withFrequencyNote } from "../utils/medication-frequency";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
@@ -21,6 +29,7 @@ const episodes = ref<CaseEpisode[]>([]);
 const detail = ref<CaseEpisodeDetail | null>(null);
 const formOpen = ref(false);
 const symptomFormOpen = ref(false);
+const medicationFormOpen = ref(false);
 const previewReportId = ref<string | null>(null);
 
 const factTypeLabels: Record<CaseEpisodeLinkFactType, string> = {
@@ -142,6 +151,30 @@ const timeline = computed<TimelineEvent[]>(() => {
       items: [entry],
     });
   }
+  /* 手动补录的用药与报告展开的用药同属「用药」，但没有来源报告，因此单独成组 */
+  for (const medication of current.medications) {
+    const groupKey = `medication||${medication.startAt ?? ""}`;
+    const entry: TimelineItem = {
+      key: `medication:${medication.id}`,
+      title: medication.name,
+      detail: manualMedicationDetail(medication),
+      reportId: null,
+      derived: false,
+      remove: () => void removeMedication(medication.id),
+    };
+    const group = factGroups.get(groupKey);
+    if (group) {
+      group.items.push(entry);
+      continue;
+    }
+    factGroups.set(groupKey, {
+      key: `facts:${groupKey}`,
+      at: medication.startAt,
+      kind: "medication",
+      badge: factTypeLabels.medication,
+      items: [entry],
+    });
+  }
   events.push(...factGroups.values());
 
   if (current.episode.status === "resolved" || current.episode.resolvedAt) {
@@ -168,6 +201,18 @@ const timeline = computed<TimelineEvent[]>(() => {
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
 const symptomForm = ref({ name: "", onsetAt: "", durationText: "", severity: "", bodyPart: "" });
+const medicationForm = ref({ name: "", dose: "", frequency: "", route: "", startAt: "" });
+
+/** 两个补录表单互斥展开，避免同时占满屏幕。 */
+function openSymptomForm() {
+  medicationFormOpen.value = false;
+  symptomFormOpen.value = !symptomFormOpen.value;
+}
+
+function openMedicationForm() {
+  symptomFormOpen.value = false;
+  medicationFormOpen.value = !medicationFormOpen.value;
+}
 
 const episodeStatusMeta: Record<CaseEpisode["status"], { label: string; chip: string }> = {
   active: { label: "进行中", chip: "chip--amber" },
@@ -211,6 +256,14 @@ function symptomMeta(item: CaseSymptom) {
   if (item.severity) parts.push(item.severity);
   if (item.bodyPart) parts.push(item.bodyPart);
   return parts.join(" · ");
+}
+
+/** 手动补录用药的展示文案：剂量 · 用法 · 频次（保留 tid/bid 原标签并补中文说明）。 */
+function manualMedicationDetail(item: CaseMedication) {
+  const dose = [item.dose, item.doseUnit].filter(Boolean).join("");
+  return [dose || null, item.route, withFrequencyNote(item.frequency), "手动补录"]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 async function load(memberId: string, keepDetailId?: string) {
@@ -329,6 +382,49 @@ async function addSymptom() {
     toast.show("症状已添加");
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "添加症状失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function addMedication() {
+  const episodeId = detail.value?.episode.id;
+  if (!episodeId || saving.value) return;
+  if (!medicationForm.value.name.trim()) {
+    error.value = "药品名称不能为空";
+    return;
+  }
+  saving.value = true;
+  error.value = "";
+  try {
+    detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/medications`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: medicationForm.value.name,
+        dose: medicationForm.value.dose || null,
+        frequency: medicationForm.value.frequency || null,
+        route: medicationForm.value.route || null,
+        startAt: medicationForm.value.startAt || null,
+      }),
+    });
+    medicationForm.value = { name: "", dose: "", frequency: "", route: "", startAt: "" };
+    medicationFormOpen.value = false;
+    toast.show("用药已添加");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "添加用药失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function removeMedication(medicationId: string) {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    detail.value = await request<CaseEpisodeDetail>(`medications/${medicationId}`, { method: "DELETE" });
+    toast.show("用药已删除");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "删除用药失败";
   } finally {
     saving.value = false;
   }
@@ -459,11 +555,16 @@ onActivated(() => {
         </div>
       </section>
 
-      <div class="page-intro episode-timeline-intro">
+      <div class="page-intro page-intro--keep page-intro--actions-only episode-timeline-intro">
         <div><h3>病程时间轴</h3><p>起病、症状、诊断、用药与转归，按时间排成一条线</p></div>
-        <button class="soft-action-button" type="button" @click="symptomFormOpen = !symptomFormOpen">
-          <Plus :size="16" />添加症状
-        </button>
+        <div class="episode-intro-actions">
+          <button class="soft-action-button" type="button" @click="openMedicationForm()">
+            <Plus :size="16" />添加用药
+          </button>
+          <button class="soft-action-button" type="button" @click="openSymptomForm()">
+            <Plus :size="16" />添加症状
+          </button>
+        </div>
       </div>
 
       <section v-if="symptomFormOpen" class="settings-band entry-list-card">
@@ -487,8 +588,29 @@ onActivated(() => {
         </div>
       </section>
 
-      <p v-if="!detail.symptoms.length && !detail.linkedFacts.length" class="preview-hint">
-        还没有内容。到报告详情页点「加入病程」挂上报告，或用上方按钮补录症状。
+      <section v-if="medicationFormOpen" class="settings-band entry-list-card">
+        <header>
+          <div><Plus :size="18" /><h3>添加用药</h3></div>
+        </header>
+        <div class="entry-list-body">
+        <form class="entry-form" @submit.prevent="addMedication">
+        <div class="form-grid">
+          <label><span>药品名称</span><input v-model="medicationForm.name" placeholder="例如 氨溴特罗口服溶液" /></label>
+          <label><span>开始日期</span><DateTimePicker v-model="medicationForm.startAt" aria-label="用药开始日期" /></label>
+          <label><span>单次剂量</span><input v-model="medicationForm.dose" placeholder="例如 5ml、半片" /></label>
+          <label><span>服药频次</span><input v-model="medicationForm.frequency" placeholder="例如 tid（每日三次）" /></label>
+          <label><span>用法</span><input v-model="medicationForm.route" placeholder="例如 口服、外用" /></label>
+        </div>
+        <div class="form-actions">
+          <button type="button" @click="medicationFormOpen = false">取消</button>
+          <button class="primary-button" :disabled="saving">保存</button>
+        </div>
+        </form>
+        </div>
+      </section>
+
+      <p v-if="!detail.symptoms.length && !detail.medications.length && !detail.linkedFacts.length" class="preview-hint">
+        还没有内容。到报告详情页点「加入病程」挂上报告，或用上方按钮补录症状与用药。
       </p>
       <ol v-else class="episode-timeline">
         <li v-for="event in timeline" :key="event.key" :class="`episode-event episode-event--${event.kind}`">

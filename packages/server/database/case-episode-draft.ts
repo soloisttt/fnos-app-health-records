@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 // 病程模块（二开）基础结构：
 //   case_episodes       病程主体（含病因、转归）—— A1 / A3 / A4
 //   case_symptoms       结构化症状（名称/起病/时长/程度/部位）—— A2
+//   case_medications    手动补录的用药（报告未抽取或口头医嘱）—— A2 的用药侧补充
 //   case_episode_links  归集关系（病程 ↔ 报告/诊断/用药/操作）—— A1 / A6
 //   diagnosis_catalog   诊断标准名 —— A7 疾病目录
 //   diagnosis_aliases   诊断别名归一化 —— A7 疾病目录
@@ -61,6 +62,34 @@ CREATE INDEX IF NOT EXISTS case_symptoms_report_idx
   ON case_symptoms(report_id);
 CREATE INDEX IF NOT EXISTS case_symptoms_member_name_idx
   ON case_symptoms(member_id, name, is_deleted);
+
+-- 手动补录的用药（报告里没抽到、或医生口头嘱咐的药）。
+-- 与报告展开出来的用药并列展示在病程时间轴上；字段对齐 report_medications，
+-- 将来若加 AI 抽取（source='ai'）与证据回链无需改表。
+CREATE TABLE IF NOT EXISTS case_medications (
+  id                 TEXT PRIMARY KEY,
+  episode_id         TEXT NOT NULL REFERENCES case_episodes(id) ON DELETE CASCADE,
+  member_id          TEXT NOT NULL REFERENCES health_members(id) ON DELETE CASCADE,
+  name               TEXT NOT NULL,
+  dose               TEXT,
+  dose_unit          TEXT,
+  frequency          TEXT,
+  route              TEXT,
+  start_at           TEXT,
+  end_at             TEXT,
+  description        TEXT,
+  source             TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai')),
+  report_id          TEXT REFERENCES reports(id) ON DELETE SET NULL,
+  evidence_json      TEXT NOT NULL DEFAULT '[]',
+  manual_fields_json TEXT NOT NULL DEFAULT '[]',
+  is_deleted         INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+  created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS case_medications_episode_idx
+  ON case_medications(episode_id, start_at, id);
+CREATE INDEX IF NOT EXISTS case_medications_member_name_idx
+  ON case_medications(member_id, name, is_deleted);
 
 CREATE TABLE IF NOT EXISTS case_episode_links (
   id         TEXT PRIMARY KEY,

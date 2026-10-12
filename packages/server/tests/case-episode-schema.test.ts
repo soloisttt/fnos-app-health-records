@@ -6,6 +6,7 @@ import { ensureCaseEpisodeDraft } from "../database/case-episode-draft.ts";
 const expectedTables = [
   "case_episodes",
   "case_symptoms",
+  "case_medications",
   "case_episode_links",
   "diagnosis_catalog",
   "diagnosis_aliases",
@@ -48,6 +49,8 @@ test("病程草案的索引已建立", () => {
       "case_episodes_member_idx",
       "case_symptoms_episode_idx",
       "case_symptoms_member_name_idx",
+      "case_medications_episode_idx",
+      "case_medications_member_name_idx",
       "case_episode_links_fact_idx",
       "diagnosis_aliases_lookup_idx",
     ]) {

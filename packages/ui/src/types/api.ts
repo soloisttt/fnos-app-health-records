@@ -1296,6 +1296,24 @@ export type CaseSymptom = {
   manualFields: string[];
 };
 
+export type CaseMedication = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  name: string;
+  dose: string | null;
+  doseUnit: string | null;
+  frequency: string | null;
+  route: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  description: string | null;
+  source: "manual" | "ai";
+  reportId: string | null;
+  evidence: Array<{ pageNumber: number; quote: string }>;
+  manualFields: string[];
+};
+
 export type CaseEpisodeLink = {
   id: string;
   episodeId: string;
@@ -1324,6 +1342,7 @@ export type EpisodeLinkedFact = {
 export type CaseEpisodeDetail = {
   episode: CaseEpisode;
   symptoms: CaseSymptom[];
+  medications: CaseMedication[];
   links: CaseEpisodeLink[];
   linkedFacts: EpisodeLinkedFact[];
 };

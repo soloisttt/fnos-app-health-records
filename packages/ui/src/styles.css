@@ -495,6 +495,7 @@ button.entry-row-open:disabled { cursor: default; }
 /* 病程信息卡片：状态标签在标题栏，操作按钮分列两端 */
 .episode-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .episode-timeline-intro { margin-top: 22px; }
+.episode-intro-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .episode-timeline { list-style: none; margin: 0; padding: 0 0 0 2px; display: grid; }
 .episode-event {
   position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr);
@@ -509,9 +510,26 @@ button.entry-row-open:disabled { cursor: default; }
   width: 11px; height: 11px; margin-top: 5px; border-radius: 50%;
   background: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft);
 }
-.episode-event--onset .episode-dot,
-.episode-event--resolved .episode-dot {
+/* 各类型用不同强调色：报告=主色绿、症状=橙、用药=蓝、转归=绿，扫一眼就能区分。 */
+.episode-timeline .episode-event--onset .episode-dot {
+  background: var(--muted); box-shadow: 0 0 0 3px var(--fill-3);
+}
+.episode-timeline .episode-event--report .episode-dot {
+  background: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft);
+}
+.episode-timeline .episode-event--diagnosis .episode-dot,
+.episode-timeline .episode-event--procedure .episode-dot {
+  background: var(--brand-strong); box-shadow: 0 0 0 3px var(--brand-soft);
+}
+.episode-timeline .episode-event--symptom .episode-dot {
   background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft);
+}
+.episode-timeline .episode-event--medication .episode-dot {
+  background: var(--info); box-shadow: 0 0 0 3px var(--info-soft);
+}
+.episode-timeline .episode-event--vaccination .episode-dot,
+.episode-timeline .episode-event--resolved .episode-dot {
+  background: var(--green-ok); box-shadow: 0 0 0 3px var(--green-ok-soft);
 }
 .episode-event-body { display: grid; gap: 6px; min-width: 0; }
 .episode-event-items { display: grid; gap: 12px; }
@@ -519,6 +537,16 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-event-head { display: flex; align-items: center; gap: 8px; }
 .episode-event-head time { color: var(--muted); font-size: 12px; }
 .episode-event .derived-hint { color: var(--muted); font-size: 12px; }
+/* 徽标跟着类型上色，与圆点呼应 */
+.episode-timeline .episode-event .status-label { background: var(--chip-plain-bg); color: var(--chip-plain-text); }
+.episode-timeline .episode-event--onset .status-label { background: var(--fill-3); color: var(--muted); }
+.episode-timeline .episode-event--report .status-label { background: var(--brand-soft); color: var(--brand); }
+.episode-timeline .episode-event--diagnosis .status-label,
+.episode-timeline .episode-event--procedure .status-label { background: var(--brand-soft); color: var(--brand-strong); }
+.episode-timeline .episode-event--symptom .status-label { background: var(--amber-soft); color: var(--amber); }
+.episode-timeline .episode-event--medication .status-label { background: var(--info-soft); color: var(--info); }
+.episode-timeline .episode-event--vaccination .status-label,
+.episode-timeline .episode-event--resolved .status-label { background: var(--green-ok-soft); color: var(--green-ok); }
 .episode-event-body strong { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
 .episode-event-body small { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .episode-event-body .row-actions { margin-left: 0; justify-content: flex-start; margin-top: 2px; }

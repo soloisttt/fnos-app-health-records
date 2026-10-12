@@ -191,10 +191,10 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
       if (path.startsWith("episodes?memberId")) return [];
       if (path === "episodes") {
-        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], links: [], linkedFacts: [] };
+        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], medications: [], links: [], linkedFacts: [] };
       }
       if (path.startsWith("episodes/") && path.endsWith("/links")) {
-        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], links: [], linkedFacts: [] };
+        return { episode: { id: "ep-new", memberId: member.id, title: "10月呼吸道感染", status: "active", onsetAt: "2026-10-09" }, symptoms: [], medications: [], links: [], linkedFacts: [] };
       }
       return [];
     });
@@ -254,7 +254,7 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
           },
         ];
       }
-      return { episode: { id: "ep-1", title: "10月呼吸道感染" }, symptoms: [], links: [], linkedFacts: [] };
+      return { episode: { id: "ep-1", title: "10月呼吸道感染" }, symptoms: [], medications: [], links: [], linkedFacts: [] };
     });
 
     /* 真实路径：弹窗会用报告的诊断与日期预填标题与起病日期 */
@@ -349,7 +349,7 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
       if (path === "account/preferences") return prefs;
       if (path.startsWith("episodes?memberId")) return [episodeRow];
       if (path.startsWith("episodes/"))
-        return { episode: episodeRow, symptoms: [], links: [], linkedFacts: [] };
+        return { episode: episodeRow, symptoms: [], medications: [], links: [], linkedFacts: [] };
       return [];
     });
     const { useAppContext } = await import("../src/composables/useAppContext");
@@ -409,6 +409,7 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
         return {
           episode: episodeRow,
           symptoms: [],
+          medications: [],
           links: [],
           linkedFacts: [
             {
@@ -473,6 +474,102 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     /* 单独归集的用药：照旧可以单独移除 */
     const explicitItem = itemOf("氨溴特罗口服溶液");
     expect(explicitItem.find(".danger-action").exists()).toBe(true);
+  });
+
+  it("病程详情可手动补录用药，且用药与症状用不同强调色区分", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: null,
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 1,
+      linkCount: 0,
+    };
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (path.startsWith("episodes/"))
+        return {
+          episode: episodeRow,
+          symptoms: [
+            {
+              id: "sym-1",
+              episodeId: "ep-1",
+              memberId: member.id,
+              name: "咳嗽",
+              onsetAt: "2026-10-09",
+              durationText: null,
+              severity: null,
+              bodyPart: null,
+              description: null,
+              status: "present",
+              source: "manual",
+              reportId: null,
+              evidence: [],
+              manualFields: [],
+            },
+          ],
+          medications: [
+            {
+              id: "med-1",
+              episodeId: "ep-1",
+              memberId: member.id,
+              name: "氨溴特罗口服溶液",
+              dose: "5ml",
+              doseUnit: null,
+              frequency: "bid",
+              route: "口服",
+              startAt: "2026-10-09",
+              endAt: null,
+              description: null,
+              source: "manual",
+              reportId: null,
+              evidence: [],
+              manualFields: [],
+            },
+          ],
+          links: [],
+          linkedFacts: [],
+        };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 时间轴上方同时提供「添加用药」与「添加症状」两个补录入口 */
+    const intro = wrapper.find(".episode-timeline-intro");
+    expect(intro.text()).toContain("添加用药");
+    expect(intro.text()).toContain("添加症状");
+
+    /* 用药与症状各成一种事件类型，样式里分别用蓝 / 橙强调色 */
+    const medicationEvent = wrapper.find(".episode-event--medication");
+    const symptomEvent = wrapper.find(".episode-event--symptom");
+    expect(medicationEvent.exists()).toBe(true);
+    expect(symptomEvent.exists()).toBe(true);
+    expect(medicationEvent.classes()).not.toContain("episode-event--symptom");
+
+    /* 手动补录的用药标明来源，并且可以单独删除 */
+    expect(medicationEvent.text()).toContain("氨溴特罗口服溶液");
+    expect(medicationEvent.text()).toContain("bid（每日两次）");
+    expect(medicationEvent.text()).toContain("手动补录");
+    expect(medicationEvent.find(".danger-action").exists()).toBe(true);
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

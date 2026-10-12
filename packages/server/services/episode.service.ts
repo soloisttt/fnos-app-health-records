@@ -5,6 +5,7 @@ import type {
   CaseEpisodeLink,
   CaseEpisodeLinkFactType,
   CaseEpisodeStatus,
+  CaseMedication,
   CaseSymptom,
   CaseSymptomStatus,
 } from "../domain/health-record";
@@ -49,7 +50,7 @@ export function normalizeDiagnosisName(value: string) {
 function appendAudit(
   user: RequestUser,
   action: "create" | "update" | "delete",
-  targetType: "case_episode" | "case_symptom" | "case_episode_link" | "catalog_exclusion",
+  targetType: "case_episode" | "case_symptom" | "case_medication" | "case_episode_link" | "catalog_exclusion",
   targetId: string,
   detail: Record<string, unknown>,
 ) {
@@ -81,6 +82,19 @@ function symptomForAccess(user: RequestUser, symptomId: string) {
     )
     .get(symptomId) as { id: string; episodeId: string; memberId: string } | undefined;
   if (!row) throw createError({ statusCode: 404, statusMessage: "症状不存在" });
+  assertMemberManage(user, row.memberId);
+  return row;
+}
+
+function medicationForAccess(user: RequestUser, medicationId: string) {
+  const row = getDatabase()
+    .prepare(
+      `SELECT m.id, m.episode_id AS episodeId, e.member_id AS memberId
+       FROM case_medications m JOIN case_episodes e ON e.id = m.episode_id
+       WHERE m.id = ? AND m.is_deleted = 0 AND e.deleted_at IS NULL`,
+    )
+    .get(medicationId) as { id: string; episodeId: string; memberId: string } | undefined;
+  if (!row) throw createError({ statusCode: 404, statusMessage: "用药记录不存在" });
   assertMemberManage(user, row.memberId);
   return row;
 }
@@ -128,6 +142,39 @@ function readSymptoms(episodeId: string): CaseSymptom[] {
         evidence: JSON.parse(item.evidenceJson || "[]"),
         manualFields: JSON.parse(item.manualFieldsJson || "[]"),
       } satisfies CaseSymptom;
+    });
+}
+
+function readMedications(episodeId: string): CaseMedication[] {
+  return getDatabase()
+    .prepare(
+      `SELECT id, episode_id AS episodeId, member_id AS memberId, name, dose, dose_unit AS doseUnit,
+              frequency, route, start_at AS startAt, end_at AS endAt, description, source,
+              report_id AS reportId, evidence_json AS evidenceJson, manual_fields_json AS manualFieldsJson
+       FROM case_medications
+       WHERE episode_id = ? AND is_deleted = 0
+       ORDER BY COALESCE(start_at, created_at), id`,
+    )
+    .all(episodeId)
+    .map((row) => {
+      const item = row as Record<string, string | null>;
+      return {
+        id: item.id as string,
+        episodeId: item.episodeId as string,
+        memberId: item.memberId as string,
+        name: item.name as string,
+        dose: item.dose,
+        doseUnit: item.doseUnit,
+        frequency: item.frequency,
+        route: item.route,
+        startAt: item.startAt,
+        endAt: item.endAt,
+        description: item.description,
+        source: item.source as CaseMedication["source"],
+        reportId: item.reportId,
+        evidence: JSON.parse(item.evidenceJson || "[]"),
+        manualFields: JSON.parse(item.manualFieldsJson || "[]"),
+      } satisfies CaseMedication;
     });
 }
 
@@ -492,6 +539,7 @@ export function getEpisode(user: RequestUser, episodeId: string) {
   return {
     episode: readEpisode(episodeId),
     symptoms: readSymptoms(episodeId),
+    medications: readMedications(episodeId),
     links: readLinks(episodeId),
     linkedFacts,
   };
@@ -638,6 +686,67 @@ export function deleteSymptom(user: RequestUser, symptomId: string) {
     throw error;
   }
   return getEpisode(user, symptom.episodeId);
+}
+
+// ---------------------------------------------------------------- 手动用药
+
+/**
+ * 手工补录一条用药。
+ * 用于报告里没抽到、或医生口头嘱咐的药；展示上与报告展开出来的用药同属「用药」，
+ * 区别是它不挂在任何报告上，可在病程里单独删除。
+ */
+export function createMedication(
+  user: RequestUser,
+  episodeId: string,
+  input: Record<string, unknown>,
+) {
+  const episode = episodeForAccess(user, episodeId, true);
+  const id = createId("medication");
+  const db = getDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `INSERT INTO case_medications
+        (id, episode_id, member_id, name, dose, dose_unit, frequency, route, start_at, end_at, description, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual')`,
+    ).run(
+      id,
+      episodeId,
+      episode.memberId,
+      requiredText(input.name, "药品名称", 200),
+      text(input.dose, 100),
+      text(input.doseUnit, 50),
+      text(input.frequency, 100),
+      text(input.route, 100),
+      text(input.startAt, 32),
+      text(input.endAt, 32),
+      text(input.description, 2000),
+    );
+    db.prepare("UPDATE case_episodes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(episodeId);
+    appendAudit(user, "create", "case_medication", id, { episodeId });
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, episodeId);
+}
+
+export function deleteMedication(user: RequestUser, medicationId: string) {
+  const medication = medicationForAccess(user, medicationId);
+  const db = getDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      "UPDATE case_medications SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(medicationId);
+    appendAudit(user, "delete", "case_medication", medicationId, { episodeId: medication.episodeId });
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, medication.episodeId);
 }
 
 // ---------------------------------------------------------------- 归集
