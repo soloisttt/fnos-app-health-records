@@ -267,7 +267,8 @@ test("病程详情返回可展示的已归集内容，事实消失时标记 miss
 
     const medication = detail.linkedFacts.find((item) => item.factType === "medication")!;
     assert.equal(medication.label, "复方氨酚甲麻口服液");
-    assert.equal(medication.detail, "4.5ml 口服 tid");
+    /* 频次保留 tid 原标签，并在后面括号补中文说明 */
+    assert.equal(medication.detail, "4.5ml 口服 tid（每日三次）");
     assert.equal(medication.reportTitle, "门诊病历", "用药应带上来源报告，便于回看原件");
 
     const diagnosis = detail.linkedFacts.find((item) => item.factType === "diagnosis")!;
@@ -442,6 +443,36 @@ test("删除病程后：不再出现在列表，其症状同时退出疾病目�
     );
     assert.deepEqual(searchVisits(owner, "member", "咳嗽"), [], "按症状检索不应再命中");
     assert.throws(() => getEpisode(owner, episode.episode.id), "已删除的病程详情应不可访问");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("病程时间轴里的用药频次会补上中文说明", () => {
+  const { storageDir, owner, db } = setup("episode-medication-frequency");
+  try {
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status)
+      VALUES ('report-med', 'member', 'owner', 'outpatient', '门诊病历', 'ready');
+      INSERT INTO report_medications (id, report_id, medication_name, dose, dose_unit, route, frequency)
+      VALUES ('med-tid', 'report-med', '复方氨酚甲麻口服液', '4.5', 'ml', '口服', 'tid');
+      INSERT INTO report_medications (id, report_id, medication_name, dose, dose_unit, route, frequency)
+      VALUES ('med-bid', 'report-med', '氨溴特罗口服溶液', '5', 'ml', '口服', 'bid');
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月呼吸道感染" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "medication", factId: "med-tid" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "medication", factId: "med-bid" });
+
+    const detail = getEpisode(owner, episode.episode.id);
+    const details = detail.linkedFacts.map((fact) => fact.detail ?? "");
+    assert.ok(
+      details.some((text) => text.includes("tid（每日三次）")),
+      `应保留 tid 原标签并补中文，实际：${details.join(" | ")}`,
+    );
+    assert.ok(
+      details.some((text) => text.includes("bid（每日两次）")),
+      `应保留 bid 原标签并补中文，实际：${details.join(" | ")}`,
+    );
   } finally {
     teardown(storageDir);
   }

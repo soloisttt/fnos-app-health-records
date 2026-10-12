@@ -3,6 +3,7 @@ import { computed, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowLeft, Activity, Search, X } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
+import { withFrequencyNote } from "../utils/medication-frequency";
 import type { CatalogExclusion, DiseaseCatalogEntry, DiseaseVisit } from "../types/api";
 import { useAppContext } from "../composables/useAppContext";
 
@@ -85,7 +86,8 @@ function formatDay(value: string | null) {
 }
 
 function medicationText(item: DiseaseVisit["medications"][number]) {
-  return [item.name, item.dose, item.route, item.frequency].filter(Boolean).join(" ");
+  /* 频次保留 tid/bid 原标签，并在后面括号补中文说明 */
+  return [item.name, item.dose, item.route, withFrequencyNote(item.frequency)].filter(Boolean).join(" ");
 }
 
 async function load(memberId: string) {

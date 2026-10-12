@@ -20,6 +20,7 @@ import ImageViewer, { type ImageViewerPage } from "./ImageViewer.vue";
 import MorphologyFindingEditor from "./MorphologyFindingEditor.vue";
 import ReportEpisodeLinker from "./ReportEpisodeLinker.vue";
 import { request, apiUrl } from "../utils/api";
+import { withFrequencyNote } from "../utils/medication-frequency";
 import { downloadDirectUrl, downloadStreamedFile } from "../utils/download";
 import { describeObservationAbnormal, observationAttentionHint, formatReferenceRange } from "../utils/indicator-display";
 import { formatDatabaseTime, formatDatabaseTimeWithYear } from "../utils/time";
@@ -911,7 +912,8 @@ function medicationDetail(item: ReportDetail["medications"][number]) {
   return [
     item.specification,
     [item.dose, item.doseUnit].filter(Boolean).join(" "),
-    item.frequency,
+    /* 频次保留 tid/bid 原标签，并在后面括号补中文说明 */
+    withFrequencyNote(item.frequency),
     item.route,
     item.duration,
     item.quantity ? `数量 ${item.quantity}${item.quantityUnit || ""}` : null

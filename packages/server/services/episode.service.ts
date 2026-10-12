@@ -10,6 +10,7 @@ import type {
 } from "../domain/health-record";
 import type { RequestUser } from "../domain/request-user";
 import { createId } from "../utils/identifier";
+import { withFrequencyNote } from "../utils/medication-frequency";
 import { assertMemberAccess, assertMemberManage } from "./member.service";
 
 const episodeStatuses: readonly CaseEpisodeStatus[] = ["active", "resolved", "chronic", "unknown"];
@@ -205,7 +206,12 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
         link,
         row && {
           label: row.label,
-          detail: [row.dose && row.doseUnit ? `${row.dose}${row.doseUnit}` : row.dose, row.route, row.frequency]
+          detail: [
+            row.dose && row.doseUnit ? `${row.dose}${row.doseUnit}` : row.dose,
+            row.route,
+            /* 频次保留 tid/bid 原标签，并在后面括号补中文说明 */
+            withFrequencyNote(row.frequency),
+          ]
             .filter(Boolean)
             .join(" ") || "用药",
           reportId: row.reportId,
