@@ -12,6 +12,7 @@ import type {
 import type { RequestUser } from "../domain/request-user";
 import { createId } from "../utils/identifier";
 import { withFrequencyNote } from "../utils/medication-frequency";
+import { normalizeSymptomName, parseChiefComplaint } from "../utils/symptom-extract";
 import { assertMemberAccess, assertMemberManage } from "./member.service";
 
 const episodeStatuses: readonly CaseEpisodeStatus[] = ["active", "resolved", "chronic", "unknown"];
@@ -602,6 +603,59 @@ export function deleteEpisode(user: RequestUser, episodeId: string) {
 
 // ---------------------------------------------------------------- 症状
 
+/**
+ * 挂报告进病程时，把报告「主诉」里的初始症状补录成结构化症状。
+ *
+ * 业务前提：**主诉就是这次就医的起始症状**（用户 2026-10-12 确认），
+ * 所以不该让人在病程里再手打一遍。只做规则拆分、不调 AI，内容可在病程里改或删。
+ * 已存在的同名症状（含本次新补的）不重复补录；用户删掉后重新挂载也不会再冒出来（归集关系幂等）。
+ */
+function importSymptomsFromChiefComplaint(
+  db: ReturnType<typeof getDatabase>,
+  episodeId: string,
+  memberId: string,
+  reportId: string,
+): number {
+  const report = db
+    .prepare(
+      `SELECT chief_complaint AS chiefComplaint, COALESCE(report_issued_at, created_at) AS occurredAt
+       FROM reports WHERE id = ?`,
+    )
+    .get(reportId) as { chiefComplaint: string | null; occurredAt: string | null } | undefined;
+  const candidates = parseChiefComplaint(report?.chiefComplaint);
+  if (!candidates.length) return 0;
+
+  const existing = new Set(
+    (
+      db
+        .prepare("SELECT name FROM case_symptoms WHERE episode_id = ? AND is_deleted = 0")
+        .all(episodeId) as Array<{ name: string }>
+    ).map((row) => normalizeSymptomName(row.name)),
+  );
+
+  let created = 0;
+  for (const item of candidates) {
+    const key = normalizeSymptomName(item.name);
+    if (existing.has(key)) continue;
+    existing.add(key);
+    db.prepare(
+      `INSERT INTO case_symptoms
+        (id, episode_id, member_id, name, onset_at, duration_text, status, source, report_id, evidence_json)
+       VALUES (?, ?, ?, ?, ?, ?, 'present', 'ai', ?, '[]')`,
+    ).run(
+      createId("symptom"),
+      episodeId,
+      memberId,
+      item.name,
+      report?.occurredAt ?? null,
+      item.durationText,
+      reportId,
+    );
+    created += 1;
+  }
+  return created;
+}
+
 export function createSymptom(
   user: RequestUser,
   episodeId: string,
@@ -756,7 +810,7 @@ export function linkEpisodeFact(
   episodeId: string,
   input: Record<string, unknown>,
 ) {
-  episodeForAccess(user, episodeId, true);
+  const episode = episodeForAccess(user, episodeId, true);
   const factType = enumValue(input.factType, linkFactTypes, "report");
   if (!(linkFactTypes as readonly string[]).includes(String(input.factType ?? ""))) {
     throw createError({ statusCode: 400, statusMessage: "归集类型无效" });
@@ -764,6 +818,12 @@ export function linkEpisodeFact(
   const factId = requiredText(input.factId, "归集对象", 200);
   const id = createId("episodeLink");
   const db = getDatabase();
+  /* 只有"第一次"挂这份报告时才从主诉补录症状：重复挂载、或用户删掉后再挂，都不该再冒出来。 */
+  const alreadyLinked = Boolean(
+    db
+      .prepare("SELECT 1 FROM case_episode_links WHERE episode_id = ? AND fact_type = ? AND fact_id = ?")
+      .get(episodeId, factType, factId),
+  );
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(
@@ -771,6 +831,10 @@ export function linkEpisodeFact(
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(episode_id, fact_type, fact_id) DO UPDATE SET note = excluded.note`,
     ).run(id, episodeId, factType, factId, text(input.note, 500), user.id);
+    /* 主诉就是这次就医的起始症状：挂报告时顺手补录进病程，省得再手打一遍 */
+    if (!alreadyLinked && factType === "report") {
+      importSymptomsFromChiefComplaint(db, episodeId, episode.memberId, factId);
+    }
     appendAudit(user, "create", "case_episode_link", id, { episodeId, factType, factId });
     db.exec("COMMIT");
   } catch (error) {

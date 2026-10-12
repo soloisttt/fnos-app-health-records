@@ -153,6 +153,72 @@ test("手动补录的用药可增删，只读账号不能修改", () => {
   }
 });
 
+test("挂报告时自动把主诉里的初始症状补录进病程，且不会重复补", () => {
+  const { storageDir, owner, db } = setup("chief-complaint-symptoms");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at, chief_complaint
+      ) VALUES ('r1', 'member', 'owner', 'outpatient', '儿科门诊病历', 'ready', '2026-10-09', '发热3天，咳嗽伴喘息');
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月呼吸道感染" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+
+    const detail = getEpisode(owner, episode.episode.id);
+    assert.deepEqual(
+      detail.symptoms.map((item) => [item.name, item.durationText]).sort(),
+      [
+        ["发热", "3天"],
+        ["咳嗽", null],
+        ["喘息", null],
+      ].sort(),
+      "主诉应被拆成三条症状，末尾时长归到对应症状上",
+    );
+    assert.ok(
+      detail.symptoms.every((item) => item.source === "ai"),
+      "自动补录的症状应标记为 AI 来源，界面据此提示来源",
+    );
+    assert.ok(
+      detail.symptoms.every((item) => item.reportId === "r1"),
+      "应记录来源报告，便于回看",
+    );
+    assert.ok(
+      detail.symptoms.every((item) => item.onsetAt === "2026-10-09"),
+      "起病时间取报告日期",
+    );
+
+    /* 重复挂同一份报告不会重复补录 */
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+    assert.equal(getEpisode(owner, episode.episode.id).symptoms.length, 3);
+
+    /* 用户删掉后再次挂载，不应又冒出来 */
+    deleteSymptom(owner, detail.symptoms[0]!.id);
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+    assert.equal(getEpisode(owner, episode.episode.id).symptoms.length, 2);
+
+    /* 没有主诉的报告（如化验单）不会凭空造症状 */
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status)
+        VALUES ('r2', 'member', 'owner', 'lab', '化验单', 'ready');
+    `);
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r2" });
+    assert.equal(getEpisode(owner, episode.episode.id).symptoms.length, 2);
+
+    /* 先手工录过的同名症状，挂报告时不会重复补一条 */
+    const other = createEpisode(owner, "member", { title: "另一次就诊" });
+    createSymptom(owner, other.episode.id, { name: "咳嗽" });
+    linkEpisodeFact(owner, other.episode.id, { factType: "report", factId: "r1" });
+    const merged = getEpisode(owner, other.episode.id);
+    assert.equal(merged.symptoms.filter((item) => item.name === "咳嗽").length, 1, "同名不重复补录");
+    assert.deepEqual(
+      merged.symptoms.map((item) => item.name).sort(),
+      ["发热", "咳嗽", "喘息"].sort(),
+    );
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("归集关系支持精细挂载、重复挂载幂等、可摘除", () => {
   const { storageDir, owner, db } = setup("episode-links");
   try {

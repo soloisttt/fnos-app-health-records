@@ -255,6 +255,8 @@ function symptomMeta(item: CaseSymptom) {
   if (item.durationText) parts.push(`持续${item.durationText}`);
   if (item.severity) parts.push(item.severity);
   if (item.bodyPart) parts.push(item.bodyPart);
+  /* 挂报告时从主诉自动带出来的症状，标明来源，方便用户判断要不要留 */
+  if (item.source === "ai") parts.push("来自报告主诉");
   return parts.join(" · ");
 }
 
