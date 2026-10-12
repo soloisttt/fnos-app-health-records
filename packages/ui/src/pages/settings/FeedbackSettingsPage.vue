@@ -2,7 +2,7 @@
 import { useRoute } from "vue-router";
 import { useAppContext } from "../../composables/useAppContext";
 import { computed, nextTick, onMounted, watch, onDeactivated, onBeforeUnmount, ref } from "vue";
-import { ArrowLeft, CircleHelp, Lightbulb, Check, ChevronRight, Copy, MessageSquare, ImagePlus, Plus, Search, X } from "@lucide/vue";
+import { ArrowLeft, CircleHelp, Lightbulb, Check, ChevronRight, Copy, MessageSquare, ImagePlus, Plus, Search, X, LoaderCircle } from "@lucide/vue";
 import FeedbackImageEditor from "../../components/FeedbackImageEditor.vue";
 import SubPageHeader from "../../components/SubPageHeader.vue";
 import { copyTextToClipboard } from "../../utils/clipboard";
@@ -200,16 +200,27 @@ function openDetail(item: Feedback) { selected.value = item; screen.value = "det
           <h3 class="feedback-list-title">当前应用的反馈 <span>{{ total }}</span></h3>
           <label class="feedback-search"><Search :size="16" /><input v-model="query" aria-label="搜索反馈" maxlength="80" placeholder="搜索关键词或编号" /></label>
         </div>
-        <p v-if="loading" role="status">正在加载反馈…</p><p v-if="listError" role="alert">{{ listError }} <button class="feedback-secondary" @click="loadList">重试</button></p>
-        <div v-if="!loading && !listError && !items.length" class="feedback-empty">
-          <MessageSquare :size="32" /><h3>{{ query ? '没有找到匹配的反馈' : '还没有提交过反馈' }}</h3>
-          <p>{{ query ? '试试其他关键词或完整编号' : '提交后会生成编号，方便查看进度和在群里跟进。' }}</p>
-          <button v-if="!query" class="feedback-secondary" @click="openForm">提交第一条反馈</button>
+        <div class="feedback-list-body" :aria-busy="loading" role="region" aria-label="反馈列表">
+          <div v-if="loading" class="feedback-list-loading" :class="{ 'is-refreshing': items.length > 0 }" role="status">
+            <span><LoaderCircle :size="18" class="spin-icon" aria-hidden="true" />正在加载反馈…</span>
+          </div>
+          <div v-if="loading && !items.length" class="feedback-skeleton" aria-hidden="true">
+            <div v-for="index in 3" :key="index" class="feedback-skeleton-row">
+              <div><span class="skeleton-meta" /><span class="skeleton-title" /><span class="skeleton-description" /></div>
+              <span class="skeleton-status" />
+            </div>
+          </div>
+          <p v-if="listError" class="feedback-list-error" role="alert">{{ listError }} <button class="feedback-secondary" @click="loadList">重试</button></p>
+          <div v-if="!loading && !listError && !items.length" class="feedback-empty">
+            <MessageSquare :size="32" /><h3>{{ query ? '没有找到匹配的反馈' : '还没有提交过反馈' }}</h3>
+            <p>{{ query ? '试试其他关键词或完整编号' : '提交后会生成编号，方便查看进度和在群里跟进。' }}</p>
+            <button v-if="!query" class="feedback-secondary" @click="openForm">提交第一条反馈</button>
+          </div>
+          <button v-for="item in items" :key="item.id" class="feedback-row" :disabled="loading" @click="openDetail(item)">
+            <div><div class="row-meta"><span>{{ item.id }}</span><span>{{ item.category }}</span></div><h3>{{ item.title }}</h3><p>{{ item.reply }}</p></div>
+            <span class="feedback-status" :class="{ active: item.status === '处理中' }">{{ item.status }}</span><ChevronRight :size="17" />
+          </button>
         </div>
-        <button v-for="item in items" :key="item.id" class="feedback-row" @click="openDetail(item)">
-          <div><div class="row-meta"><span>{{ item.id }}</span><span>{{ item.category }}</span></div><h3>{{ item.title }}</h3><p>{{ item.reply }}</p></div>
-          <span class="feedback-status" :class="{ active: item.status === '处理中' }">{{ item.status }}</span><ChevronRight :size="17" />
-        </button>
       </section>
       <div v-if="total > 20" class="list-toolbar"><button class="feedback-secondary" :disabled="page===1 || loading" @click="page--;loadList()">上一页</button><span>第 {{ page }} 页 · 共 {{ total }} 条</span><button class="feedback-secondary" :disabled="page*20>=total || loading" @click="page++;loadList()">下一页</button></div>
     </template>
@@ -307,10 +318,27 @@ button[aria-pressed="true"] { background: var(--brand-soft); color: var(--brand-
 @media(max-width:360px) { .type-options button { gap: 4px; font-size: 12px; } }
 .feedback-search { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-radius: 9px; background: var(--fill-2); color: var(--muted); }
 .feedback-search input { width: 160px; border: 0; outline: 0; background: transparent; font-size: 12px; color: var(--ink); }
+.feedback-list-body { position: relative; }
+.feedback-list-loading { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; cursor: progress; }
+.feedback-list-loading.is-refreshing { background: color-mix(in srgb, var(--surface) 75%, transparent); }
+.feedback-list-loading > span { display: inline-flex; align-items: center; gap: 9px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-m); color: var(--muted); font-size: 13px; }
+.feedback-list-loading svg { color: var(--brand); }
+.feedback-list-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; }
+.feedback-skeleton-row { display: flex; align-items: center; gap: 18px; padding: 22px; min-height: 114px; box-sizing: border-box; border-bottom: 1px solid var(--line); }
+.feedback-skeleton-row:last-child { border-bottom: 0; }
+.feedback-skeleton-row > div { display: grid; gap: 12px; flex: 1; min-width: 0; }
+.feedback-skeleton-row span { display: block; height: 12px; border-radius: 5px; background: var(--fill-2); animation: feedback-skeleton-pulse 1.4s ease-in-out infinite; }
+.feedback-skeleton-row .skeleton-meta { width: 100px; max-width: 50%; height: 10px; }
+.feedback-skeleton-row .skeleton-title { width: 55%; height: 16px; }
+.feedback-skeleton-row .skeleton-description { width: 75%; }
+.feedback-skeleton-row .skeleton-status { width: 62px; height: 26px; flex-shrink: 0; }
+@keyframes feedback-skeleton-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .feedback-skeleton-row span,.feedback-list-loading .spin-icon { animation: none; } }
 .feedback-empty { display: grid; justify-items: center; gap: 12px; padding: 55px 20px; text-align: center; }
 .feedback-empty > svg { color: var(--arrow-muted); margin-bottom: 4px; }
 .feedback-row { display: flex; align-items: center; gap: 18px; width: 100%; padding: 22px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; color: var(--ink); cursor: pointer; }
 .feedback-row:last-child { border-bottom: 0; }.feedback-row:hover { background: var(--fill-2); }
+.feedback-row:disabled { cursor: progress; }
 .feedback-row > div { flex: 1; min-width: 0; }.feedback-row h3 { font-size: 14px; margin: 6px 0; }.feedback-row > svg { color: var(--arrow-muted); flex-shrink: 0; }
 .row-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 11px; }
 .feedback-status { padding: 5px 9px; border-radius: 6px; background: var(--fill-1); color: var(--muted); font-size: 11px; white-space: nowrap; }.feedback-status.active { color: var(--brand-strong); background: var(--brand-soft); }
