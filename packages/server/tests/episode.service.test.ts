@@ -16,6 +16,7 @@ import {
   deleteMedication,
   deleteSymptom,
   getEpisode,
+  importSymptomsFromLinkedReports,
   linkEpisodeFact,
   listDiseaseCatalog,
   listDiseaseRecords,
@@ -214,6 +215,51 @@ test("挂报告时自动把主诉里的初始症状补录进病程，且不会�
       merged.symptoms.map((item) => item.name).sort(),
       ["发热", "咳嗽", "喘息"].sort(),
     );
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("补录报告症状：给已挂好的报告补一次，重复点按不叠加", () => {
+  const { storageDir, owner, viewer, db } = setup("import-symptoms");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at
+      ) VALUES ('r1', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '2026-10-09');
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月感冒" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+    assert.equal(getEpisode(owner, episode.episode.id).symptoms.length, 0, "挂载时报告还没有主诉");
+
+    /* 报告后来补上了主诉（例如重新识别），用补录入口补一次 */
+    db.exec("UPDATE reports SET chief_complaint = '发热3天，咳嗽' WHERE id = 'r1'");
+    const after = importSymptomsFromLinkedReports(owner, episode.episode.id);
+    assert.deepEqual(
+      after.symptoms.map((item) => item.name).sort(),
+      ["发热", "咳嗽"].sort(),
+    );
+    assert.ok(after.symptoms.every((item) => item.source === "ai"));
+    assert.ok(after.symptoms.every((item) => item.reportId === "r1"));
+
+    /* 重复点按不叠加 */
+    assert.equal(importSymptomsFromLinkedReports(owner, episode.episode.id).symptoms.length, 2);
+
+    /* 补录是用户的明确动作：删掉之后再点，应当能补回来 */
+    deleteSymptom(owner, after.symptoms[0]!.id);
+    assert.equal(getEpisode(owner, episode.episode.id).symptoms.length, 1);
+    assert.equal(importSymptomsFromLinkedReports(owner, episode.episode.id).symptoms.length, 2);
+
+    /* 只读账号不能补录 */
+    assert.throws(
+      () => importSymptomsFromLinkedReports(viewer, episode.episode.id),
+      /管理权限|仅有管理/,
+    );
+
+    /* 没有主诉的报告不会被补出内容 */
+    const fresh = createEpisode(owner, "member", { title: "另一次" });
+    linkEpisodeFact(owner, fresh.episode.id, { factType: "report", factId: "r1" });
+    assert.equal(getEpisode(owner, fresh.episode.id).symptoms.length, 2, "首次挂载即自动补录");
   } finally {
     teardown(storageDir);
   }

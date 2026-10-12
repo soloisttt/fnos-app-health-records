@@ -656,6 +656,39 @@ function importSymptomsFromChiefComplaint(
   return created;
 }
 
+/**
+ * 把该病程**已挂报告**的主诉症状一次性补录进来。
+ *
+ * 用于"报告在自动补录功能上线之前就挂好了"的情况 —— 不必先摘掉再重挂一遍。
+ * 与自动补录共用同一套规则与去重，因此重复点按不会叠加。
+ */
+export function importSymptomsFromLinkedReports(user: RequestUser, episodeId: string) {
+  const episode = episodeForAccess(user, episodeId, true);
+  const db = getDatabase();
+  const reportIds = (
+    db
+      .prepare("SELECT fact_id AS reportId FROM case_episode_links WHERE episode_id = ? AND fact_type = 'report'")
+      .all(episodeId) as Array<{ reportId: string }>
+  ).map((row) => row.reportId);
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    let created = 0;
+    for (const reportId of reportIds) {
+      created += importSymptomsFromChiefComplaint(db, episodeId, episode.memberId, reportId);
+    }
+    if (created) {
+      db.prepare("UPDATE case_episodes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(episodeId);
+      appendAudit(user, "create", "case_symptom", `${episodeId}:from-reports`, { episodeId, created });
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, episodeId);
+}
+
 export function createSymptom(
   user: RequestUser,
   episodeId: string,

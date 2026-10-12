@@ -389,6 +389,24 @@ async function addSymptom() {
   }
 }
 
+/** 把已挂报告的主诉症状补录进来（给"自动补录功能上线前就挂好的报告"用）。 */
+async function importSymptomsFromReports() {
+  const episodeId = detail.value?.episode.id;
+  if (!episodeId || saving.value) return;
+  saving.value = true;
+  error.value = "";
+  try {
+    const before = detail.value?.symptoms.length ?? 0;
+    detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms-import`, { method: "POST" });
+    const added = (detail.value?.symptoms.length ?? 0) - before;
+    toast.show(added > 0 ? `已从报告补录 ${added} 条症状` : "没有可补录的症状（报告无主诉，或已补过）");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "补录症状失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function addMedication() {
   const episodeId = detail.value?.episode.id;
   if (!episodeId || saving.value) return;
@@ -560,6 +578,9 @@ onActivated(() => {
       <div class="page-intro page-intro--keep page-intro--actions-only episode-timeline-intro">
         <div><h3>病程时间轴</h3><p>起病、症状、诊断、用药与转归，按时间排成一条线</p></div>
         <div class="episode-intro-actions">
+          <button class="soft-action-button" type="button" :disabled="saving" @click="importSymptomsFromReports()">
+            <ClipboardList :size="16" />补录报告症状
+          </button>
           <button class="soft-action-button" type="button" @click="openMedicationForm()">
             <Plus :size="16" />添加用药
           </button>
