@@ -409,6 +409,11 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 .entry-list-card + .entry-list-card { margin-top: 12px; }
 .entry-search { margin-bottom: 12px; }
 /* 网格版条目：疾病目录这类条目多、内容短的数据用九宫格排列，桌面 3 列、手机 2 列 */
+/* 疾病目录的分类页签：外面留出与卡片一致的内边距 */
+.entry-tabbar { padding: 0 14px 12px; }
+.entry-tab-count { margin-left: 6px; font-size: 11px; opacity: .7; font-variant-numeric: tabular-nums; }
+.entry-tab-empty { padding: 10px 14px 20px; text-align: center; color: var(--muted); font-size: 12px; }
+
 .entry-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 14px 12px; }
 .entry-tile {
   min-height: 84px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-m);
@@ -3933,9 +3938,12 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 .indicator-governance-notice svg { color: var(--success); flex: 0 0 auto; }
 .indicator-governance-row { align-items: start !important; }
 .indicator-review-toolbar { display: grid; gap: 12px; padding: 0 16px 16px; }
-.indicator-review-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--fill-2); width: fit-content; max-width: 100%; }
-.indicator-review-tabs button { min-height: 38px; padding: 8px 14px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
-.indicator-review-tabs button[aria-pressed="true"] { background: var(--surface); color: var(--brand); box-shadow: 0 1px 4px #00000012; font-weight: 600; }
+.indicator-review-tabs,
+.entry-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--fill-2); width: fit-content; max-width: 100%; }
+.indicator-review-tabs button,
+.entry-tabs button { min-height: 38px; padding: 8px 14px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.indicator-review-tabs button[aria-pressed="true"],
+.entry-tabs button[aria-pressed="true"] { background: var(--surface); color: var(--brand); box-shadow: 0 1px 4px #00000012; font-weight: 600; }
 .indicator-review-toolbar .indicator-feedback-actions { justify-content: flex-start; flex-wrap: wrap; width: auto; }
 .indicator-review-toolbar .indicator-feedback-actions > * { flex: 0 0 auto; min-height: 38px; padding: 8px 12px; border-radius: 10px; white-space: nowrap; font-size: 13px; gap: 6px; }
 .indicator-review-toolbar svg, .indicator-review-actions svg { flex-shrink: 0; }

@@ -84,6 +84,41 @@ async function switchTo(name: string) {
 }
 
 describe("病程与疾病页面在 AppShell 结构下渲染", () => {
+  it("疾病目录按分类分页签，默认显示诊断、可切到症状", async () => {
+    stubApi();
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("disease-catalog"))
+        return [
+          { kind: "diagnosis", name: "呼吸道感染", count: 2, lastAt: "2026-10-09" },
+          { kind: "symptom", name: "鼻塞流涕", count: 1, lastAt: "2026-10-09" },
+        ];
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const DiseasePage = (await import("../src/pages/DiseasePage.vue")).default;
+    const wrapper = mount(DiseasePage);
+    await settle();
+
+    const tabs = wrapper.findAll(".entry-tabs button");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0].attributes("aria-pressed")).toBe("true");
+    expect(wrapper.html()).toContain("呼吸道感染");
+    expect(wrapper.html()).not.toContain("鼻塞流涕");
+
+    await tabs[1].trigger("click");
+    await settle();
+    expect(tabs[1].attributes("aria-pressed")).toBe("true");
+    expect(wrapper.html()).toContain("鼻塞流涕");
+    expect(wrapper.html()).not.toContain("呼吸道感染");
+  });
+
   it("疾病页在过渡层内能渲染出内容", async () => {
     const wrapper = await mountUnderShell("diseases");
     const html = wrapper.html();

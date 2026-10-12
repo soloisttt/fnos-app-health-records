@@ -49,11 +49,24 @@ watch(keyword, (value) => {
 
 onBeforeUnmount(() => clearTimeout(searchTimer));
 
+/** 分类页签：诊断 / 症状，默认看诊断 */
+type DiseaseKind = DiseaseCatalogEntry["kind"];
+const kindTabs: Array<{ key: DiseaseKind; label: string }> = [
+  { key: "diagnosis", label: "诊断" },
+  { key: "symptom", label: "症状" },
+];
+const activeKind = ref<DiseaseKind>("diagnosis");
+
+function kindCount(kind: DiseaseKind) {
+  return entries.value.filter((entry) => entry.kind === kind).length;
+}
+
 const filtered = computed(() => {
   const needle = keyword.value.trim().toLowerCase();
-  const list = entries.value;
-  if (!needle) return list;
-  return list.filter((entry) => entry.name.toLowerCase().includes(needle));
+  return entries.value.filter((entry) => {
+    if (entry.kind !== activeKind.value) return false;
+    return !needle || entry.name.toLowerCase().includes(needle);
+  });
 });
 
 function kindLabel(entry: DiseaseCatalogEntry) {
@@ -178,16 +191,29 @@ watch(
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
       <div v-if="loading" class="loading-list"><span v-for="index in 4" :key="index"></span></div>
       <EmptyState
-        v-else-if="!filtered.length && !keyword.trim()"
+        v-else-if="!entries.length"
         title="还没有疾病记录"
         description="导入报告后，报告里的诊断会自动汇总到这里；在病程里录入的症状也会一并列出。"
       />
-      <section v-else-if="filtered.length" class="settings-band entry-list-card">
+      <section v-else class="settings-band entry-list-card">
         <header>
           <div><Activity :size="18" /><h3>疾病目录</h3></div>
-          <span class="count-label">共 {{ filtered.length }} 项</span>
+          <span class="count-label">共 {{ entries.length }} 项</span>
         </header>
-        <div class="entry-grid">
+        <div class="entry-tabbar">
+          <div class="entry-tabs" role="group" aria-label="疾病目录分类">
+            <button
+              v-for="tab in kindTabs"
+              :key="tab.key"
+              type="button"
+              :aria-pressed="activeKind === tab.key"
+              @click="activeKind = tab.key"
+            >
+              {{ tab.label }}<span class="entry-tab-count">{{ kindCount(tab.key) }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="filtered.length" class="entry-grid">
           <button
             v-for="entry in filtered"
             :key="`${entry.kind}:${entry.name}`"
@@ -202,6 +228,7 @@ watch(
             <span class="entry-tile-meta">{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
           </button>
         </div>
+        <p v-else class="entry-tab-empty">这个分类下暂时没有记录</p>
       </section>
 
       <section v-if="keyword.trim()" class="settings-band entry-list-card">
