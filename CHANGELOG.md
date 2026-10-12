@@ -2,6 +2,12 @@
 
 <!-- 记录规则：指标字典调整不纳入；UI 调整细节合并为一条“优化 UI”概述，不逐条展开；条目只罗列核心功能点和用户可感知的结果，不讲成因和过程。详见 AGENTS.md。 -->
 
+## Unreleased
+
+### Changed
+
+- 取消 Docker 镜像签名及签名附件发布；GitHub Release 仅保留应用安装产物，Docker Hub 继续提供精确版本和稳定版 `latest`。
+
 ## 0.2.12
 
 ### Added
