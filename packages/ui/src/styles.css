@@ -513,7 +513,9 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-event--resolved .episode-dot {
   background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft);
 }
-.episode-event-body { display: grid; gap: 4px; min-width: 0; }
+.episode-event-body { display: grid; gap: 6px; min-width: 0; }
+.episode-event-items { display: grid; gap: 12px; }
+.episode-event-item { display: grid; gap: 3px; min-width: 0; }
 .episode-event-head { display: flex; align-items: center; gap: 8px; }
 .episode-event-head time { color: var(--muted); font-size: 12px; }
 .episode-event .derived-hint { color: var(--muted); font-size: 12px; }

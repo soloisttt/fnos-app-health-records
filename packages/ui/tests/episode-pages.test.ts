@@ -456,14 +456,23 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const eventOf = (text: string) =>
       wrapper.findAll(".episode-event").find((el) => el.text().includes(text))!;
 
+    /* 同一次就诊的两条用药合并成一个「用药」节点：类型标签与日期只出现一次 */
+    const medicationEvents = wrapper.findAll(".episode-event--medication");
+    expect(medicationEvents.length).toBe(1);
+    expect(medicationEvents[0]!.findAll(".episode-event-item").length).toBe(2);
+    expect(eventOf("复方氨酚甲麻口服液").text()).toBe(eventOf("氨溴特罗口服溶液").text());
+
+    const itemOf = (text: string) =>
+      wrapper.findAll(".episode-event-item").find((el) => el.text().includes(text))!;
+
     /* 由报告展开的用药：跟随报告，不提供单独移除 */
-    const derivedEvent = eventOf("复方氨酚甲麻口服液");
-    expect(derivedEvent.text()).toContain("随报告记入");
-    expect(derivedEvent.find(".danger-action").exists()).toBe(false);
+    const derivedItem = itemOf("复方氨酚甲麻口服液");
+    expect(derivedItem.text()).toContain("随报告记入");
+    expect(derivedItem.find(".danger-action").exists()).toBe(false);
 
     /* 单独归集的用药：照旧可以单独移除 */
-    const explicitEvent = eventOf("氨溴特罗口服溶液");
-    expect(explicitEvent.find(".danger-action").exists()).toBe(true);
+    const explicitItem = itemOf("氨溴特罗口服溶液");
+    expect(explicitItem.find(".danger-action").exists()).toBe(true);
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

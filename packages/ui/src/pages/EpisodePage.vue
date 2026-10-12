@@ -56,16 +56,21 @@ async function unlinkFact(factType: CaseEpisodeLinkFactType, factId: string) {
   }
 }
 
-type TimelineEvent = {
+type TimelineItem = {
   key: string;
-  at: string | null;
-  kind: string;
-  badge: string;
   title: string;
   detail: string | null;
   reportId: string | null;
   derived: boolean;
   remove: (() => void) | null;
+};
+
+type TimelineEvent = {
+  key: string;
+  at: string | null;
+  kind: string;
+  badge: string;
+  items: TimelineItem[];
 };
 
 /** A5 病程时间轴：把起病、症状、已归集的事实、转归按时间排成一条线。 */
@@ -78,11 +83,16 @@ const timeline = computed<TimelineEvent[]>(() => {
       at: current.episode.onsetAt,
       kind: "onset",
       badge: "病程",
-      title: current.episode.causeText ? `起病 · 病因：${current.episode.causeText}` : "起病",
-      detail: current.episode.summary,
-      reportId: null,
-      derived: false,
-      remove: null,
+      items: [
+        {
+          key: "onset:main",
+          title: current.episode.causeText ? `起病 · 病因：${current.episode.causeText}` : "起病",
+          detail: current.episode.summary,
+          reportId: null,
+          derived: false,
+          remove: null,
+        },
+      ],
     },
   ];
 
@@ -92,28 +102,47 @@ const timeline = computed<TimelineEvent[]>(() => {
       at: item.onsetAt,
       kind: "symptom",
       badge: "症状",
-      title: item.name,
-      detail: symptomMeta(item),
-      reportId: null,
-      derived: false,
-      remove: () => void removeSymptom(item.id),
+      items: [
+        {
+          key: `symptom:${item.id}:main`,
+          title: item.name,
+          detail: symptomMeta(item),
+          reportId: null,
+          derived: false,
+          remove: () => void removeSymptom(item.id),
+        },
+      ],
     });
   }
 
+  /* 同一次就诊、同一类内容合并成一个节点：一次开了两盒药只占一个「用药」节点，
+     不必每盒药都重复一遍类型标签、日期和来源报告。 */
+  const factGroups = new Map<string, TimelineEvent>();
   for (const fact of current.linkedFacts) {
-    events.push({
+    const groupKey = `${fact.factType}|${fact.reportId ?? ""}|${fact.occurredAt ?? ""}`;
+    const entry: TimelineItem = {
       key: `fact:${fact.linkId}`,
-      at: fact.occurredAt,
-      kind: fact.factType,
-      badge: factTypeLabels[fact.factType],
       title: fact.label,
       detail: factDetail(fact),
       reportId: fact.reportId,
       derived: fact.derived,
       /* 由报告展开出的条目跟随报告，不单独移除；要移除就移除整份报告 */
       remove: fact.derived ? null : () => void unlinkFact(fact.factType, fact.factId),
+    };
+    const group = factGroups.get(groupKey);
+    if (group) {
+      group.items.push(entry);
+      continue;
+    }
+    factGroups.set(groupKey, {
+      key: `facts:${groupKey}`,
+      at: fact.occurredAt,
+      kind: fact.factType,
+      badge: factTypeLabels[fact.factType],
+      items: [entry],
     });
   }
+  events.push(...factGroups.values());
 
   if (current.episode.status === "resolved" || current.episode.resolvedAt) {
     events.push({
@@ -121,11 +150,16 @@ const timeline = computed<TimelineEvent[]>(() => {
       at: current.episode.resolvedAt,
       kind: "resolved",
       badge: "转归",
-      title: "已痊愈",
-      detail: null,
-      reportId: null,
-      derived: false,
-      remove: null,
+      items: [
+        {
+          key: "resolved:main",
+          title: "已痊愈",
+          detail: null,
+          reportId: null,
+          derived: false,
+          remove: null,
+        },
+      ],
     });
   }
 
@@ -464,14 +498,18 @@ onActivated(() => {
               <span class="chip status-label">{{ event.badge }}</span>
               <time v-if="event.at">{{ formatDay(event.at) }}</time>
             </div>
-            <strong>{{ event.title }}</strong>
-            <small v-if="event.detail">{{ event.detail }}</small>
-            <div v-if="event.reportId || event.remove || event.derived" class="row-actions">
-              <button v-if="event.reportId" type="button" @click="previewReportId = event.reportId">查看报告</button>
-              <button v-if="event.remove" class="danger-action" type="button" :disabled="saving" @click="event.remove()">
-                <Trash2 :size="15" />移除
-              </button>
-              <span v-else-if="event.derived" class="derived-hint">随报告记入</span>
+            <div class="episode-event-items">
+              <div v-for="item in event.items" :key="item.key" class="episode-event-item">
+                <strong>{{ item.title }}</strong>
+                <small v-if="item.detail">{{ item.detail }}</small>
+                <div v-if="item.reportId || item.remove || item.derived" class="row-actions">
+                  <button v-if="item.reportId" type="button" @click="previewReportId = item.reportId">查看报告</button>
+                  <button v-if="item.remove" class="danger-action" type="button" :disabled="saving" @click="item.remove()">
+                    <Trash2 :size="15" />移除
+                  </button>
+                  <span v-else-if="item.derived" class="derived-hint">随报告记入</span>
+                </div>
+              </div>
             </div>
           </div>
         </li>
