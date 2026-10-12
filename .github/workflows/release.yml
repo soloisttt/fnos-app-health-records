@@ -161,13 +161,21 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p dist
-          cosign sign --yes --upload=false --tlog-upload=true \
-            --sign-container-identity "${IMAGE}" \
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const { IMAGE, DIGEST, VERSION } = process.env;
+          const claim = { critical: {
+            identity: { 'docker-reference': IMAGE },
+            image: { 'docker-manifest-digest': DIGEST },
+            type: 'cosign container image signature'
+          } };
+          writeFileSync(`dist/docker-image-${VERSION}.json`, JSON.stringify(claim));
+          NODE
+          cosign sign-blob --yes --tlog-upload=true \
             --bundle "dist/docker-image-${VERSION}.bundle.json" \
             --output-signature "dist/docker-image-${VERSION}.sig" \
             --output-certificate "dist/docker-image-${VERSION}.pem" \
-            --output-payload "dist/docker-image-${VERSION}.json" \
-            "${IMAGE}@${DIGEST}"
+            "dist/docker-image-${VERSION}.json"
 
       - name: Verify Docker image signature
         shell: bash
