@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Plus, X } from "@lucide/vue";
+import { FolderPlus, X } from "@lucide/vue";
+import DateTimePicker from "./DateTimePicker.vue";
 import EmptyState from "./EmptyState.vue";
 import { request } from "../utils/api";
 import type { CaseEpisode, CaseEpisodeDetail } from "../types/api";
@@ -36,7 +37,7 @@ const statusLabel: Record<CaseEpisode["status"], string> = {
 };
 
 function episodeMeta(item: CaseEpisode) {
-  const parts = [statusLabel[item.status]];
+  const parts = [statusLabel[item.status] ?? statusLabel.unknown];
   if (item.onsetAt) parts.push(`${item.onsetAt.slice(0, 10)} 起`);
   return parts.join(" · ");
 }
@@ -104,84 +105,94 @@ function applySuggestion() {
   newOnsetAt.value = props.suggestOnsetAt?.trim() || "";
 }
 
+function startCreating() {
+  error.value = "";
+  applySuggestion();
+  creating.value = true;
+}
+
+function backToList() {
+  error.value = "";
+  creating.value = false;
+}
+
 watch(
   () => props.open,
   (open) => {
     if (!open) return;
     error.value = "";
     creating.value = false;
-    applySuggestion();
     void load();
-  },
-);
-
-/* 报告详情可能晚于弹窗准备好，建议值到位后同步填充尚未输入的表单 */
-watch(
-  () => [props.suggestTitle, props.suggestOnsetAt],
-  () => {
-    if (!props.open || newTitle.value.trim() || newOnsetAt.value) return;
-    applySuggestion();
   },
 );
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="modal-backdrop" @click.self="emit('close')">
-      <section class="modal-panel" role="dialog" aria-modal="true" aria-label="加入病程">
+    <div v-if="open" class="modal-backdrop episode-linker-backdrop" @click.self="emit('close')">
+      <section class="modal-panel episode-linker" role="dialog" aria-modal="true" aria-label="加入病程">
         <header>
           <div>
-            <h3>加入病程</h3>
-            <span>把这份报告挂到某一次生病上</span>
+            <FolderPlus :size="19" />
+            <span>
+              <strong>加入病程</strong>
+              <small>把这份报告挂到某一次生病上，方便日后回看这次看病的前后经过</small>
+            </span>
           </div>
-          <button class="icon-button" type="button" aria-label="关闭" @click="emit('close')">
-            <X :size="17" />
+          <button class="plain-icon-button" type="button" title="关闭" @click="emit('close')">
+            <X :size="18" />
           </button>
         </header>
 
-        <p v-if="error" class="inline-panel-error">{{ error }}</p>
+        <div class="episode-linker-body">
+          <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
-        <div class="form-actions">
-          <button class="soft-action-button" type="button" @click="creating = !creating">
-            <Plus :size="16" />新建病程
-          </button>
+          <template v-if="creating">
+            <div class="form-grid">
+              <label><span>病程标题</span><input v-model="newTitle" placeholder="例如 10月呼吸道感染" /></label>
+              <label><span>起病日期</span><DateTimePicker v-model="newOnsetAt" aria-label="起病日期" /></label>
+            </div>
+          </template>
+
+          <template v-else>
+            <p class="episode-linker-hint">选择这份报告所属的病程：</p>
+            <div v-if="loading" class="loading-list"><span v-for="index in 3" :key="index"></span></div>
+            <EmptyState
+              v-else-if="!episodes.length"
+              title="还没有病程"
+              description="点下方「新建病程」，这份报告就会挂上去。"
+            />
+            <div v-else class="entry-list-body entry-list-body--bare">
+              <button
+                v-for="item in episodes"
+                :key="item.id"
+                class="entry-row"
+                type="button"
+                :disabled="saving"
+                @click="attach(item)"
+              >
+                <span class="entry-row-main">
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ episodeMeta(item) }}</span>
+                </span>
+                <span class="entry-row-side">
+                  <span class="chip status-label">加入</span>
+                </span>
+              </button>
+            </div>
+          </template>
         </div>
 
-        <form v-if="creating" class="entry-form" @submit.prevent="createAndAttach">
-          <div class="form-grid">
-            <label><span>病程标题</span><input v-model="newTitle" placeholder="例如 10月呼吸道感染" /></label>
-            <label><span>起病日期</span><input v-model="newOnsetAt" type="date" /></label>
-          </div>
-          <div class="form-actions">
-            <button type="button" @click="creating = false">取消</button>
-            <button class="primary-button" :disabled="saving">创建并加入</button>
-          </div>
-        </form>
-
-        <div v-if="loading" class="loading-list"><span v-for="index in 3" :key="index"></span></div>
-        <EmptyState
-          v-else-if="!episodes.length"
-          title="还没有病程"
-          description="先用上方「新建病程」建一条，这份报告就会挂上去。"
-        />
-        <div v-else class="entry-list-body entry-list-body--bare">
-          <button
-            v-for="item in episodes"
-            :key="item.id"
-            class="entry-row"
-            type="button"
-            :disabled="saving"
-            @click="attach(item)"
-          >
-            <span class="entry-row-main">
-              <strong>{{ item.title }}</strong>
-              <span>{{ episodeMeta(item) }}</span>
-            </span>
-            <span class="entry-row-side">
-              <span class="chip status-label">加入</span>
-            </span>
-          </button>
-        </div>
+        <footer class="episode-linker-footer">
+          <template v-if="creating">
+            <button type="button" @click="backToList">返回列表</button>
+            <button class="primary-button" type="button" :disabled="saving" @click="createAndAttach">创建并加入</button>
+          </template>
+          <template v-else>
+            <button type="button" @click="emit('close')">取消</button>
+            <button class="primary-button" type="button" :disabled="saving" @click="startCreating">新建病程</button>
+          </template>
+        </footer>
       </section>
     </div>
   </Teleport>

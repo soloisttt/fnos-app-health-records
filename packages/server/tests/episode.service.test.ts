@@ -417,6 +417,36 @@ test("疾病目录可隐藏与恢复：隐藏不动源数据，源数据消失�
   }
 });
 
+test("删除病程后：不再出现在列表，其症状同时退出疾病目录与检索", () => {
+  const { storageDir, owner } = setup("episode-delete-cascade");
+  try {
+    const episode = createEpisode(owner, "member", {
+      title: "10月呼吸道感染",
+      onsetAt: "2026-10-09",
+    });
+    createSymptom(owner, episode.episode.id, { name: "咳嗽", onsetAt: "2026-10-09" });
+
+    assert.equal(
+      listDiseaseCatalog(owner, "member").filter((item) => item.kind === "symptom").length,
+      1,
+      "删除前症状在目录里",
+    );
+
+    deleteEpisode(owner, episode.episode.id);
+
+    assert.equal(listEpisodes(owner, "member").length, 0, "删除后不再出现在病程列表");
+    assert.equal(
+      listDiseaseCatalog(owner, "member").filter((item) => item.kind === "symptom").length,
+      0,
+      "删除病程后，它下面的症状不应再留在疾病目录",
+    );
+    assert.deepEqual(searchVisits(owner, "member", "咳嗽"), [], "按症状检索不应再命中");
+    assert.throws(() => getEpisode(owner, episode.episode.id), "已删除的病程详情应不可访问");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("跨成员访问被拒绝", () => {
   const { storageDir, owner, db } = setup("episode-access");
   try {

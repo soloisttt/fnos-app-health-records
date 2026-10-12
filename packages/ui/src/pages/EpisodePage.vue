@@ -7,10 +7,12 @@ import ReportDetailModal from "../components/ReportDetailModal.vue";
 import { request } from "../utils/api";
 import type { CaseEpisode, CaseEpisodeDetail, CaseEpisodeLinkFactType, CaseSymptom, EpisodeLinkedFact } from "../types/api";
 import { useAppContext } from "../composables/useAppContext";
+import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
 
 const app = useAppContext();
 const toast = useToast();
+const confirmDialog = useConfirm();
 
 const loading = ref(true);
 const saving = ref(false);
@@ -286,6 +288,35 @@ async function addSymptom() {
   }
 }
 
+/** 删除病程（软删除）：报告与用药不动，只是不再归集到这段病程。 */
+function removeEpisode(item: CaseEpisode) {
+  if (saving.value) return;
+  confirmDialog.ask({
+    title: "删除病程",
+    message: `确定删除「${item.title}」？报告和用药不会被删除，只是不再归集到这段病程。`,
+    confirmText: "删除",
+    danger: true,
+    run: async () => {
+      saving.value = true;
+      try {
+        await request(`episodes/${item.id}`, { method: "DELETE" });
+        toast.show("病程已删除");
+        if (detail.value?.episode.id === item.id) {
+          detail.value = null;
+          formOpen.value = false;
+          symptomFormOpen.value = false;
+        }
+        const memberId = app.selectedMemberId.value;
+        if (memberId) await load(memberId);
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : "删除病程失败";
+      } finally {
+        saving.value = false;
+      }
+    },
+  });
+}
+
 async function removeSymptom(symptomId: string) {
   if (saving.value) return;
   saving.value = true;
@@ -314,9 +345,19 @@ watch(
           <h2>{{ detail.episode.title }}</h2>
           <p>{{ episodeMeta({ ...detail.episode, symptomCount: detail.symptoms.length }) }}</p>
         </div>
-        <button class="soft-action-button" type="button" @click="back">
-          <ArrowLeft :size="16" />返回
-        </button>
+        <div class="episode-detail-actions">
+          <button class="soft-action-button" type="button" @click="back">
+            <ArrowLeft :size="16" />返回
+          </button>
+          <button
+            class="soft-action-button danger-soft"
+            type="button"
+            :disabled="saving"
+            @click="removeEpisode(detail.episode)"
+          >
+            <Trash2 :size="16" />删除病程
+          </button>
+        </div>
       </div>
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
@@ -452,18 +493,28 @@ watch(
           <span class="count-label">共 {{ episodes.length }} 段</span>
         </header>
         <div class="entry-list-body">
-          <button v-for="item in episodes" :key="item.id" class="entry-row" type="button" @click="openEpisode(item.id)">
-            <span class="entry-row-main">
+          <div v-for="item in episodes" :key="item.id" class="entry-row">
+            <button class="entry-row-main entry-row-open" type="button" @click="openEpisode(item.id)">
               <strong>{{ item.title }}</strong>
               <span>{{ episodeMeta(item) }}</span>
               <small v-if="item.causeText">病因：{{ item.causeText }}</small>
-            </span>
+            </button>
             <span class="entry-row-side">
               <span class="chip status-label" :class="episodeStatusOf(item.status).chip">
                 {{ episodeStatusOf(item.status).label }}
               </span>
+              <button
+                class="entry-row-remove"
+                type="button"
+                :disabled="saving"
+                :title="`删除「${item.title}」`"
+                :aria-label="`删除病程 ${item.title}`"
+                @click="removeEpisode(item)"
+              >
+                <Trash2 :size="15" />
+              </button>
             </span>
-          </button>
+          </div>
         </div>
       </section>
     </template>

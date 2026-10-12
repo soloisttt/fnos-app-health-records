@@ -456,6 +456,24 @@ button.entry-row { cursor: pointer; transition: border-color .15s, background .1
 button.entry-row:hover:not(:disabled) { border-color: var(--brand); }
 button.entry-row:disabled { opacity: .6; cursor: default; }
 .entry-row-main { min-width: 0; display: grid; gap: 4px; }
+/* 卡片内需要「主体可点 + 右侧独立按钮」时：主体是按钮、删除是兄弟按钮（按钮不能嵌套按钮） */
+button.entry-row-open {
+  flex: 1 1 auto; padding: 0; border: 0; background: none;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+button.entry-row-open:hover:not(:disabled) strong { color: var(--brand-strong); }
+button.entry-row-open:disabled { cursor: default; }
+.entry-row-remove {
+  width: 30px; height: 30px; border: 0; border-radius: 999px; background: transparent;
+  color: var(--muted); display: grid; place-items: center; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.entry-row-remove:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.entry-row-remove:disabled { opacity: .5; cursor: default; }
+/* 详情页右上角的操作组（返回 / 删除） */
+.episode-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.soft-action-button.danger-soft { color: var(--danger); }
+.soft-action-button.danger-soft:hover:not(:disabled) { background: var(--danger-soft); }
 .entry-row-main > strong { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .entry-row-main > span,
 .entry-row-main > small { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -3680,19 +3698,19 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 .morphology-heading-actions { display: flex; align-items: center; gap: 5px; }
 .morphology-heading-actions .plain-icon-button { width: 32px; height: 32px; }
 
-.morphology-editor-backdrop, .clinical-fact-editor-backdrop, .structured-section-editor-backdrop, .compact-action-backdrop { z-index: 120; }
+.morphology-editor-backdrop, .clinical-fact-editor-backdrop, .structured-section-editor-backdrop, .compact-action-backdrop, .episode-linker-backdrop { z-index: 120; }
 .morphology-editor, .clinical-fact-editor, .structured-section-editor {
   width: min(680px, calc(100vw - 32px)); max-height: min(760px, calc(100dvh - 32px)); overflow: hidden;
   display: grid; grid-template-rows: auto minmax(0, 1fr);
 }
-.morphology-editor > header, .clinical-fact-editor > header, .structured-section-editor > header, .compact-action-modal > header {
+.morphology-editor > header, .clinical-fact-editor > header, .structured-section-editor > header, .compact-action-modal > header, .episode-linker > header {
   min-height: 58px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.morphology-editor > header > div, .clinical-fact-editor > header > div, .structured-section-editor > header > div, .compact-action-modal > header > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
-.morphology-editor > header span, .clinical-fact-editor > header span, .structured-section-editor > header span, .compact-action-modal > header span { min-width: 0; display: grid; gap: 2px; }
-.morphology-editor > header strong, .clinical-fact-editor > header strong, .structured-section-editor > header strong, .compact-action-modal > header strong { color: var(--ink); font-size: 15px; }
-.morphology-editor > header small, .clinical-fact-editor > header small, .structured-section-editor > header small, .compact-action-modal > header small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.morphology-editor > header > div, .clinical-fact-editor > header > div, .structured-section-editor > header > div, .compact-action-modal > header > div, .episode-linker > header > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.morphology-editor > header span, .clinical-fact-editor > header span, .structured-section-editor > header span, .compact-action-modal > header span, .episode-linker > header span { min-width: 0; display: grid; gap: 2px; }
+.morphology-editor > header strong, .clinical-fact-editor > header strong, .structured-section-editor > header strong, .compact-action-modal > header strong, .episode-linker > header strong { color: var(--ink); font-size: 15px; }
+.morphology-editor > header small, .clinical-fact-editor > header small, .structured-section-editor > header small, .compact-action-modal > header small, .episode-linker > header small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .morphology-editor-form, .clinical-fact-editor-form, .structured-section-editor-form { min-height: 0; padding: 14px 16px; overflow: auto; }
 .morphology-editor-form .form-grid, .clinical-fact-editor-form .form-grid, .structured-section-editor-form .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .morphology-editor-form .field-wide, .clinical-fact-editor-form .field-wide, .structured-section-editor-form .field-wide { grid-column: 1 / -1; }
@@ -3715,6 +3733,19 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 }
 .morphology-editor-form > footer { flex-wrap: nowrap; }
 .morphology-editor-actions button { border-radius: 999px; }
+/* 「加入病程」弹窗：与校对弹窗同一套外观（header 图标+说明、内容区滚动、按钮居右） */
+.episode-linker {
+  width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100dvh - 32px)); overflow: hidden;
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+}
+.episode-linker-body { min-height: 0; padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; }
+.episode-linker-body .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.episode-linker-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.episode-linker-footer {
+  padding: 12px 16px; border-top: 1px solid var(--line); background: var(--surface);
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
+}
+
 .compact-action-modal { width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; }
 .compact-action-body { padding: 14px 16px 0; display: grid; gap: 12px; }
 .compact-action-body > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }

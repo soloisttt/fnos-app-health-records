@@ -347,11 +347,19 @@ export function listEpisodes(user: RequestUser, memberId: string) {
 
 export function getEpisode(user: RequestUser, episodeId: string) {
   episodeForAccess(user, episodeId, false);
+  /* 归集内容来自报告/诊断/用药等多张表，单条数据异常不应让整段病程打不开：
+     解析失败时退化为空列表，异常照常写入服务端日志便于定位。 */
+  let linkedFacts: EpisodeLinkedFact[] = [];
+  try {
+    linkedFacts = resolveLinkedFacts(episodeId);
+  } catch (error) {
+    console.error("[health-records] 病程归集内容解析失败", error);
+  }
   return {
     episode: readEpisode(episodeId),
     symptoms: readSymptoms(episodeId),
     links: readLinks(episodeId),
-    linkedFacts: resolveLinkedFacts(episodeId),
+    linkedFacts,
   };
 }
 
@@ -583,9 +591,10 @@ function collectCatalogEntries(memberId: string): DiseaseCatalogEntry[] {
 
   const symptomRows = db
     .prepare(
-      `SELECT name, onset_at AS onsetAt, created_at AS createdAt
-       FROM case_symptoms
-       WHERE member_id = ? AND is_deleted = 0`,
+      /* 病程被删除后，它下面的症状不应再出现在疾病目录里 */
+      `SELECT s.name, s.onset_at AS onsetAt, s.created_at AS createdAt
+       FROM case_symptoms s JOIN case_episodes e ON e.id = s.episode_id
+       WHERE s.member_id = ? AND s.is_deleted = 0 AND e.deleted_at IS NULL`,
     )
     .all(memberId) as Array<{ name: string; onsetAt: string | null; createdAt: string }>;
 
@@ -769,7 +778,8 @@ function collectReportIdsBySymptom(memberId: string, match: (name: string) => bo
   const db = getDatabase();
   const symptoms = db
     .prepare(
-      "SELECT DISTINCT name FROM case_symptoms WHERE member_id = ? AND is_deleted = 0",
+      `SELECT DISTINCT s.name FROM case_symptoms s JOIN case_episodes e ON e.id = s.episode_id
+       WHERE s.member_id = ? AND s.is_deleted = 0 AND e.deleted_at IS NULL`,
     )
     .all(memberId) as Array<{ name: string }>;
   const matched = symptoms.filter((row) => match(row.name)).map((row) => row.name);
@@ -778,8 +788,10 @@ function collectReportIdsBySymptom(memberId: string, match: (name: string) => bo
   const placeholders = matched.map(() => "?").join(", ");
   const episodeIds = db
     .prepare(
-      `SELECT DISTINCT episode_id AS episodeId FROM case_symptoms
-       WHERE member_id = ? AND is_deleted = 0 AND name IN (${placeholders})`,
+      `SELECT DISTINCT s.episode_id AS episodeId
+       FROM case_symptoms s JOIN case_episodes e ON e.id = s.episode_id
+       WHERE s.member_id = ? AND s.is_deleted = 0 AND e.deleted_at IS NULL
+         AND s.name IN (${placeholders})`,
     )
     .all(memberId, ...matched) as Array<{ episodeId: string }>;
   const ids = new Set<string>();

@@ -123,6 +123,68 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(wrapper.html()).not.toContain("呼吸道感染");
   });
 
+  it("「加入病程」弹窗采用与校对弹窗一致的版式（标题图标+说明、按钮居右）", async () => {
+    stubApi();
+    const Linker = (await import("../src/components/ReportEpisodeLinker.vue")).default;
+    const wrapper = mount(Linker, {
+      props: { open: false, reportId: "report-1", memberId: member.id },
+      attachTo: document.body,
+    });
+    await wrapper.setProps({ open: true });
+    await settle();
+
+    const panel = document.querySelector(".episode-linker");
+    expect(panel, "弹窗应使用统一的 .episode-linker 版式").toBeTruthy();
+    expect(document.querySelector(".episode-linker-backdrop")).toBeTruthy();
+    expect(document.querySelector(".episode-linker-body")).toBeTruthy();
+    const footer = document.querySelector(".episode-linker-footer");
+    expect(footer).toBeTruthy();
+    expect(footer?.textContent).toContain("新建病程");
+    expect(panel?.querySelector("header")?.textContent).toContain("加入病程");
+    wrapper.unmount();
+  });
+
+  it("病程列表每条都有独立删除按钮，且不与打开条目的按钮嵌套", async () => {
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes"))
+        return [
+          {
+            id: "ep-1",
+            memberId: member.id,
+            title: "10月呼吸道感染",
+            status: "active",
+            onsetAt: "2026-10-09",
+            resolvedAt: null,
+            causeText: "受凉",
+            summary: null,
+            createdBy: "user-a",
+            createdAt: "2026-10-09T00:00:00.000Z",
+            updatedAt: "2026-10-09T00:00:00.000Z",
+            symptomCount: 0,
+            linkCount: 0,
+          },
+        ];
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+
+    expect(wrapper.findAll(".entry-row-open")).toHaveLength(1);
+    expect(wrapper.findAll(".entry-row-remove")).toHaveLength(1);
+    /* 按钮不能嵌套按钮：删除按钮必须是打开按钮的兄弟节点 */
+    expect(wrapper.find(".entry-row-open .entry-row-remove").exists()).toBe(false);
+    expect(wrapper.html()).toContain("10月呼吸道感染");
+  });
+
   it("疾病页在过渡层内能渲染出内容", async () => {
     const wrapper = await mountUnderShell("diseases");
     const html = wrapper.html();
