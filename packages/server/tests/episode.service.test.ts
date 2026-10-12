@@ -284,6 +284,69 @@ test("病程详情返回可展示的已归集内容，事实消失时标记 miss
   }
 });
 
+test("挂报告后，报告里的诊断与用药自动展开到时间轴", () => {
+  const { storageDir, owner, db } = setup("report-expand");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at,
+        hospital_name_raw, clinical_diagnosis
+      ) VALUES (
+        'r1', 'member', 'owner', 'outpatient', '急诊儿科门诊记录', 'ready', '2026-10-09',
+        '郑州市中心医院', '急性上呼吸道感染、支气管炎'
+      );
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+        VALUES ('d1', 'r1', 'outpatient', '支气管炎');
+      INSERT INTO report_medications (
+        id, report_id, medication_context, medication_name, dose, dose_unit, route, frequency
+      ) VALUES ('m1', 'r1', 'prescription', '复方氨酚甲麻口服液', '4.5', 'ml', '口服', 'tid');
+      INSERT INTO report_medications (
+        id, report_id, medication_context, medication_name, dose, dose_unit, route, frequency
+      ) VALUES ('m2', 'r1', 'prescription', '氨溴特罗口服溶液', '5', 'ml', '口服', 'bid');
+      INSERT INTO report_procedures (id, report_id, procedure_name, performed_at)
+        VALUES ('p1', 'r1', '雾化吸入', '2026-10-09');
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月咳嗽", onsetAt: "2026-10-09" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+
+    const detail = getEpisode(owner, episode.episode.id);
+    const medications = detail.linkedFacts.filter((item) => item.factType === "medication");
+    assert.deepEqual(
+      medications.map((item) => item.label).sort(),
+      ["复方氨酚甲麻口服液", "氨溴特罗口服溶液"],
+      "报告里的两个药都要出现在病程里",
+    );
+    assert.ok(medications.every((item) => item.derived), "展开项应标记为来自报告");
+    assert.equal(medications[0]!.reportTitle, "急诊儿科门诊记录");
+    assert.equal(medications[0]!.occurredAt, "2026-10-09", "展开项沿用这次就诊的时间");
+    assert.equal(medications[0]!.detail, "4.5ml 口服 tid（每日三次）");
+
+    /* 诊断有两个来源：诊断表 + 门诊病历的「临床诊断」字段，都要纳入且不重复 */
+    assert.deepEqual(
+      detail.linkedFacts.filter((item) => item.factType === "diagnosis").map((item) => item.label).sort(),
+      ["急性上呼吸道感染", "支气管炎"],
+    );
+    assert.equal(detail.linkedFacts.filter((item) => item.factType === "procedure").length, 1);
+
+    /* 报告内容变化后时间轴自动跟随，不需要重新归集 */
+    db.prepare("DELETE FROM report_medications WHERE id = 'm2'").run();
+    assert.equal(
+      getEpisode(owner, episode.episode.id).linkedFacts.filter((item) => item.factType === "medication").length,
+      1,
+    );
+
+    /* 单独归集过的条目保留原有归集关系（可单独移除），不与展开项重复出现 */
+    linkEpisodeFact(owner, episode.episode.id, { factType: "medication", factId: "m1" });
+    const explicit = getEpisode(owner, episode.episode.id);
+    const sameMedication = explicit.linkedFacts.filter((item) => item.label === "复方氨酚甲麻口服液");
+    assert.equal(sameMedication.length, 1, "同一事实不应既作为展开项又作为独立归集重复出现");
+    assert.equal(sameMedication[0]!.derived, false, "独立归集的条目可以单独移除");
+    assert.equal(explicit.links.length, 2, "归集关系表里只应有报告与用药两条");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("A6 综合检索可跨诊断、用药、症状、病因与病程标题命中", () => {
   const { storageDir, owner, db } = setup("visit-search");
   try {

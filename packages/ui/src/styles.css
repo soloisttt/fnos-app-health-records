@@ -516,6 +516,7 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-event-body { display: grid; gap: 4px; min-width: 0; }
 .episode-event-head { display: flex; align-items: center; gap: 8px; }
 .episode-event-head time { color: var(--muted); font-size: 12px; }
+.episode-event .derived-hint { color: var(--muted); font-size: 12px; }
 .episode-event-body strong { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
 .episode-event-body small { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .episode-event-body .row-actions { margin-left: 0; justify-content: flex-start; margin-top: 2px; }

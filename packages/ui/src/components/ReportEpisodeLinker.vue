@@ -172,7 +172,7 @@ watch(
           </template>
 
           <template v-else>
-            <p class="episode-linker-hint">选择这份报告所属的病程：</p>
+            <p class="episode-linker-hint">选择这份报告所属的病程（报告里的诊断、用药、操作会一起记入）：</p>
             <div v-if="loading" class="loading-list"><span v-for="index in 3" :key="index"></span></div>
             <EmptyState
               v-else-if="!episodes.length"

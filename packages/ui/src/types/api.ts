@@ -1317,6 +1317,8 @@ export type EpisodeLinkedFact = {
   hospitalName: string | null;
   occurredAt: string | null;
   missing: boolean;
+  /** 由已归集的「报告」展开而来：跟随报告变化，不能在病程里单独移除。 */
+  derived: boolean;
 };
 
 export type CaseEpisodeDetail = {

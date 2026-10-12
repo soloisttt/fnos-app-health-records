@@ -64,6 +64,7 @@ type TimelineEvent = {
   title: string;
   detail: string | null;
   reportId: string | null;
+  derived: boolean;
   remove: (() => void) | null;
 };
 
@@ -80,6 +81,7 @@ const timeline = computed<TimelineEvent[]>(() => {
       title: current.episode.causeText ? `起病 · 病因：${current.episode.causeText}` : "起病",
       detail: current.episode.summary,
       reportId: null,
+      derived: false,
       remove: null,
     },
   ];
@@ -93,6 +95,7 @@ const timeline = computed<TimelineEvent[]>(() => {
       title: item.name,
       detail: symptomMeta(item),
       reportId: null,
+      derived: false,
       remove: () => void removeSymptom(item.id),
     });
   }
@@ -106,7 +109,9 @@ const timeline = computed<TimelineEvent[]>(() => {
       title: fact.label,
       detail: factDetail(fact),
       reportId: fact.reportId,
-      remove: () => void unlinkFact(fact.factType, fact.factId),
+      derived: fact.derived,
+      /* 由报告展开出的条目跟随报告，不单独移除；要移除就移除整份报告 */
+      remove: fact.derived ? null : () => void unlinkFact(fact.factType, fact.factId),
     });
   }
 
@@ -119,6 +124,7 @@ const timeline = computed<TimelineEvent[]>(() => {
       title: "已痊愈",
       detail: null,
       reportId: null,
+      derived: false,
       remove: null,
     });
   }
@@ -460,11 +466,12 @@ onActivated(() => {
             </div>
             <strong>{{ event.title }}</strong>
             <small v-if="event.detail">{{ event.detail }}</small>
-            <div v-if="event.reportId || event.remove" class="row-actions">
+            <div v-if="event.reportId || event.remove || event.derived" class="row-actions">
               <button v-if="event.reportId" type="button" @click="previewReportId = event.reportId">查看报告</button>
               <button v-if="event.remove" class="danger-action" type="button" :disabled="saving" @click="event.remove()">
                 <Trash2 :size="15" />移除
               </button>
+              <span v-else-if="event.derived" class="derived-hint">随报告记入</span>
             </div>
           </div>
         </li>

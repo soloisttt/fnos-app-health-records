@@ -153,9 +153,109 @@ export type EpisodeLinkedFact = {
   occurredAt: string | null;
   /** 事实已不存在（如报告被彻底删除），界面据此提示并允许清理挂链。 */
   missing: boolean;
+  /**
+   * 是否由「报告」展开而来（挂一份报告即视为这次就诊整体入档）。
+   * 展开项跟随报告实时变化：报告里新增或改动的诊断/用药会自动出现在时间轴上，
+   * 它们没有独立的归集关系，因此不能在病程里单独移除（移除整份报告即可）。
+   */
+  derived: boolean;
 };
 
 type FactHit = { label: string; detail: string | null; reportId: string | null; occurredAt: string | null };
+
+/** 用药的展示文案：剂量 · 途径 · 频次（保留 tid/bid 原标签并补中文说明）。 */
+function medicationFactDetail(row: {
+  dose: string | null;
+  doseUnit: string | null;
+  route: string | null;
+  frequency: string | null;
+}) {
+  return (
+    [
+      row.dose && row.doseUnit ? `${row.dose}${row.doseUnit}` : row.dose,
+      row.route,
+      withFrequencyNote(row.frequency),
+    ]
+      .filter(Boolean)
+      .join(" ") || "用药"
+  );
+}
+
+/**
+ * 展开一份报告里的就诊内容（诊断、用药、操作、疫苗）。
+ * 挂报告等于「这次就诊整体入档」，报告内容变化后时间轴自动跟随，不需要逐条手工归集。
+ * 指标与报告章节条数多、篇幅长，不在这里展开。
+ */
+function expandReportFacts(
+  reportId: string,
+): Array<{ factType: CaseEpisodeLinkFactType; factId: string; hit: FactHit }> {
+  const db = getDatabase();
+  const out: Array<{ factType: CaseEpisodeLinkFactType; factId: string; hit: FactHit }> = [];
+  const push = (
+    factType: CaseEpisodeLinkFactType,
+    factId: string,
+    label: string,
+    detail: string | null,
+    occurredAt: string | null,
+  ) => {
+    out.push({ factType, factId, hit: { label, detail, reportId, occurredAt } });
+  };
+
+  const diagnosisRows = db
+    .prepare(
+      `SELECT id, diagnosis_text AS text FROM report_diagnoses
+       WHERE report_id = ? AND is_deleted = 0 ORDER BY is_primary DESC, id`,
+    )
+    .all(reportId) as Array<{ id: string; text: string }>;
+  for (const row of diagnosisRows) push("diagnosis", row.id, row.text, "诊断", null);
+
+  /* 门诊/住院的「临床诊断」写在报告字段里（可能一行写多个病），与诊断表去重后补进来 */
+  const reportRow = db
+    .prepare("SELECT clinical_diagnosis AS clinicalDiagnosis FROM reports WHERE id = ?")
+    .get(reportId) as { clinicalDiagnosis: string | null } | undefined;
+  const seenDiagnosis = new Set(diagnosisRows.map((row) => normalizeDiagnosisName(row.text)));
+  for (const part of String(reportRow?.clinicalDiagnosis ?? "").split(/[、,，;；/\n]+/)) {
+    const text = part.trim();
+    if (!text) continue;
+    const key = normalizeDiagnosisName(text);
+    if (seenDiagnosis.has(key)) continue;
+    seenDiagnosis.add(key);
+    push("diagnosis", `clinical:${reportId}:${key}`, text, "诊断", null);
+  }
+
+  const medicationRows = db
+    .prepare(
+      `SELECT id, medication_name AS label, dose, dose_unit AS doseUnit, route, frequency
+       FROM report_medications WHERE report_id = ? AND is_deleted = 0 ORDER BY id`,
+    )
+    .all(reportId) as Array<{
+    id: string;
+    label: string;
+    dose: string | null;
+    doseUnit: string | null;
+    route: string | null;
+    frequency: string | null;
+  }>;
+  for (const row of medicationRows) push("medication", row.id, row.label, medicationFactDetail(row), null);
+
+  const procedureRows = db
+    .prepare(
+      `SELECT id, procedure_name AS label, performed_at AS performedAt FROM report_procedures
+       WHERE report_id = ? AND is_deleted = 0 ORDER BY id`,
+    )
+    .all(reportId) as Array<{ id: string; label: string; performedAt: string | null }>;
+  for (const row of procedureRows) push("procedure", row.id, row.label, "操作", row.performedAt);
+
+  const vaccinationRows = db
+    .prepare(
+      `SELECT id, vaccine_name AS label, administered_at AS administeredAt FROM vaccination_records
+       WHERE report_id = ? AND is_deleted = 0 ORDER BY id`,
+    )
+    .all(reportId) as Array<{ id: string; label: string; administeredAt: string | null }>;
+  for (const row of vaccinationRows) push("vaccination", row.id, row.label, "疫苗", row.administeredAt);
+
+  return out;
+}
 
 /** 把归集关系解析成可以直接展示的文字（含来源报告信息）。 */
 function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
@@ -206,14 +306,7 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
         link,
         row && {
           label: row.label,
-          detail: [
-            row.dose && row.doseUnit ? `${row.dose}${row.doseUnit}` : row.dose,
-            row.route,
-            /* 频次保留 tid/bid 原标签，并在后面括号补中文说明 */
-            withFrequencyNote(row.frequency),
-          ]
-            .filter(Boolean)
-            .join(" ") || "用药",
+          detail: medicationFactDetail(row),
           reportId: row.reportId,
           occurredAt: null,
         },
@@ -267,6 +360,21 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
     }
   }
 
+  /* 报告展开：挂一份报告 = 这次就诊整体入档，报告里的诊断/用药/操作/疫苗一并进入时间轴。
+     已经单独归集过的条目保留原样（可单独移除），不重复展开。 */
+  const derivedHits: Array<{ factType: CaseEpisodeLinkFactType; factId: string; hit: FactHit }> = [];
+  const derivedKeys = new Set<string>();
+  for (const link of links) {
+    if (link.factType !== "report") continue;
+    for (const fact of expandReportFacts(link.factId)) {
+      const key = `${fact.factType}:${fact.factId}`;
+      if (hits.has(key) || derivedKeys.has(key)) continue;
+      derivedKeys.add(key);
+      derivedHits.push(fact);
+      if (fact.hit.reportId) reportIds.add(fact.hit.reportId);
+    }
+  }
+
   const reportInfo = new Map<string, { title: string; hospitalName: string | null; issuedAt: string | null }>();
   if (reportIds.size) {
     const ids = [...reportIds];
@@ -281,7 +389,7 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
     for (const row of rows) reportInfo.set(row.id, row);
   }
 
-  return links.map((link) => {
+  const explicitFacts = links.map((link) => {
     const hit = hits.get(`${link.factType}:${link.factId}`);
     const info = hit?.reportId ? reportInfo.get(hit.reportId) : undefined;
     return {
@@ -295,8 +403,28 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
       hospitalName: info?.hospitalName ?? null,
       occurredAt: hit?.occurredAt ?? info?.issuedAt ?? null,
       missing: !hit,
-    };
+      derived: false,
+    } satisfies EpisodeLinkedFact;
   });
+
+  const derivedFacts = derivedHits.map((fact) => {
+    const info = fact.hit.reportId ? reportInfo.get(fact.hit.reportId) : undefined;
+    return {
+      linkId: `derived:${fact.factType}:${fact.factId}`,
+      factType: fact.factType,
+      factId: fact.factId,
+      label: fact.hit.label,
+      detail: fact.hit.detail,
+      reportId: fact.hit.reportId,
+      reportTitle: info?.title ?? null,
+      hospitalName: info?.hospitalName ?? null,
+      occurredAt: fact.hit.occurredAt ?? info?.issuedAt ?? null,
+      missing: false,
+      derived: true,
+    } satisfies EpisodeLinkedFact;
+  });
+
+  return [...explicitFacts, ...derivedFacts];
 }
 
 // ---------------------------------------------------------------- 病程

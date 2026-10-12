@@ -377,6 +377,95 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(detailHeader.text()).toContain("10月呼吸道感染");
   });
 
+  it("时间轴区分「随报告记入」与可单独移除的条目", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: null,
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 0,
+      linkCount: 2,
+    };
+    const baseFact = {
+      reportId: "report-1",
+      reportTitle: "急诊儿科门诊记录",
+      hospitalName: "郑州市中心医院",
+      occurredAt: "2026-10-09",
+      missing: false,
+    };
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (path.startsWith("episodes/"))
+        return {
+          episode: episodeRow,
+          symptoms: [],
+          links: [],
+          linkedFacts: [
+            {
+              ...baseFact,
+              linkId: "lnk-report",
+              factType: "report",
+              factId: "report-1",
+              label: "急诊儿科门诊记录",
+              detail: "报告",
+              derived: false,
+            },
+            {
+              ...baseFact,
+              linkId: "derived:medication:m1",
+              factType: "medication",
+              factId: "m1",
+              label: "复方氨酚甲麻口服液",
+              detail: "4.5ml 口服 tid（每日三次）",
+              derived: true,
+            },
+            {
+              ...baseFact,
+              linkId: "lnk-med",
+              factType: "medication",
+              factId: "m2",
+              label: "氨溴特罗口服溶液",
+              detail: "5ml 口服 bid（每日两次）",
+              derived: false,
+            },
+          ],
+        };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    const eventOf = (text: string) =>
+      wrapper.findAll(".episode-event").find((el) => el.text().includes(text))!;
+
+    /* 由报告展开的用药：跟随报告，不提供单独移除 */
+    const derivedEvent = eventOf("复方氨酚甲麻口服液");
+    expect(derivedEvent.text()).toContain("随报告记入");
+    expect(derivedEvent.find(".danger-action").exists()).toBe(false);
+
+    /* 单独归集的用药：照旧可以单独移除 */
+    const explicitEvent = eventOf("氨溴特罗口服溶液");
+    expect(explicitEvent.find(".danger-action").exists()).toBe(true);
+  });
+
   it("疾病页在过渡层内能渲染出内容", async () => {
     const wrapper = await mountUnderShell("diseases");
     const html = wrapper.html();
