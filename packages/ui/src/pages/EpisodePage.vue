@@ -359,7 +359,7 @@ onActivated(() => {
 <template>
   <section class="plain-page">
     <template v-if="detail">
-      <div class="page-intro">
+      <div class="page-intro page-intro--keep">
         <div>
           <h2>{{ detail.episode.title }}</h2>
           <p>{{ episodeMeta({ ...detail.episode, symptomCount: detail.symptoms.length }) }}</p>
@@ -472,7 +472,7 @@ onActivated(() => {
     </template>
 
     <template v-else>
-      <div class="page-intro">
+      <div class="page-intro page-intro--keep page-intro--actions-only">
         <div><h2>病程</h2><p>把同一次生病的多次就诊串成一条线</p></div>
         <button class="primary-button compact-primary" type="button" @click="formOpen = !formOpen">
           <Plus :size="17" />新建病程

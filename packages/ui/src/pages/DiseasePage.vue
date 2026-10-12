@@ -217,7 +217,7 @@ onActivated(() => {
     </div>
 
     <template v-if="selected">
-      <div class="page-intro">
+      <div class="page-intro page-intro--keep">
         <div>
           <h3>{{ selected.name }}</h3>
           <p>共 {{ selected.count }} 次记录 · {{ kindLabel(selected) }}</p>

@@ -3006,6 +3006,18 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
   .mobile-nav a.primary:active .mobile-nav-icon { transform: scale(.92); }
 
   .page-intro { display: none; }
+  /* 移动端默认隐藏页面大标题（顶栏已展示），但带「返回」「新建」等入口的头部必须保留：
+     疾病下钻、病程详情里的返回入口，以及病程列表里的「新建病程」都在这类头部里。 */
+  .page-intro.page-intro--keep {
+    display: flex; min-height: 0; margin: 0 0 14px;
+    align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .page-intro.page-intro--keep h2 { font-size: 19px; }
+  .page-intro.page-intro--keep h3 { font-size: 17px; }
+  .page-intro.page-intro--keep p { margin-top: 2px; font-size: 11px; }
+  /* 标题与顶栏重复时只保留操作按钮 */
+  .page-intro.page-intro--keep.page-intro--actions-only { justify-content: flex-end; }
+  .page-intro.page-intro--keep.page-intro--actions-only > div:first-child { display: none; }
   .overview-page { gap: 10px; }
   .overview-page > .page-intro { display: flex; min-height: 0; margin: 2px 0 0; }
   .overview-page > .page-intro h2 { font-size: 20px; }

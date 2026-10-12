@@ -300,6 +300,83 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(countList()).toBeGreaterThan(before);
   });
 
+  it("疾病下钻的头部带移动端保留标记，返回按钮不会被隐藏", async () => {
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("disease-catalog"))
+        return [{ kind: "diagnosis", name: "呼吸道感染", count: 1, lastAt: "2026-10-09" }];
+      if (path.startsWith("disease-records")) return [];
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const DiseasePage = (await import("../src/pages/DiseasePage.vue")).default;
+    const wrapper = mount(DiseasePage);
+    await settle();
+    await wrapper.find(".entry-tile-main").trigger("click");
+    await settle();
+
+    /* 移动端 CSS 会隐藏 .page-intro，下钻头部必须带 --keep 才不会被一起藏掉 */
+    const header = wrapper.find(".page-intro--keep");
+    expect(header.exists(), "疾病下钻头部应带 page-intro--keep").toBe(true);
+    expect(header.text()).toContain("返回");
+  });
+
+  it("病程列表与详情的头部都带移动端保留标记", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: null,
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 0,
+      linkCount: 0,
+    };
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (path.startsWith("episodes/"))
+        return { episode: episodeRow, symptoms: [], links: [], linkedFacts: [] };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+
+    /* 列表视图：标题与顶栏重复，移动端只保留「新建病程」按钮 */
+    const listHeader = wrapper.find(".page-intro--keep");
+    expect(listHeader.exists(), "病程列表头部应带 page-intro--keep").toBe(true);
+    expect(listHeader.classes()).toContain("page-intro--actions-only");
+    expect(listHeader.text()).toContain("新建病程");
+
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 详情视图：标题与返回入口都要保留 */
+    const detailHeader = wrapper.find(".page-intro--keep");
+    expect(detailHeader.exists(), "病程详情头部应带 page-intro--keep").toBe(true);
+    expect(detailHeader.text()).toContain("返回");
+    expect(detailHeader.text()).toContain("10月呼吸道感染");
+  });
+
   it("疾病页在过渡层内能渲染出内容", async () => {
     const wrapper = await mountUnderShell("diseases");
     const html = wrapper.html();
