@@ -350,6 +350,35 @@ test("门诊病历的「临床诊断」也进入疾病目录、下钻与检索",
   }
 });
 
+test("报告进入回收站后，其诊断同时从疾病目录、下钻与检索中消失", () => {
+  const { storageDir, owner, db } = setup("episode-disease-trash");
+  try {
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, clinical_diagnosis)
+      VALUES ('report-a', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '呼吸道感染');
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, clinical_diagnosis)
+      VALUES ('report-b', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '支气管炎');
+    `);
+
+    const before = listDiseaseCatalog(owner, "member")
+      .filter((item) => item.kind === "diagnosis")
+      .map((item) => item.name)
+      .sort();
+    assert.deepEqual(before, ["呼吸道感染", "支气管炎"]);
+
+    db.prepare("UPDATE reports SET status = 'trashed' WHERE id = 'report-b'").run();
+
+    const after = listDiseaseCatalog(owner, "member")
+      .filter((item) => item.kind === "diagnosis")
+      .map((item) => item.name);
+    assert.deepEqual(after, ["呼吸道感染"], "回收站里的报告不应再计入疾病目录");
+    assert.equal(listDiseaseRecords(owner, "member", "diagnosis", "支气管炎").length, 0);
+    assert.equal(searchVisits(owner, "member", "支气管炎").length, 0);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
 test("跨成员访问被拒绝", () => {
   const { storageDir, owner, db } = setup("episode-access");
   try {
