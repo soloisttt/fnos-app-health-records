@@ -171,7 +171,7 @@ watch(
     </template>
 
     <template v-else>
-      <label class="search-field">
+      <label class="search-field entry-search">
         <Search :size="16" />
         <input v-model="keyword" type="search" placeholder="搜索症状或疾病，例如 咳嗽" />
       </label>
