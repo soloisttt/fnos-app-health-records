@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   describeObservationAbnormal,
   observationAttentionHint,
+  observationDetailGroup,
   formatObservationNormalization,
   formatRawIndicatorResult,
   formatReferenceRange
@@ -213,4 +214,17 @@ test("trend UI prioritizes comparability notices and avoids duplicate detail exp
   assert.match(source, /item\.attentionReason !== item\.abnormalContinuityReason/);
   assert.doesNotMatch(source, /本次结果[\s\S]{0,300}item\.attentionReason/);
   assert.doesNotMatch(source, /(?:改善|恶化|变好|变差)/);
+});
+
+test('detail groups distinguish qualitative and technical records without hiding actual conflicts', () => {
+  const input = { displayTier: 'secondary', displayCategory: 'qualitative_finding', displayReason: '已核验的定性检查记录',
+    normalizationExcludedReason: null, abnormalConflict: false, abnormalStatus: 'reported', abnormalReason: null,
+    referenceStatus: 'trusted', referenceReason: null };
+  assert.equal(observationDetailGroup(input), 'qualitative');
+  assert.equal(observationDetailGroup({...input, displayCategory:'technical_measurement'}), 'technical');
+  assert.equal(observationAttentionHint({...input, displayCategory:'technical_measurement'}), '');
+  assert.equal(observationDetailGroup({...input, abnormalConflict:true}), 'review');
+  assert.equal(observationDetailGroup({...input, referenceStatus:'raw_only'}), 'review');
+  assert.equal(observationDetailGroup({...input, displayTier:'governance_only'}), 'review');
+  assert.equal(observationDetailGroup({...input, displayCategory:'medical_candidate'}), 'review');
 });

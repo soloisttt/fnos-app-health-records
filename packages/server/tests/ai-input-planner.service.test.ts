@@ -4966,3 +4966,26 @@ test('ambiguous temporal headers and partially parsed temporal rows remain avail
     assert.equal(line.candidateKind,'scalar');
   }
 });
+
+test('recovers abbreviated name headers in two panels without borrowing adjacent units', () => {
+  const columns = [0, 180, 280, 390, 550, 730, 830, 940];
+  const raw: any[] = [];
+  const add = (row: number, cells: string[]) => cells.forEach((text, column) => {
+    if (text) raw.push({id:`r${row}c${column}`, text, confidence:.99, tableUnsafe:true,
+      box:[columns[column],row*40,columns[column]+70,row*40+20]});
+  });
+  add(0,['名','结果','参考值','单位','名','结果','参考值','单位']);
+  add(1,['葡萄糖','5.2','3.9-6.1','mmol/L','甘油三酯','1.2','0.2-1.7','mmol/L']);
+  add(2,['总胆固醇','4.2','2.8-5.2','mmol/L','肌酐','75','40-100','μmol/L']);
+  add(3,['葡萄糖','5.4','3.9-6.1','mmol/L','甘油三酯','1.3','0.2-1.7','']);
+  const pages=rebuildOcrPages([{pageId:'synthetic-panel',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const facts=pages.flatMap(p=>p.lines.flatMap(localObservationsForLine));
+  const tg=facts.find(f=>f.itemName==='甘油三酯' && f.numericValue===1.2);
+  assert.ok(tg); assert.equal(tg.unit,'mmol/L');
+  assert.deepEqual(tg.sourceMap.unit?.sourceLineIds,['r1c7']);
+  assert.ok(!tg.sourceMap.unit?.sourceLineIds.includes('r1c3'));
+  const missing=facts.find(f=>f.itemName==='甘油三酯' && f.numericValue===1.3);
+  assert.ok(!missing?.unit, 'missing right unit must not inherit the left unit');
+  const creatinine=facts.find(f=>f.itemName==='肌酐');
+  assert.equal(creatinine?.unit,'μmol/L');
+});

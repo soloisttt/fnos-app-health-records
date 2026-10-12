@@ -7,6 +7,7 @@ export function splitOcrTableCells(text: string): string[] {
 export function normalizeOcrTableHeader(text: string): string {
   const compact = text.normalize('NFKC').trim().replace(/\s+/g, '').toLowerCase();
   const aliases: Record<string,string> = {
+    '名':'名称',
     test:'项目名称',testname:'项目名称',item:'项目名称',itemname:'项目名称',parameter:'参数',
     result:'结果',results:'结果',value:'结果',unit:'单位',units:'单位',
     reference:'参考范围',referencerange:'参考范围',referenceinterval:'参考范围',

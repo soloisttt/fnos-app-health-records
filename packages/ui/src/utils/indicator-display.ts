@@ -6,7 +6,7 @@ export function observationAttentionHint(input: {
   referenceStatus: string; referenceReason: string | null;
 }) {
   const reasons: Array<string | null> = [];
-  if (input.displayTier !== 'primary' && input.displayCategory !== 'qualitative_finding') {
+  if (input.displayTier !== 'primary' && !(input.displayTier === 'secondary' && ['qualitative_finding', 'technical_measurement'].includes(input.displayCategory))) {
     reasons.push(input.displayReason || input.normalizationExcludedReason || '指标仍需核对');
   }
   if (input.abnormalConflict || input.abnormalStatus === 'conflict') {
@@ -14,6 +14,16 @@ export function observationAttentionHint(input: {
   }
   if (input.referenceStatus === 'raw_only') reasons.push(input.referenceReason || '参考范围尚未核实，仅保留原文');
   return [...new Set(reasons.map(reason => reason?.trim()).filter(Boolean))].join('\n');
+}
+
+/** Keep valid non-numeric records separate from actionable review requests. */
+export function observationDetailGroup(input: Parameters<typeof observationAttentionHint>[0]) {
+  if (input.displayTier === 'primary') return 'trend';
+  if (!observationAttentionHint(input)) {
+    if (input.displayCategory === 'qualitative_finding') return 'qualitative';
+    if (input.displayCategory === 'technical_measurement') return 'technical';
+  }
+  return 'review';
 }
 
 export type ObservationAbnormalDisplayInput = {

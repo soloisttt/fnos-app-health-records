@@ -13,7 +13,7 @@
 | 项 | 当前值 | 来源 |
 | --- | --- | --- |
 | 应用 ID | `fnos-app-health-records` | `template.config.json` |
-| 应用版本 | `0.2.12`（Unreleased） | `package.json` |
+| 应用版本 | `0.2.12` | `package.json` |
 | fnOS manifest 版本 | `0.2.12` | `scripts/prepare-package.mjs` 从 `package.json` 写入 |
 | fnOS sub_version | `0.2.12.0` | `scripts/prepare-package.mjs` 生成 |
 | Docker 镜像版本 | 精确版本 `0.2.12`，稳定版另提供 `latest` | GitHub Tag 工作流从 `package.json` 生成 |
@@ -23,7 +23,7 @@
 
 发布前必须确认：当前应用版本支持的目标 schema 版本明确、可初始化新库、可从上一发布版本迁移。
 
-本轮按用户指定版本维护 `0.2.12 - Unreleased`，应用版本及本地构建统一为 0.2.12，目标数据库 schema 保持 v19，不新增迁移。当前仍为开发迭代，正式发布时再冻结 changelog、创建版本提交和 tag 并上传产物。
+0.2.12 已冻结发布内容，应用版本及构建统一为 0.2.12，目标数据库 schema 保持 v19，不新增编号迁移；成员合并记录通过备份后的幂等结构补齐提供。后续开发进入无编号 Unreleased。
 
 上一正式版本 0.2.11 的目标数据库 schema 为 v19。保留原 v18 OCR 页面方向迁移，新增 v19 反馈状态、通知和管理员阅读记录；支持 0.2.10 的 v17、原 0.2.11 的 v18，以及已补齐反馈结构但仍记录 v18 的测试库，升级前自动备份，幂等保留数据。历史同号但不同内容的 v18 草案仍拒绝自动升级，保留数据并单独评审。0.2.11 撤回重发时保持同一应用版本，不改已发布迁移或清理旧安装数据；原镜像的已下载副本不会自动更新，需要主动拉取并重建容器。
 
@@ -78,9 +78,9 @@ schema 仍为 v6
 要求：
 
 - 更新 `package.json` 版本。
-- 在 `migrations.ts` 新增 schema 版本。
+- 先按 [数据库版本最小变更原则](../AGENTS.md#数据库版本最小变更原则优先规则) 判断兼容性；只有确需新版本门槛时才在 `migrations.ts` 新增版本，兼容补齐不机械升号。
 - 更新 `schema.ts` 最新完整 schema。
-- 更新 `CHANGELOG.md`，写明 schema 变化。
+- 更新 `CHANGELOG.md`，写明 schema 是否变化、结构补齐及备份影响。
 - 更新 `template.config.json` 的 `releaseNotes`。
 - 增加迁移测试，覆盖旧版本库升级到新版本库。
 - 真机验证旧版本升级。
@@ -142,7 +142,7 @@ schema v6 -> v7
 - 上一个正式版本数据库 -> 最新版本。
 - 中间任一包含数据库变化的版本 -> 最新版本。
 - 缺少 `schema_migrations` 的早期开发库 -> 最新版本，如果这个版本曾经对外发布或已有用户数据。
-- 高版本数据库 -> 低版本应用，必须拒绝启动。
+- 高版本数据库 -> 低版本应用，必须停止业务并保留维护页。
 
 ## 开发阶段流程
 
@@ -224,7 +224,7 @@ npm run release:ci
 - 旧版本数据库启动，检查自动备份文件生成。
 - 旧版本数据库启动，检查 `schema_migrations` 写入缺失版本。
 - 旧版本数据库启动，检查 `app_upgrade_history` 写入 completed。
-- 构造高版本数据库，确认当前应用拒绝启动。
+- 构造高版本数据库，确认业务被阻止且 Nitro 继续提供维护页。
 - 迁移失败时，确认保留备份并写入 failed 记录。
 
 Release notes 预览：

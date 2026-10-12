@@ -77,11 +77,12 @@ test("observation editor prioritizes result fields and groups optional metadata"
   assert.doesNotMatch(styles, /\.observation-edit-panel \.observation-editor-form \.form-actions > button \{[^}]*border-radius/);
 });
 
-test("report detail uses one review state for non-trend observations", () => {
-  assert.match(reportDetail, /const pendingReviewObservations = computed\(\(\) => \[\.\.\.secondaryObservations\.value, \.\.\.governanceObservations\.value\]\);/);
-  assert.match(reportDetail, /项待核对/);
-  assert.match(reportDetail, /<strong>待核对指标<\/strong>/);
-  assert.doesNotMatch(reportDetail, /待补标准指标|待治理项/);
+test("report detail distinguishes non-trend records from actionable review", () => {
+  assert.match(reportDetail, /observationDetailGroup\(item\) === 'review'/);
+  assert.match(reportDetail, /title: '定性结果'/);
+  assert.match(reportDetail, /title: '其他检查记录'/);
+  assert.match(reportDetail, /title: '待核对指标'/);
+  assert.match(reportDetail, /v-for="section in nonTrendSections"/);
 });
 
 test("observation review workspace keeps source context beside the editor", () => {

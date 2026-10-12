@@ -20,7 +20,7 @@ import ImageViewer, { type ImageViewerPage } from "./ImageViewer.vue";
 import MorphologyFindingEditor from "./MorphologyFindingEditor.vue";
 import { request, apiUrl } from "../utils/api";
 import { downloadDirectUrl, downloadStreamedFile } from "../utils/download";
-import { describeObservationAbnormal, observationAttentionHint, formatReferenceRange } from "../utils/indicator-display";
+import { describeObservationAbnormal, observationAttentionHint, observationDetailGroup, formatReferenceRange } from "../utils/indicator-display";
 import { formatDatabaseTime, formatDatabaseTimeWithYear } from "../utils/time";
 import { hasEmptyCompletedOcr, resolveAiTriggerState } from "../utils/ai-trigger-state";
 import { resolveClinicalEvidenceNavigation } from "../utils/clinical-evidence-navigation";
@@ -301,7 +301,13 @@ const medicalCandidateObservations = computed(() => secondaryObservations.value.
 const qualitativeObservations = computed(() => secondaryObservations.value.filter((item) => item.displayCategory === "qualitative_finding"));
 const technicalObservations = computed(() => secondaryObservations.value.filter((item) => item.displayCategory === "technical_measurement"));
 const governanceObservations = computed(() => detail.value?.observations.filter((item) => item.displayTier === "governance_only") || []);
-const pendingReviewObservations = computed(() => [...secondaryObservations.value, ...governanceObservations.value]);
+const nonTrendObservations = computed(() => [...secondaryObservations.value, ...governanceObservations.value]);
+const pendingReviewObservations = computed(() => nonTrendObservations.value.filter(item => observationDetailGroup(item) === 'review'));
+const nonTrendSections = computed(() => [
+  { key: 'qualitative', title: '定性结果', description: '阴性、阳性等定性记录，保留完整结果，不绘制数值趋势' },
+  { key: 'technical', title: '其他检查记录', description: '专业技术参数，保留在报告中，不默认进入趋势' },
+  { key: 'review', title: '待核对指标', description: '存在识别、标准化或参考信息待核对事项，请查看具体提示' },
+].map(section => ({ ...section, items: nonTrendObservations.value.filter(item => observationDetailGroup(item) === section.key) })).filter(section => section.items.length));
 const selectedObservation = computed(() => detail.value?.observations.find((item) => item.id === selectedObservationId.value) || null);
 const observationSourcePage = computed(() => detail.value?.pages[observationSourcePageIndex.value] || null);
 const observationEvidenceLineIds = computed(() => {
@@ -2595,11 +2601,11 @@ onActivated(() => {
               </article>
             </div>
           </section>
-          <section v-if="pendingReviewObservations.length" class="observation-tier-section">
-            <header><strong>待核对指标</strong><span>{{ pendingReviewObservations.length }} 项，已识别但暂不进入趋势</span></header>
+          <section v-for="section in nonTrendSections" :key="section.key" class="observation-tier-section">
+            <header><strong>{{ section.title }}</strong><span>{{ section.items.length }} 项，{{ section.description }}</span></header>
             <div class="observation-list">
               <article
-                v-for="item in pendingReviewObservations"
+                v-for="item in section.items"
                 :key="item.id"
                 :class="{ 'is-selected': selectedObservationId === item.id }"
                 tabindex="0"

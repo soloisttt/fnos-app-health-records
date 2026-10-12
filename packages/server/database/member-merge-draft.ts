@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
-// Unnumbered additive draft. Register at the next explicitly authorized release.
+// Additive compatibility table for 0.2.12; keep schema v19.
+// Existing databases are backed up before this idempotent initialization.
 export const memberMergeSchemaSql = `
 CREATE TABLE IF NOT EXISTS member_merges (
  id TEXT PRIMARY KEY,
