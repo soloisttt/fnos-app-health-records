@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowLeft, Activity, Search } from "@lucide/vue";
+import { ArrowLeft, Activity, Search, X } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
-import type { DiseaseCatalogEntry, DiseaseVisit } from "../types/api";
+import type { CatalogExclusion, DiseaseCatalogEntry, DiseaseVisit } from "../types/api";
 import { useAppContext } from "../composables/useAppContext";
 
 const app = useAppContext();
@@ -17,6 +17,9 @@ const records = ref<DiseaseVisit[]>([]);
 const recordsLoading = ref(false);
 const searchResults = ref<DiseaseVisit[]>([]);
 const searching = ref(false);
+const hidden = ref<CatalogExclusion[]>([]);
+const hiddenOpen = ref(false);
+const hidingKey = ref("");
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
 async function runSearch(memberId: string, value: string) {
@@ -103,6 +106,59 @@ async function load(memberId: string) {
     error.value = cause instanceof Error ? cause.message : "加载疾病目录失败";
   } finally {
     loading.value = false;
+  }
+  await loadHidden(memberId);
+}
+
+async function loadHidden(memberId: string) {
+  if (!memberId) {
+    hidden.value = [];
+    return;
+  }
+  try {
+    hidden.value = await request<CatalogExclusion[]>(
+      `disease-catalog-hidden?memberId=${encodeURIComponent(memberId)}`,
+    );
+  } catch {
+    hidden.value = [];
+  }
+}
+
+/** 隐藏：只从目录里拿掉，报告里的诊断原文与病程里的症状不动，可随时恢复。 */
+async function hideEntry(entry: DiseaseCatalogEntry) {
+  const memberId = app.selectedMemberId.value;
+  if (!memberId || hidingKey.value) return;
+  hidingKey.value = `${entry.kind}:${entry.name}`;
+  error.value = "";
+  try {
+    entries.value = await request<DiseaseCatalogEntry[]>("disease-catalog-exclusions", {
+      method: "POST",
+      body: JSON.stringify({ memberId, kind: entry.kind, name: entry.name }),
+    });
+    await loadHidden(memberId);
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "隐藏失败";
+  } finally {
+    hidingKey.value = "";
+  }
+}
+
+async function restoreExclusion(item: CatalogExclusion) {
+  const memberId = app.selectedMemberId.value;
+  if (!memberId || hidingKey.value) return;
+  hidingKey.value = `${item.kind}:${item.name}`;
+  error.value = "";
+  try {
+    entries.value = await request<DiseaseCatalogEntry[]>(
+      `disease-catalog-exclusions?memberId=${encodeURIComponent(memberId)}` +
+        `&kind=${item.kind}&name=${encodeURIComponent(item.name)}`,
+      { method: "DELETE" },
+    );
+    await loadHidden(memberId);
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "恢复失败";
+  } finally {
+    hidingKey.value = "";
   }
 }
 
@@ -214,21 +270,50 @@ watch(
           </div>
         </div>
         <div v-if="filtered.length" class="entry-grid">
-          <button
-            v-for="entry in filtered"
-            :key="`${entry.kind}:${entry.name}`"
-            class="entry-tile"
-            type="button"
-            @click="openEntry(entry)"
-          >
-            <span class="entry-tile-head">
-              <strong>{{ entry.name }}</strong>
-              <span class="chip status-label" :class="kindChip(entry)">{{ kindLabel(entry) }}</span>
-            </span>
-            <span class="entry-tile-meta">{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
-          </button>
+          <div v-for="entry in filtered" :key="`${entry.kind}:${entry.name}`" class="entry-tile">
+            <button class="entry-tile-main" type="button" @click="openEntry(entry)">
+              <span class="entry-tile-head">
+                <strong>{{ entry.name }}</strong>
+                <span class="chip status-label" :class="kindChip(entry)">{{ kindLabel(entry) }}</span>
+              </span>
+              <span class="entry-tile-meta">{{ entry.count }} 次 · 最近 {{ formatDay(entry.lastAt) }}</span>
+            </button>
+            <button
+              class="entry-tile-remove"
+              type="button"
+              :disabled="Boolean(hidingKey)"
+              :title="`从目录隐藏「${entry.name}」`"
+              :aria-label="`从目录隐藏 ${entry.name}`"
+              @click="hideEntry(entry)"
+            >
+              <X :size="13" />
+            </button>
+          </div>
         </div>
         <p v-else class="entry-tab-empty">这个分类下暂时没有记录</p>
+
+        <div v-if="hidden.length" class="entry-hidden-bar">
+          <span>已隐藏 {{ hidden.length }} 项（报告里的原文未改动）</span>
+          <button class="soft-action-button" type="button" @click="hiddenOpen = !hiddenOpen">
+            {{ hiddenOpen ? "收起" : "管理" }}
+          </button>
+        </div>
+        <div v-if="hiddenOpen && hidden.length" class="entry-list-body">
+          <div v-for="item in hidden" :key="item.id" class="entry-row">
+            <span class="entry-row-main">
+              <strong>{{ item.name }}</strong>
+              <span>{{ item.kind === "diagnosis" ? "诊断" : "症状" }} · 已隐藏</span>
+            </span>
+            <span class="entry-row-side">
+              <button
+                class="soft-action-button"
+                type="button"
+                :disabled="Boolean(hidingKey)"
+                @click="restoreExclusion(item)"
+              >恢复</button>
+            </span>
+          </div>
+        </div>
       </section>
 
       <section v-if="keyword.trim()" class="settings-band entry-list-card">

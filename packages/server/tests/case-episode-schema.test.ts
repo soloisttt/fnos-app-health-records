@@ -9,6 +9,7 @@ const expectedTables = [
   "case_episode_links",
   "diagnosis_catalog",
   "diagnosis_aliases",
+  "catalog_exclusions",
 ];
 
 function tableNames(db: DatabaseSync) {

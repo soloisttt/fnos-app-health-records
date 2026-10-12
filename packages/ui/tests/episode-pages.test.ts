@@ -109,6 +109,10 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const tabs = wrapper.findAll(".entry-tabs button");
     expect(tabs).toHaveLength(2);
     expect(tabs[0].attributes("aria-pressed")).toBe("true");
+    /* 每个方块都要有独立的「隐藏」按钮，且与主体按钮平级（按钮不能嵌套按钮） */
+    expect(wrapper.findAll(".entry-tile")).toHaveLength(1);
+    expect(wrapper.findAll(".entry-tile-main")).toHaveLength(1);
+    expect(wrapper.findAll(".entry-tile-remove")).toHaveLength(1);
     expect(wrapper.html()).toContain("呼吸道感染");
     expect(wrapper.html()).not.toContain("鼻塞流涕");
 

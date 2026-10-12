@@ -1226,6 +1226,14 @@ export type Reminder = {
   reportIssuedAt: string | null;
 };
 
+/** 疾病目录里被隐藏的条目：只影响目录展示，源数据不动。 */
+export type CatalogExclusion = {
+  id: string;
+  kind: "diagnosis" | "symptom";
+  name: string;
+  createdAt: string;
+};
+
 export type DiseaseCatalogEntry = {
   kind: "diagnosis" | "symptom";
   name: string;

@@ -7,6 +7,9 @@ import { closeDatabaseForTests, getDatabase } from "../database/client.ts";
 import type { RequestUser } from "../domain/request-user.ts";
 import {
   createEpisode,
+  excludeCatalogEntry,
+  listCatalogHiddenEntries,
+  restoreCatalogEntry,
   createSymptom,
   deleteEpisode,
   deleteSymptom,
@@ -374,6 +377,41 @@ test("报告进入回收站后，其诊断同时从疾病目录、下钻与检�
     assert.deepEqual(after, ["呼吸道感染"], "回收站里的报告不应再计入疾病目录");
     assert.equal(listDiseaseRecords(owner, "member", "diagnosis", "支气管炎").length, 0);
     assert.equal(searchVisits(owner, "member", "支气管炎").length, 0);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("疾病目录可隐藏与恢复：隐藏不动源数据，源数据消失后自然不再列出", () => {
+  const { storageDir, owner, db } = setup("episode-catalog-hide");
+  try {
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, clinical_diagnosis)
+      VALUES ('report-a', 'member', 'owner', 'outpatient', '门诊病历', 'ready', '呼吸道感染');
+    `);
+    assert.equal(listDiseaseCatalog(owner, "member").length, 1);
+
+    excludeCatalogEntry(owner, "member", "diagnosis", "呼吸道感染");
+    assert.equal(listDiseaseCatalog(owner, "member").length, 0, "隐藏后不再出现在目录");
+    assert.equal(listCatalogHiddenEntries(owner, "member").length, 1);
+    /* 隐藏不改动报告原文 */
+    const clinical = db.prepare("SELECT clinical_diagnosis AS text FROM reports WHERE id = 'report-a'").get() as {
+      text: string;
+    };
+    assert.equal(clinical.text, "呼吸道感染");
+
+    /* 报告进回收站：本来就不在目录里，已隐藏清单也不再列出 */
+    db.prepare("UPDATE reports SET status = 'trashed' WHERE id = 'report-a'").run();
+    assert.equal(listCatalogHiddenEntries(owner, "member").length, 0, "源数据消失后不再出现在已隐藏清单");
+
+    /* 报告恢复：隐藏设置仍在 */
+    db.prepare("UPDATE reports SET status = 'ready' WHERE id = 'report-a'").run();
+    assert.equal(listDiseaseCatalog(owner, "member").length, 0, "源数据恢复后仍保持隐藏");
+    assert.equal(listCatalogHiddenEntries(owner, "member").length, 1);
+
+    restoreCatalogEntry(owner, "member", "diagnosis", "呼吸道感染");
+    assert.equal(listDiseaseCatalog(owner, "member").length, 1, "恢复后回到目录");
+    assert.equal(listCatalogHiddenEntries(owner, "member").length, 0);
   } finally {
     teardown(storageDir);
   }

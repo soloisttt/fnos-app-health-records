@@ -99,6 +99,22 @@ CREATE TABLE IF NOT EXISTS diagnosis_aliases (
 );
 CREATE INDEX IF NOT EXISTS diagnosis_aliases_lookup_idx
   ON diagnosis_aliases(normalized_alias, enabled);
+
+-- 疾病目录「隐藏」名单：只影响目录展示，不改动报告里的诊断原文与病程里的症状，可随时恢复。
+-- 报告被删除或进入回收站时，目录条目本就不再聚合出来，这里的记录只会在「已隐藏」中保留，
+-- 若源数据恢复，隐藏状态依然有效。
+CREATE TABLE IF NOT EXISTS catalog_exclusions (
+  id              TEXT PRIMARY KEY,
+  member_id       TEXT NOT NULL REFERENCES health_members(id) ON DELETE CASCADE,
+  fact_kind       TEXT NOT NULL CHECK (fact_kind IN ('diagnosis', 'symptom')),
+  normalized_name TEXT NOT NULL,
+  display_name    TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (member_id, fact_kind, normalized_name)
+);
+CREATE INDEX IF NOT EXISTS catalog_exclusions_member_idx
+  ON catalog_exclusions(member_id, fact_kind);
 `;
 
 export function ensureCaseEpisodeDraft(db: DatabaseSync) {

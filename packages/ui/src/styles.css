@@ -416,13 +416,30 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 
 .entry-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 14px 12px; }
 .entry-tile {
-  min-height: 84px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-m);
-  background: var(--fill-2); display: grid; gap: 6px; align-content: start;
-  color: inherit; font: inherit; text-align: left; cursor: pointer;
-  transition: border-color .15s, background .15s;
+  position: relative; min-height: 84px; border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--fill-2); overflow: hidden; transition: border-color .15s;
 }
 .entry-tile:hover { border-color: var(--brand); }
-.entry-tile:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* 方块主体与「隐藏」按钮是兄弟节点：按钮不能嵌套按钮 */
+.entry-tile-main {
+  width: 100%; min-height: 84px; padding: 12px 14px; border: 0; background: none;
+  display: grid; gap: 6px; align-content: start;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.entry-tile-main:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.entry-tile-remove {
+  position: absolute; right: 6px; bottom: 6px; width: 24px; height: 24px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--muted);
+  display: grid; place-items: center; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.entry-tile-remove:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.entry-tile-remove:disabled { opacity: .5; cursor: default; }
+/* 「已隐藏」入口与会话 */
+.entry-hidden-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 0 14px 12px; color: var(--muted); font-size: 12px;
+}
 .entry-tile-head { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .entry-tile-head > strong { min-width: 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
 .entry-tile-head > .chip { flex: 0 0 auto; }

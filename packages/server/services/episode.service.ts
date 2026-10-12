@@ -48,7 +48,7 @@ export function normalizeDiagnosisName(value: string) {
 function appendAudit(
   user: RequestUser,
   action: "create" | "update" | "delete",
-  targetType: "case_episode" | "case_symptom" | "case_episode_link",
+  targetType: "case_episode" | "case_symptom" | "case_episode_link" | "catalog_exclusion",
   targetId: string,
   detail: Record<string, unknown>,
 ) {
@@ -568,8 +568,8 @@ export type DiseaseCatalogEntry = {
  * 疾病目录：按成员聚合诊断与症状。
  * 诊断名经 diagnosis_aliases 归一化后合并（未命中别名的按原文保留）。
  */
-export function listDiseaseCatalog(user: RequestUser, memberId: string): DiseaseCatalogEntry[] {
-  assertMemberAccess(user, memberId);
+/** 未被隐藏的完整目录（诊断 + 症状）。过滤展示与「已隐藏」清单判定共用。 */
+function collectCatalogEntries(memberId: string): DiseaseCatalogEntry[] {
   const db = getDatabase();
 
   const aliasRows = db
@@ -580,8 +580,6 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
     )
     .all() as Array<{ normalizedAlias: string; canonicalName: string }>;
   const aliasMap = new Map(aliasRows.map((row) => [row.normalizedAlias, row.canonicalName]));
-
-  const diagnosisRows = collectDiagnosisTexts(memberId);
 
   const symptomRows = db
     .prepare(
@@ -603,7 +601,7 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
     if (at && (!existing.lastAt || at > existing.lastAt)) existing.lastAt = at;
   };
 
-  for (const row of diagnosisRows) {
+  for (const row of collectDiagnosisTexts(memberId)) {
     bump("diagnosis", canonicalDiagnosisText(row.text, aliasMap), row.occurredAt);
   }
   for (const row of symptomRows) {
@@ -616,6 +614,73 @@ export function listDiseaseCatalog(user: RequestUser, memberId: string): Disease
     if (leftAt !== rightAt) return leftAt < rightAt ? 1 : -1;
     return left.name.localeCompare(right.name, "zh-CN");
   });
+}
+
+export type CatalogKind = DiseaseCatalogEntry["kind"];
+
+function exclusionKey(kind: CatalogKind, name: string) {
+  return `${kind}:${normalizeDiagnosisName(name)}`;
+}
+
+function loadExclusionKeys(memberId: string) {
+  const rows = getDatabase()
+    .prepare("SELECT fact_kind AS kind, normalized_name AS normalizedName FROM catalog_exclusions WHERE member_id = ?")
+    .all(memberId) as Array<{ kind: CatalogKind; normalizedName: string }>;
+  return new Set(rows.map((row) => `${row.kind}:${row.normalizedName}`));
+}
+
+/** A7 疾病目录：诊断与症状按成员聚合；已隐藏的条目不再列出。 */
+export function listDiseaseCatalog(user: RequestUser, memberId: string): DiseaseCatalogEntry[] {
+  assertMemberAccess(user, memberId);
+  const excluded = loadExclusionKeys(memberId);
+  return collectCatalogEntries(memberId).filter((entry) => !excluded.has(exclusionKey(entry.kind, entry.name)));
+}
+
+/**
+ * 「已隐藏」清单。只列出源数据仍在的条目：
+ * 报告被删除或移入回收站、或症状被删掉之后，对应记录自然不再出现；
+ * 隐藏设置本身保留，源数据恢复后仍然保持隐藏。
+ */
+export function listCatalogHiddenEntries(user: RequestUser, memberId: string) {
+  assertMemberAccess(user, memberId);
+  const present = new Set(collectCatalogEntries(memberId).map((entry) => exclusionKey(entry.kind, entry.name)));
+  const rows = getDatabase()
+    .prepare(
+      `SELECT id, fact_kind AS kind, display_name AS name, created_at AS createdAt
+       FROM catalog_exclusions WHERE member_id = ?`,
+    )
+    .all(memberId) as Array<{ id: string; kind: CatalogKind; name: string; createdAt: string }>;
+  return rows
+    .filter((row) => present.has(exclusionKey(row.kind, row.name)))
+    .sort((left, right) => (left.createdAt < right.createdAt ? 1 : -1));
+}
+
+/** 隐藏一个目录条目：只影响目录展示，不改动报告里的诊断原文与病程里的症状。 */
+export function excludeCatalogEntry(user: RequestUser, memberId: string, kind: CatalogKind, name: string) {
+  assertMemberManage(user, memberId);
+  const displayName = String(name ?? "").trim();
+  if (!displayName) throw createError({ statusCode: 400, statusMessage: "名称不能为空" });
+  const id = createId("exclusion");
+  getDatabase()
+    .prepare(
+      `INSERT INTO catalog_exclusions (id, member_id, fact_kind, normalized_name, display_name, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(member_id, fact_kind, normalized_name)
+       DO UPDATE SET display_name = excluded.display_name`,
+    )
+    .run(id, memberId, kind, normalizeDiagnosisName(displayName), displayName, user.id);
+  appendAudit(user, "create", "catalog_exclusion", id, { memberId, kind, name: displayName });
+  return listDiseaseCatalog(user, memberId);
+}
+
+/** 取消隐藏，条目重新回到目录。 */
+export function restoreCatalogEntry(user: RequestUser, memberId: string, kind: CatalogKind, name: string) {
+  assertMemberManage(user, memberId);
+  getDatabase()
+    .prepare("DELETE FROM catalog_exclusions WHERE member_id = ? AND fact_kind = ? AND normalized_name = ?")
+    .run(memberId, kind, normalizeDiagnosisName(String(name ?? "")));
+  appendAudit(user, "delete", "catalog_exclusion", `${kind}:${name}`, { memberId, kind, name });
+  return listDiseaseCatalog(user, memberId);
 }
 
 // ------------------------------------------------- 疾病目录下钻：历史就诊记录
