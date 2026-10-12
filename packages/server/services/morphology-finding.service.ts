@@ -633,7 +633,7 @@ function rebuildRows(rows: FindingRow[]): MorphologyTrackingResult {
   const automaticRows = rows.filter((row) => !manualFieldSet(row).has("trackingGroup"));
   const { assignments, ambiguous } = trackingAssignments(automaticRows);
   const memberIds = [...new Set(rows.map((row) => row.memberId))];
-  db.exec("BEGIN IMMEDIATE");
+  db.exec("SAVEPOINT morphology_tracking_rebuild");
   try {
     for (const memberId of memberIds) {
       db.prepare(`
@@ -652,9 +652,9 @@ function rebuildRows(rows: FindingRow[]): MorphologyTrackingResult {
         WHERE id = ?
       `).run(assignment.groupId, assignment.confidence, findingId);
     }
-    db.exec("COMMIT");
+    db.exec("RELEASE morphology_tracking_rebuild");
   } catch (error) {
-    rollbackAfterError(db);
+    db.exec("ROLLBACK TO morphology_tracking_rebuild; RELEASE morphology_tracking_rebuild");
     throw error;
   }
   return {

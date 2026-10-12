@@ -89,6 +89,7 @@ async function rebuildMorphologyTracking() {
       <header class="maintenance-group-header"><h3 id="maintenance-data-title">数据维护</h3><p>{{ app.session.value?.isAdmin ? "备份档案，整理重复报告" : "检查与整理重复报告" }}</p></header>
     <nav class="settings-menu" aria-label="数据维护">
       <RouterLink v-if="app.session.value?.isAdmin" to="/me/data"><DatabaseBackup :size="20" /><div><strong>备份与恢复</strong><span>导出成员清单，备份与恢复档案</span></div><ChevronRight :size="18" /></RouterLink>
+      <RouterLink v-if="app.session.value?.isAdmin" to="/me/maintenance/member-merges"><GitMerge :size="20" /><div><strong>成员档案合并</strong><span>合并同一人的档案，核对归属与共享权限</span></div><ChevronRight :size="18" /></RouterLink>
       <RouterLink to="/me/duplicates"><GitMerge :size="20" /><div><strong>重复报告检测</strong><span>查找重复报告，核对后合并或清理</span></div><ChevronRight :size="18" /></RouterLink>
     </nav>
     </section>
