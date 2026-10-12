@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { CalendarDays, Check, X } from "@lucide/vue";
 import { useScrollLock } from "../composables/useScrollLock";
 import { DATE_WHEEL_ITEM_HEIGHT, dateWheelStep, dateWheelIndex, clampCalendarDay } from "../utils/date-wheel";
-import { resolveFloatingPanelPosition } from "../utils/floating-panel-position";
 
 const props = defineProps<{
   modelValue: string | null;
@@ -19,6 +18,7 @@ const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
 const layer = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
 const panelStyle = ref<Record<string, string>>({});
 const lockScroll = ref(false);
 useScrollLock(computed(() => open.value && lockScroll.value));
@@ -327,21 +327,28 @@ function cancel() {
 }
 
 function updatePanelPosition() {
-  if (!open.value || !root.value) return;
+  if (!open.value || !root.value || !panel.value) return;
+  // Small screens use the CSS bottom sheet, without a trigger-relative offset.
+  if (window.innerWidth <= 760) {
+    panelStyle.value = {};
+    return;
+  }
   const trigger = root.value.getBoundingClientRect();
-  /* 用 offsetWidth/offsetHeight 取实测尺寸：不受面板进场动画的 transform 缩放影响。
-     尚未渲染时按桌面端常见尺寸兜底。 */
-  const panelEl = layer.value?.querySelector<HTMLElement>(".datetime-picker-panel") ?? null;
-  const panelWidth = panelEl?.offsetWidth || Math.min(340, window.innerWidth - 32);
-  const panelHeight = panelEl?.offsetHeight || 300;
-  const placement = resolveFloatingPanelPosition({
-    trigger: { top: trigger.top, bottom: trigger.bottom, left: trigger.left },
-    panelWidth,
-    panelHeight,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-  });
-  panelStyle.value = { top: `${placement.top}px`, left: `${placement.left}px` };
+  const margin = 16;
+  const gap = 8;
+  // offset dimensions exclude the opening animation's scale/translation.
+  const panelWidth = panel.value.offsetWidth;
+  const panelHeight = panel.value.offsetHeight;
+  const bottomSpace = window.innerHeight - margin - trigger.bottom - gap;
+  const topSpace = trigger.top - gap - margin;
+  const above = bottomSpace < panelHeight && topSpace > bottomSpace;
+  const preferredTop = above ? trigger.top - gap - panelHeight : trigger.bottom + gap;
+  const top = Math.max(margin, Math.min(preferredTop, window.innerHeight - panelHeight - margin));
+  const left = Math.max(margin, Math.min(trigger.left, window.innerWidth - panelWidth - margin));
+  panelStyle.value = {
+    top: `${top}px`,
+    left: `${left}px`,
+  };
 }
 
 // 点击外部关闭
@@ -384,7 +391,7 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <!-- click 关闭遮罩避免透穿；touchstart.prevent 阻止触屏合成 click 落到底层元素 -->
       <div v-if="open" ref="layer" class="datetime-picker-layer" @click.self="cancel" @touchstart.self.prevent="cancel">
-        <div class="datetime-picker-panel" :style="panelStyle" role="dialog" aria-modal="true" :aria-label="label || '请选择时间'">
+        <div ref="panel" class="datetime-picker-panel" :style="panelStyle" role="dialog" aria-modal="true" :aria-label="label || '请选择时间'">
             <div class="datetime-picker-header">
               <button type="button" class="datetime-picker-cancel" @click="cancel">
                 <X :size="18" />

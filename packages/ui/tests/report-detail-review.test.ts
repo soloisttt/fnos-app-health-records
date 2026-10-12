@@ -46,6 +46,7 @@ const detailPayload = {
   memberId:"m1",
   reportType: "checkup",
   status: "ready",
+  sourceVersion: 7,
   title: "年度体检",
   observations: [observation],
   pages: [],
@@ -103,6 +104,58 @@ afterEach(() => {
 });
 
 describe("ReportDetail 核对指标模式", () => {
+  it('报告字段保存携带打开编辑器时的版本，冲突时保留输入', async () => {
+    let version = 7;
+    fetchMock.mockImplementation(async (input:RequestInfo|URL,init?:RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/reports/r1') && init?.method === 'PUT') {
+        return new Response(JSON.stringify({error:true,message:'报告已更新，请刷新后重新校对，当前输入尚未保存'}),{status:409,headers:{'content-type':'application/json'}});
+      }
+      if (url.endsWith('/api/reports/r1')) return jsonResponse({...detailPayload,sourceVersion:version});
+      if (url.includes('jobs')) return jsonResponse([]);
+      return jsonResponse({});
+    });
+    const wrapper = mount(ReportDetail,{attachTo:document.body,props:{reportId:'r1',variant:'panel'},global:{stubs:{teleport:true,RouterLink:true,ReportNotesPanel:true,ReportPageAppend:{emits:['stateChanged'],template:'<button data-refresh @click="$emit(\'stateChanged\', \'ocr\')">Refresh</button>'}}}});
+    try {
+      await flushPromises(); await flushPromises();
+      await wrapper.findAll('button').find(button => button.text() === '校对字段')!.trigger('click');
+      await flushPromises();
+      await wrapper.get('.report-edit-form input').setValue('合成新标题');
+      version = 8;
+      await wrapper.get('[data-refresh]').trigger('click'); await flushPromises(); await flushPromises();
+      await wrapper.get('.report-edit-form').trigger('submit'); await flushPromises();
+      const call = fetchMock.mock.calls.find(([input,init]) => String(input).endsWith('/api/reports/r1') && init?.method === 'PUT')!;
+      expect(JSON.parse(call[1].body)).toMatchObject({title:'合成新标题',expectedSourceVersion:7});
+      expect(wrapper.get('.report-edit-form').text()).toContain('报告已更新');
+      expect((wrapper.get('.report-edit-form input').element as HTMLInputElement).value).toBe('合成新标题');
+    } finally {wrapper.unmount();}
+  });
+
+  it('人工核对后更新原图补提取待核对数量，同时保留其他解析提示', async () => {
+    let reviewed = false;
+    fetchMock.mockImplementation(async (input:RequestInfo|URL,init?:RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/observations/obs-1') && init?.method === 'PUT') reviewed = true;
+      if (url.endsWith('/api/reports/r1') || url.endsWith('/observations/obs-1')) return jsonResponse({...detailPayload,observations:[{...observation,requiresVisualReview:!reviewed,manualReviewed:reviewed}]});
+      if (url.includes('jobs')) return jsonResponse([{id:'ai',reportId:'r1',jobType:'ai_extract',status:'completed',createdAt:'2026-01-01',batchId:'batch',batchKind:'manual_ai',batchStartedAt:'2026-01-01',batchSequence:1,layoutWarnings:[{pageNumber:1,pendingVisualResults:1,uncertainRows:1,ocrUnresolved:2,ocrUnretried:1}]}]);
+      if (url.includes('indicator-catalog')) return jsonResponse([]);
+      return jsonResponse({});
+    });
+    const wrapper = mount(ReportDetail,{attachTo:document.body,props:{reportId:'r1',variant:'panel'},global:{stubs:{teleport:true,RouterLink:true,ReportNotesPanel:true}}});
+    try {
+      await flushPromises(); await flushPromises();
+      expect(wrapper.text()).toContain('1 个指标需对照原图核对');
+      expect(wrapper.text()).toContain('仍有识别疑点或未完成的局部复核');
+      await wrapper.findAll('button').find(button => button.text().includes('查看全部'))!.trigger('click'); await flushPromises();
+      await wrapper.get('.observation-all-list [title="编辑指标"]').trigger('click'); await flushPromises();
+      await wrapper.get('.observation-editor-form').trigger('submit'); await flushPromises(); await flushPromises();
+      expect(reviewed).toBe(true);
+      expect(wrapper.text()).not.toContain('1 个指标需对照原图核对');
+      // The historical job still contains pendingVisualResults=1.
+      expect(wrapper.text()).toContain('行列归属不明');
+    } finally {wrapper.unmount();}
+  });
+
   it("在全部指标显示同名多时间结果，选择时定位来源而不打开编辑",async()=>{
     fetchMock.mockImplementation(async(input:RequestInfo|URL)=>{
       const url=String(input);

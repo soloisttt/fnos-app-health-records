@@ -511,6 +511,33 @@ function validateOcrResponse(response: WorkerEnvelope): ResponseValidation {
 
     const line: Record<string, unknown> = { id, text: rawLine.text };
     if (rawLine.tableUnsafe === true) line.tableUnsafe = true;
+    if (isRecord(rawLine.tableRetryBudget)) {
+      const rawBudget = rawLine.tableRetryBudget;
+      const budget: Record<string, number> = {};
+      let valid = true;
+      for (const kind of ["row", "cell", "image"]) {
+        const fields = ["Candidates", "Retried", "Remaining"].map(suffix => `${kind}${suffix}`);
+        const values = fields.map(field => rawBudget[field] ?? (kind === "image" ? 0 : undefined));
+        if (!values.every(value => Number.isInteger(value) && Number(value) >= 0 && Number(value) <= workerMaxOcrLines())
+          || Number(values[1]) + Number(values[2]) !== Number(values[0])) {
+          valid = false;
+          break;
+        }
+        fields.forEach((field, i) => { budget[field] = Number(values[i]); });
+        const unresolved = rawBudget[`${kind}Unresolved`];
+        if (unresolved !== undefined) {
+          if (!Number.isSafeInteger(unresolved) || Number(unresolved) < 0 || Number(unresolved) > Number(values[1])) valid = false;
+          else budget[`${kind}Unresolved`] = Number(unresolved);
+        }
+      }
+      for (const [used, limit, maximum] of [["retryCalls", "retryCallLimit", 10_000], ["retryPixels", "retryPixelLimit", 1_000_000_000_000]] as const) {
+        if (rawBudget[used] === undefined && rawBudget[limit] === undefined) continue;
+        if (![used, limit].every(key => Number.isSafeInteger(rawBudget[key]) && Number(rawBudget[key]) >= 0 && Number(rawBudget[key]) <= maximum)
+          || Number(rawBudget[used]) > Number(rawBudget[limit])) valid = false;
+        else { budget[used] = Number(rawBudget[used]); budget[limit] = Number(rawBudget[limit]); }
+      }
+      if (valid) line.tableRetryBudget = budget;
+    }
     if (isRecord(rawLine.tableDiagnostics)) {
       const { status, mapped, unsafe } = rawLine.tableDiagnostics;
       if (["disabled", "unavailable", "applied", "partial", "no_structure", "failed"].includes(String(status))

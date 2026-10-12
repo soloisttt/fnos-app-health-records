@@ -300,6 +300,7 @@ export type ReportPage = {
   width: number | null;
   height: number | null;
   rotation: number;
+  ocrStale: boolean;
   sourcePageNumber: number | null;
   sourcePageCount: number | null;
   hasThumbnail: boolean | number;
@@ -313,7 +314,7 @@ export type ProcessingJob = {
   jobType: "pdf_extract" | "thumbnail" | "ocr" | "ai_extract";
   pipelineVersion: string;
   batchId: string;
-  batchKind: "initial_upload" | "manual_reprocess" | "manual_ai" | "page_append";
+  batchKind: "initial_upload" | "manual_reprocess" | "manual_ai" | "page_append" | "page_orientation";
   batchStartedAt: string;
   batchSequence: number;
   status: "queued" | "processing" | "completed" | "failed" | "cancelled";
@@ -346,6 +347,7 @@ export type ProcessingJob = {
   unmatchedCandidates?: number | null;
   /* AI 整理完成事件携带的规划期信号：表格序号断档页（可能有整行未参与解析） */
   tableSerialGapPages?: number[];
+  layoutWarnings?: Array<{pageNumber:number;uncoveredResults:number;uncertainRows:number;pendingVisualResults?:number;ocrUnresolved?:number;ocrUnretried?:number}>;
 };
 
 export type ProcessingJobEvent = {
@@ -507,6 +509,7 @@ export type OcrPageDetail = {
   modelVersion: string | null;
   coordWidth: number | null;
   coordHeight: number | null;
+  orientationChanged: boolean;
   lines: OcrLineDetail[];
 };
 
@@ -557,6 +560,7 @@ export type Observation = {
   displayCategory: "standardized" | "medical_candidate" | "technical_measurement" | "qualitative_finding" | "governance_noise";
   displayReason: string | null;
   manualReviewed?: boolean;
+  requiresVisualReview?: boolean;
   manualCreated?: boolean;
   manualCanonicalKey?: string | null;
 };
@@ -1154,6 +1158,7 @@ export type ReportStructuredSection = {
 };
 
 export type ReportDetail = ReportSummary & {
+  sourceVersion: number;
   pageAppend?: {originalRevision:number;recognizedRevision:number|null;state:string;reviewWarnings?:string[]};
   createdAt: string;
   updatedAt: string;
@@ -1350,9 +1355,10 @@ export type CaseEpisodeDetail = {
 
 export type AppNotification = {
   id: string;
-  memberId: string;
+  memberId: string | null;
   reportId: string | null;
-  type: "report_processed" | "report_failed";
+  type: "report_processed" | "report_failed" | "feedback_updated";
+  feedbackNumber?: string;
   title: string;
   message: string | null;
   severity: "info" | "success" | "warning" | "error";

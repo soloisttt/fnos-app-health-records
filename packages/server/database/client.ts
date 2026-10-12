@@ -1,5 +1,6 @@
 import { ensureReportDuplicateDraft } from "./report-duplicate-draft";
 import { ensurePageAppendDraft } from "./page-append-draft";
+import { ensurePageOrientationDraft } from "./page-orientation-draft";
 import { ensureMemberSharingDraft } from "./member-sharing-draft";
 import { ensureCaseEpisodeDraft } from "./case-episode-draft";
 import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
@@ -239,6 +240,7 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     ensureLocalAccountColumns(db);
     ensureMemberSharingDraft(db);
     ensurePageAppendDraft(db);
+    ensurePageOrientationDraft(db);
     ensureReportDuplicateDraft(db);
     ensureCaseEpisodeDraft(db);
     ensureObservationFieldOverrideSchema(db);
@@ -260,6 +262,12 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     unreleasedSchemaVersion = currentVersion;
     return;
   }
+  if (hasMigrationTable && currentVersion >= 18) {
+    const recorded = db.prepare("SELECT checksum FROM schema_migrations WHERE version = 18").get() as { checksum: string } | undefined;
+    if (recorded && recorded.checksum !== "manual:018-preserve-ocr-page-orientation") {
+      throw new Error("Database schema v18 conflicts with an earlier development migration; preserve the database and use a separately reviewed compatibility procedure.");
+    }
+  }
   if (currentVersion === 0 && tableExists(db, "reports")) {
     currentVersion = 1;
   }
@@ -269,7 +277,7 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
 
   const pendingMigrations = databaseMigrations.filter((migration) => migration.version > currentVersion);
   // Complete older v17 test drafts without renumbering their existing records.
-  if (!tableExists(db, "examination_duplicate_decisions") || !tableExists(db, "report_examinations") || !tableExists(db, "observation_examinations") || !tableExists(db, "morphology_finding_examinations") || !tableExists(db, "report_examination_state") || !tableExists(db, "report_duplicate_runtime") || !tableColumnNames(db,"report_duplicate_runtime").has("continue_job_id") || !tableExists(db, "report_page_appends") || !tableColumnNames(db,"report_page_appends").has("confirmation_hash") || !tableColumnNames(db,"report_page_appends").has("input_hash") || !tableColumnNames(db,"report_page_append_files").has("error_message") || !tableExists(db, "file_gc_members") || !tableColumnNames(db, "member_permissions").has("can_manage_sharing") || pendingMigrations.length || !tableExists(db, "indicator_groups") || !tableExists(db, "indicator_group_members") || !tableExists(db, "report_notes") || !tableExists(db, "report_note_assets") || !tableExists(db, "upload_receipts")
+  if (!tableExists(db, "feedback_sync_state") || !tableExists(db, "feedback_notifications") || !tableExists(db, "feedback_notification_reads") || !tableExists(db, "examination_duplicate_decisions") || !tableExists(db, "report_examinations") || !tableExists(db, "observation_examinations") || !tableExists(db, "morphology_finding_examinations") || !tableExists(db, "report_examination_state") || !tableExists(db, "report_duplicate_runtime") || !tableColumnNames(db,"report_duplicate_runtime").has("continue_job_id") || !tableExists(db, "report_page_appends") || !tableColumnNames(db,"report_page_appends").has("confirmation_hash") || !tableColumnNames(db,"report_page_appends").has("input_hash") || !tableColumnNames(db,"report_page_append_files").has("error_message") || !tableExists(db, "file_gc_members") || !tableColumnNames(db, "member_permissions").has("can_manage_sharing") || !tableColumnNames(db, "report_pages").has("ocr_rotation") || pendingMigrations.length || !tableExists(db, "indicator_groups") || !tableExists(db, "indicator_group_members") || !tableExists(db, "report_notes") || !tableExists(db, "report_note_assets") || !tableExists(db, "upload_receipts")
     || !tableExists(db, "institution_trend_auto_rules") || !tableExists(db, "institution_trend_auto_decisions")) {
     backupDatabaseBeforeMigration(db, storageDir, databasePath, currentVersion, schemaVersion);
   }
@@ -303,6 +311,7 @@ function migrate(db: DatabaseSync, storageDir: string, databasePath: string) {
     ensureLocalAccountColumns(db);
     ensureMemberSharingDraft(db);
     ensurePageAppendDraft(db);
+    ensurePageOrientationDraft(db);
     ensureReportDuplicateDraft(db);
     ensureCaseEpisodeDraft(db);
     ensureObservationFieldOverrideSchema(db);

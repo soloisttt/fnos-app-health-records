@@ -9,21 +9,26 @@ import {
   detectTableSerialGapPages,
   executeAiExtractionPlan,
   mergeAiExtractionResults,
-  visionReviewCandidates
+  visionReviewCandidates,
+  finalLayoutWarnings,
+  withoutSupersededOcrObservations
 } from "../services/ai-extraction-orchestrator.service.ts";
-import { buildAiExtractionPlan, type AiExtractionPlan, type PlannedOcrLine } from "../services/ai-input-planner.service.ts";
+import { buildAiExtractionPlan, rebuildOcrPages, planRebuiltOcrPages, type AiExtractionPlan, type PlannedOcrLine } from "../services/ai-input-planner.service.ts";
 import { listProcessingJobs } from "../services/upload.service.ts";
 import { buildProcessingJobDiagnostics } from "../services/processing-job-diagnostics.service.ts";
+import { medicationLayouts } from "./fixtures/medication-layouts.ts";
 import {
   deduplicateReportMorphologyFindings,
   deduplicateReportObservations,
   normalizeAiExtraction,
   persistAiExtraction,
+  promptForInput,
   sanitizeReportObservations,
   aiExtractionPromptVersion,
   type AiExecutor,
   type AiExtractionResult,
-  type AiMorphologyFinding
+  type AiMorphologyFinding,
+  type AiObservation
 } from "../services/ai-extraction.service.ts";
 
 const ultrasoundMorphologyGolden = JSON.parse(readFileSync(
@@ -159,6 +164,49 @@ test('paired project groups accept their own AI results and reject cross-group s
     assert.equal(execution.result.fields.observations.length, 2);
     assert.ok((execution.result.evidenceValidation?.rejectedObservations || 0) >= 1);
     assert.equal(execution.result.fields.observations.find(item => item.itemName === '合成项目甲')?.numericValue, 12);
+  });
+});
+
+test('coordinate panel fallback persists complete source facts and rejects borrowed or conflicting AI values', async () => {
+  await withReport(1, async ({ reportId, jobId }) => {
+    const raw = [
+      ['项目名称', '结果', '参考值', '单位', '项目名称', '单位', '结果', '参考值'],
+      ['合成项目甲', '12', '0-99', 'U/L', '合成项目乙', 'mg/L', '24', '0-88'],
+      ['缺值项目', '', '0-77', 'U/L', '无单位项目', '', '0', ''],
+      ['冲突项目', '13', '0-66', 'U/L', '带箭头项目', '', '↑36', ''],
+    ].flatMap((cells, row) => cells.flatMap((text, col) => text ? [{
+      id: `panel-${row}-${col}`, text, confidence: .99, tableUnsafe: true,
+      box: [col * 180, row * 40, col * 180 + 100, row * 40 + 22],
+    }] : []));
+    raw.push({ ...raw.find(line => line.id === 'panel-3-1')!, id: 'conflicting-result', text: '14' });
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=?').run(JSON.stringify(raw));
+    const executor: AiExecutor = async () => ({
+      ...emptyExtractionResult(),
+      ...normalizeAiExtraction({ observations: [
+        { itemName:'合成项目甲',resultText:'12',numericValue:12,unit:'mg/L',referenceLow:10,referenceHigh:88,evidence:[{pageNumber:1,quote:'合成项目甲 12'}] },
+        { itemName:'无单位项目',resultText:'0',numericValue:0,unit:'U/L',referenceHigh:50,evidence:[{pageNumber:1,quote:'无单位项目 0'}] },
+        { itemName:'合成项目甲',resultText:'24',numericValue:24,evidence:[{pageNumber:1,quote:'合成项目甲 24'}] },
+        { itemName:'缺值项目',resultText:'77',numericValue:77,evidence:[{pageNumber:1,quote:'缺值项目 0-77'}] },
+        { itemName:'冲突项目',resultText:'13',numericValue:13,evidence:[{pageNumber:1,quote:'冲突项目 13 14'}] },
+      ] }),
+    });
+    const execution = await executeAiExtractionPlan(jobId, reportId, executor);
+    const observations = execution.result.fields.observations;
+    assert.deepEqual(observations.map(item => [item.itemName,item.numericValue]).sort(), [
+      ['合成项目甲',12],['合成项目乙',24],['无单位项目',0],['带箭头项目',36],
+    ].sort());
+    assert.ok((execution.result.evidenceValidation?.rejectedObservations || 0) >= 3);
+    assert.equal(observations.find(item => item.itemName === '无单位项目')?.unit, null);
+    assert.equal(observations.find(item => item.itemName === '无单位项目')?.referenceHigh, null);
+    assert.equal(observations.find(item => item.itemName === '合成项目甲')?.unit, 'U/L');
+    assert.equal(observations.find(item => item.itemName === '合成项目甲')?.referenceHigh, 99);
+    persistAiExtraction(reportId, jobId, execution.result, execution.inputCharacters);
+    const stored = getDatabase().prepare('SELECT item_name AS name,numeric_value AS value,evidence_json AS evidence FROM observations WHERE report_id=?').all(reportId) as Array<{name:string;value:number;evidence:string}>;
+    assert.equal(stored.length,4);
+    assert.equal(stored.find(item=>item.name==='合成项目甲')?.value,12);
+    assert.ok(stored.every(item=>JSON.parse(item.evidence).every((e:{pageNumber:number})=>e.pageNumber===1)));
+    const unresolved = getDatabase().prepare("SELECT count(*) AS n FROM ai_extraction_candidates WHERE job_id=? AND status='unresolved'").get(jobId) as {n:number};
+    assert.ok(unresolved.n>=2);
   });
 });
 
@@ -1469,6 +1517,24 @@ test("blanks conflicting clinical fields instead of silently picking one when me
   }, () => ["空腹血糖 5.18 mmol/L 参考范围 3.9-6.1"]);
 });
 
+test("merges one source row quoted with different table separators instead of retaining a pending copy", async () => {
+  await withReport(1, async ({ reportId }) => {
+    const base = { sectionName: '检验', itemCode: null, itemName: '肌酸激酶', normalizedName: null,
+      resultText: '83', numericValue: 83, unit: 'U/L', referenceLow: null, referenceHigh: null,
+      referenceText: null, abnormalFlag: null, method: null } as const;
+    const observations = [
+      {...base, evidence: [{pageNumber: 1, quote: '肌酸激酶 | 83 | U/L'}]},
+      {...base, evidence: [{pageNumber: 1, quote: '肌酸激酶 83 U/L'}]}
+    ];
+    for (const rows of [observations, [...observations].reverse()]) {
+      const merged = deduplicateReportObservations(reportId, rows);
+      assert.equal(merged.length, 1);
+      assert.equal(merged[0].evidence[0].pageNumber, 1);
+      assert.match(merged[0].evidence[0].quote, /肌酸激酶/);
+    }
+  }, () => ['检验日期：2026-01-03', '肌酸激酶 | 83 | U/L']);
+});
+
 test("preserves summary and detail aliases when their examination identity cannot be verified", async () => {
   await withReport(1, async ({ reportId }) => {
     const base = {
@@ -2670,18 +2736,25 @@ test("consolidates scalar and morphology omissions into one final verification c
   ]);
 });
 
-test("routes and persists prescription facts without a separate classification request", async () => {
+for (const extractionDepth of ["overview", "detailed"] as const) {
+test(`routes and persists prescription facts in ${extractionDepth} without a separate classification request`, async () => {
   await withReport(1, async ({ reportId, jobId }) => {
+    getDatabase().prepare("UPDATE app_settings SET value_json = ? WHERE setting_key = 'ai.provider'")
+      .run(JSON.stringify({ extractionDepth }));
     let calls = 0;
     const executor: AiExecutor = async (input) => {
       calls += 1;
       assert.equal(input.primaryContentType, "prescription");
       assert.deepEqual(input.contentTypes, ["prescription"]);
       assert.equal(input.documentContentType, "prescription");
+      if (input.route === "narrative") {
+        assert.match(promptForInput(input), /处方只输出 medications/);
+        assert.match(input.text, /阿莫西林胶囊/);
+      }
       const normalized = normalizeAiExtraction({
         reportType: "prescription",
         title: "门诊处方笺",
-        medications: [{
+        medications: input.route === "narrative" ? [{
           context: "prescription",
           medicationName: "阿莫西林胶囊",
           specification: "0.25g",
@@ -2693,7 +2766,7 @@ test("routes and persists prescription facts without a separate classification r
           quantityUnit: "粒",
           p: 1,
           q: "阿莫西林胶囊 | 0.25g | 每次0.5g | 每日3次 | 口服 | 24粒"
-        }]
+        }] : []
       });
       return {
         provider: "test", model: "test", promptVersion: "test", ...normalized,
@@ -2725,6 +2798,55 @@ test("routes and persists prescription facts without a separate classification r
     "药品名称 | 规格 | 每次剂量 | 频次 | 给药途径 | 数量",
     "阿莫西林胶囊 | 0.25g | 每次0.5g | 每日3次 | 口服 | 24粒"
   ]);
+});
+}
+
+test("extracts and persists synthetic medication layouts in overview and detailed modes", async () => {
+  for (const layout of medicationLayouts) {
+    for (const extractionDepth of ["overview", "detailed"] as const) {
+      await withReport(layout.pages.length, async ({ reportId, jobId }) => {
+        getDatabase().prepare("UPDATE app_settings SET value_json = ? WHERE setting_key = 'ai.provider'")
+          .run(JSON.stringify({ extractionDepth }));
+        const context = layout.type === "inpatient" ? "discharge" : layout.type === "outpatient" ? "outpatient" : "prescription";
+        const evidence = layout.pages.flatMap((lines, index) => lines
+          .filter(line => line.includes("阿莫西林胶囊") || line.startsWith("用法："))
+          .map(quote => ({ pageNumber: index + 1, quote })));
+        const executor: AiExecutor = async input => {
+          const medicationUnit = input.route === "narrative" && input.includesMedicationContent;
+          if (medicationUnit) {
+            assert.match(promptForInput(input), /medications/);
+            assert.match(input.text, /阿莫西林胶囊/);
+          }
+          return { provider: "test", model: "test", promptVersion: "test",
+            ...normalizeAiExtraction({ medications: medicationUnit ? [{
+              medicationName: "阿莫西林胶囊", context, evidence,
+            }] : [] }), rawResponseJson: "{}", promptTokens: 0, completionTokens: 0, elapsedMs: 1 };
+        };
+        const execution = await executeAiExtractionPlan(jobId, reportId, executor);
+        assert.equal(execution.result.fields.medications.length, 1, `${layout.name}: ${extractionDepth}`);
+        persistAiExtraction(reportId, jobId, execution.result, execution.inputCharacters);
+        const stored = getDatabase().prepare("SELECT medication_context AS context,evidence_json AS evidence FROM report_medications WHERE report_id=?").all(reportId) as Array<{ context: string; evidence: string }>;
+        assert.equal(stored.length, 1);
+        assert.equal(stored[0].context, context);
+        if (layout.name === "discharge instructions on the next page") {
+          assert.deepEqual([...new Set(JSON.parse(stored[0].evidence).map((entry: { pageNumber: number }) => entry.pageNumber))].sort(), [1, 2]);
+        }
+      }, pageNumber => [...layout.pages[pageNumber - 1]]);
+    }
+  }
+});
+
+test("does not merge medication entries with different dose units or instructions", () => {
+  const results = [
+    { doseUnit: "g", instructions: "暂停" },
+    { doseUnit: "mg", instructions: "暂停" },
+    { doseUnit: "mg", instructions: "继续" },
+    { doseUnit: "mg", instructions: "继续", duration: "3天" },
+    { doseUnit: "mg", instructions: "继续", quantity: "12", quantityUnit: "粒" },
+  ].map(detail => ({ provider: "test", model: "test", promptVersion: "test",
+    ...normalizeAiExtraction({ medications: [{ medicationName: "阿莫西林胶囊", dose: "1", ...detail }] }),
+    rawResponseJson: "{}", promptTokens: 0, completionTokens: 0, elapsedMs: 1 }));
+  assert.equal(mergeAiExtractionResults([...results, results[0]]).fields.medications.length, 5);
 });
 
 test("routes and persists outpatient inpatient billing vaccination and pathology facts", async () => {
@@ -3441,4 +3563,345 @@ test('omitted multi-date table rows are recovered locally and published with ind
     const rows=getDatabase().prepare(`SELECT o.numeric_value AS value,e.occurred_at AS time FROM observations o JOIN observation_examinations l ON l.observation_id=o.id JOIN report_examinations e ON e.id=l.examination_id WHERE o.report_id=? ORDER BY e.occurred_at`).all(reportId);
     assert.deepEqual(rows.map(r=>[r.value,r.time]),[[120,'2026-09-01'],[80,'2026-09-08']]);
   },()=>['报告编号：SYNTHETIC','肝功能','项目 | 2026-09-01 | 2026-09-08 | 单位 | 参考范围','丙氨酸氨基转移酶 | 120 | 80 | U/L | 0-40']);
+});
+
+test('layout warnings follow final evidence and separate image-only additions from unresolved rows', () => {
+  const line = syntheticLine('row','合成项目甲 | 12 | U/L', {sourceLineIds:['source-result'],projectHeaderCells:['项目','结果'].map((text,index)=>({text,index,sourceLineIds:[],box:null})),tableStructureUnsafe:true});
+  const plan = syntheticPlan([{pageNumber:1,lines:[line]}]);
+  plan.pages[0].uncoveredResultCount = 1;
+  plan.pages[0].uncoveredResultSourceLineIds = ['source-result'];
+  assert.equal(finalLayoutWarnings(plan,emptyExtractionResult())[0].uncoveredResults,1);
+  const resolved = {...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+    itemName:'合成项目甲',resultText:'12',numericValue:12,unit:'U/L',evidence:[{pageNumber:1,quote:line.text}],
+  }]})};
+  assert.deepEqual(finalLayoutWarnings(plan,resolved),[]);
+  resolved.fields.observations.push(normalizeAiExtraction({observations:[{
+    itemName:'合成项目乙',resultText:'阴性',evidence:[{pageNumber:1,quote:'合成项目乙 阴性',source:'vision',imageOnly:true}],
+  }]}).fields.observations[0]);
+  const warning = finalLayoutWarnings(plan,resolved)[0];
+  assert.equal(warning.pendingVisualResults,1);
+  assert.equal(warning.uncoveredResults,0);
+  assert.equal(warning.uncertainRows,0);
+});
+
+test('serial gaps trigger whole-page review and retain OCR-missed results as pending', async () => {
+  await withReport(1, async ({reportId,jobId}) => {
+    let reviewed = false;
+    const execution = await executeAiExtractionPlan(jobId,reportId,async () => emptyExtractionResult(),{
+      visionReview:async input => {
+        reviewed = true;
+        assert.ok(input.pageReviews?.some(page => page.pageNumber===1));
+        return {...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+          itemName:'合成漏行项目',resultText:'阴性',evidence:[{pageNumber:1,quote:'合成漏行项目 阴性',source:'vision',imageOnly:true}],
+        }]})};
+      },
+    });
+    assert.equal(reviewed,true);
+    assert.ok(execution.result.fields.observations.some(item => item.itemName==='合成漏行项目' && item.evidence.some(e => e.imageOnly)));
+    assert.equal(execution.layoutWarnings[0]?.pendingVisualResults,1);
+  },()=>['检验报告','项目 | 结果 | 单位 | 参考范围','1 | 指标甲 | 1.1 | U/L | 0-5','2 | 指标乙 | 2.2 | U/L | 0-5','3 | 指标丙 | 3.3 | U/L | 0-5','5 | 指标戊 | 5.5 | U/L | 0-9','6 | 指标己 | 6.6 | U/L | 0-9']);
+});
+
+test('one quoted OCR row closes only after all of its independent measurements are extracted', async () => {
+  for (const fillsSecond of [false, true]) await withReport(1, async ({reportId, jobId}) => {
+    const quote = 'ALT 12 U/L | AST 37 U/L';
+    let supplements = 0, visionCalls = 0;
+    const output = await executeAiExtractionPlan(jobId, reportId, async input => {
+      const supplement = input.promptMode === 'supplement';
+      if (supplement) supplements++;
+      const second = supplement && fillsSecond;
+      return {...emptyExtractionResult(), ...normalizeAiExtraction({observations:[{
+        itemName:second?'AST':'ALT',resultText:second?'37':'12',numericValue:second?37:12,unit:'U/L',
+        evidence:[{pageNumber:1,quote}],
+      }]})};
+    }, {visionReview:async()=>{visionCalls++;return null;}});
+    assert.equal(supplements, 1, 'a quoted multi-item line still needs its second item');
+    assert.equal(output.unmatchedCandidates, fillsSecond ? 0 : 1);
+    assert.equal(visionCalls, fillsSecond ? 0 : 1);
+    assert.deepEqual(output.result.fields.observations.map(item=>item.itemName).sort(), fillsSecond?['ALT','AST']:['ALT']);
+  }, ()=>['ALT 12 U/L | AST 37 U/L']);
+});
+
+test('equal text on a different dated page remains unresolved without evidence from that page', async () => {
+  await withReport(2, async ({reportId,jobId}) => {
+    const quote='合成独立测定甲 12 U/L';
+    let candidates: Array<{pageNumber:number}> = [];
+    const output=await executeAiExtractionPlan(jobId,reportId,async()=>({
+      ...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+        itemName:'合成独立测定甲',resultText:'12',numericValue:12,unit:'U/L',evidence:[{pageNumber:1,quote}],
+      }]}),
+    }),{visionReview:async input=>{candidates=input.candidates;return null;}});
+    assert.equal(output.unmatchedCandidates,1);
+    assert.deepEqual([...new Set(candidates.map(item=>item.pageNumber))],[2]);
+    const statuses=getDatabase().prepare('SELECT page_number AS page,status FROM ai_extraction_candidates WHERE job_id=? ORDER BY page_number').all(jobId);
+    assert.equal(statuses.find(row=>row.page===1)?.status,'ai_extracted');
+    assert.equal(statuses.find(row=>row.page===2)?.status,'unresolved');
+  }, page=>[`报告日期：2026-0${page}-01`,'合成独立测定甲 12 U/L']);
+});
+
+test('identical same-page rows use available source IDs before matching their quoted text', () => {
+  const quote = '合成独立测定甲 | 12 | U/L';
+  const plan = syntheticPlan([{pageNumber:1,tableStructureStatus:'partial',lines:[
+    syntheticLine('first',quote,{sourceLineIds:['first-name','first-result']}),
+    syntheticLine('second',quote,{sourceLineIds:['second-name','second-result']}),
+  ]}]);
+  const result = {...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+    itemName:'合成独立测定甲',resultText:'12',numericValue:12,unit:'U/L',evidence:[{pageNumber:1,quote}],
+  }]})};
+  const evidence = result.fields.observations[0].evidence[0];
+  result.fields.observations[0].evidence.push({pageNumber:1,quote});
+  for (const source of ['table-row','source-map','vision'] as const) {
+    delete evidence.table;
+    delete evidence.visionRegion;
+    if (source === 'vision') evidence.visionRegion = {candidateId:'first',sourceLineIds:['first-result'],box:null};
+    else evidence.table = {headerText:'项目 | 结果 | 单位',headerSourceLineIds:['header'],
+      rowSourceLineIds:source === 'table-row' ? ['first-name','first-result'] : [],resultColumn:null,
+      ...(source === 'source-map' ? {sourceMap:{
+        item:{text:'合成独立测定甲',sourceLineIds:['first-name'],cellIndices:[0],inherited:false},
+        result:{text:'12',sourceLineIds:['first-result'],cellIndices:[1],inherited:false},
+      }} : {}),
+    };
+    assert.deepEqual(visionReviewCandidates(plan,result).map(candidate=>candidate.line.id),['second'],source);
+  }
+  delete evidence.table;
+  delete evidence.visionRegion;
+  assert.deepEqual(visionReviewCandidates(plan,result),[],'plain text keeps its existing fallback when no source IDs exist');
+});
+
+test('low-confidence model result cells cannot bypass review through the text coordinate fallback', async () => {
+  await withReport(1,async({reportId,jobId})=>{
+    const lines=[['项目名称','结果','单位','参考范围'],['ALT','12','U/L','0-40']].flatMap((cells,row)=>cells.map((text,column)=>({
+      id:`quality-${row}-${column}`,text,confidence:row===1&&column===1?.1:.99,
+      box:[column*200,row*50,column*200+100,row*50+20],
+      tableCell:{table:'table_0',row,column,columns:4},tableUnsafe:false,
+    })));
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(lines),'page-1');
+    let reviewed=false;
+    const output=await executeAiExtractionPlan(jobId,reportId,async()=>({...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+      itemName:'ALT',resultText:'12',numericValue:12,unit:'U/L',evidence:[{pageNumber:1,quote:'ALT | 12 | U/L | 0-40'}],
+    }]})}),{visionReview:async()=>{reviewed=true;return null;}});
+    assert.equal(output.result.fields.observations.length,0);
+    assert.equal(output.unmatchedCandidates,1);
+    assert.equal(reviewed,true);
+  });
+});
+
+test('low-confidence synthetic measurements stay unresolved through deterministic fallback', async () => {
+  await withReport(1,async({reportId,jobId})=>{
+    const raw=[
+      {id:'heading',text:'人体成分分析报告',confidence:.99,box:[0,0,250,20]},
+      {id:'name',text:'身高',confidence:.99,box:[300,80,380,100]},
+      {id:'value',text:'170cm',confidence:.45,box:[300,50,380,70]},
+    ];
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(raw),'page-1');
+    let calls=0;
+    const output=await executeAiExtractionPlan(jobId,reportId,async()=>emptyExtractionResult(),{
+      visionReview:async input=>{calls++;assert.ok(input.candidates.some(candidate=>candidate.line.lowConfidenceFields?.includes('result')));return null;},
+    });
+    assert.equal(output.result.fields.observations.length,0);
+    assert.equal(calls,1);
+    assert.equal(output.unmatchedCandidates,1);
+  });
+});
+
+test('a verified visual name correction replaces only its own OCR occurrence', async () => {
+  await withReport(1,async({reportId,jobId})=>{
+    const raw=[['项目名称','结果','单位'],['Y-谷氨酰转肽酶','36.7','U/L'],['Y-谷氨酰转肽酶','41.2','U/L']]
+      .flatMap((cells,row)=>cells.map((text,column)=>({id:`same-${row}-${column}`,text,confidence:.99,
+        box:[column*250,row*60,column*250+200,row*60+20]})));
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(raw),'page-1');
+    const output=await executeAiExtractionPlan(jobId,reportId,async()=>({...emptyExtractionResult(),...normalizeAiExtraction({observations:[36.7,41.2].map(value=>({
+      itemName:'Y-谷氨酰转肽酶',resultText:String(value),numericValue:value,unit:'U/L',
+      evidence:[{pageNumber:1,quote:`Y-谷氨酰转肽酶 | ${value} | U/L`}],
+    }))})}),{visionReview:async input=>{
+      const selected=input.candidates.find(candidate=>candidate.line.text.includes('36.7'))!;
+      assert.ok(selected.line.nameReviewCandidate);
+      return {...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+        itemName:'γ-谷氨酰转肽酶',resultText:'36.7',numericValue:36.7,unit:'U/L',
+        evidence:[{pageNumber:1,quote:selected.line.text,source:'vision',nameCorrected:true,
+          visionRegion:{candidateId:selected.line.id,sourceLineIds:selected.line.sourceLineIds,box:selected.line.box}}],
+      }]})};
+    }});
+    assert.deepEqual(output.result.fields.observations.map(item=>[item.itemName,item.numericValue]).sort((a,b)=>Number(a[1])-Number(b[1])),[
+      ['γ-谷氨酰转肽酶',36.7],['Y-谷氨酰转肽酶',41.2],
+    ]);
+    assert.equal(output.result.fields.observations.find(item=>item.itemName.startsWith('γ'))?.evidence[0].nameCorrected,true);
+  });
+});
+
+test('OCR unresolved and unattempted counts remain separate in existing final layout warnings', () => {
+  const plan=syntheticPlan([{pageNumber:1,lines:[]}]);
+  plan.pages[0].ocrRetryRemaining=2;
+  plan.pages[0].ocrRetryUnresolved=3;
+  assert.deepEqual(finalLayoutWarnings(plan,emptyExtractionResult()),[{
+    pageNumber:1,uncoveredResults:0,uncertainRows:0,pendingVisualResults:0,ocrUnretried:2,ocrUnresolved:3,
+  }]);
+  plan.pages[0].ocrRetryRemaining=0;
+  plan.pages[0].ocrRetryUnresolved=0;
+  assert.deepEqual(finalLayoutWarnings(plan,emptyExtractionResult()),[]);
+});
+
+test('numbered continuation tables use their printed interval and independent header sources', async () => withReport(1, async () => {
+  const makePage=(texts:string[])=>({pageId:'page',pageNumber:1,linesJson:JSON.stringify(texts.map((text,index)=>({id:`l${index}`,text,confidence:1})))});
+  const header='项目 | 结果 | 单位';
+  const plan=(texts:string[])=>planRebuiltOcrPages('serial-regression',rebuildOcrPages([makePage(texts)]),'detailed');
+  assert.deepEqual(detectTableSerialGapPages(plan([header,'11 | 合成测定甲 | 12 | U/L','12 | 合成测定乙 | 13 | U/L','13 | 合成测定丙 | 14 | U/L'])),[]);
+  assert.deepEqual(detectTableSerialGapPages(plan([header,'1 | 合成测定甲 | 12 | U/L','3 | 合成测定乙 | 13 | U/L','4 | 合成测定丙 | 14 | U/L',
+    header,'1 | 合成测定丁 | 22 | U/L','2 | 合成测定戊 | 23 | U/L','3 | 合成测定己 | 24 | U/L'])),[1]);
+}));
+
+test('remaining OCR retry work triggers existing whole-page review without changing table status', async () => {
+  await withReport(1,async({reportId,jobId})=>{
+    const db=getDatabase();
+    const row=db.prepare('SELECT lines_json AS lines FROM ocr_results WHERE page_id=?').get('page-1') as {lines:string};
+    const lines=JSON.parse(row.lines);
+    lines[0].tableRetryBudget={rowCandidates:3,rowRetried:2,rowRemaining:1,cellCandidates:0,cellRetried:0,cellRemaining:0};
+    db.prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(lines),'page-1');
+    let pages:number[]=[];
+    const output=await executeAiExtractionPlan(jobId,reportId,async()=>emptyExtractionResult(),{visionReview:async input=>{
+      pages=(input.pageReviews||[]).map(page=>page.pageNumber);return null;
+    }});
+    assert.equal(output.plan.pages[0].ocrRetryRemaining,1);
+    assert.equal(output.plan.pages[0].tableStructureStatus,null);
+    assert.deepEqual(pages,[1]);
+  },()=>['项目 | 结果 | 单位','ALT | 12 | U/L']);
+});
+
+
+test('visual name replacement preserves other acquisitions, results, units and ambiguous source quotes', () => {
+  const quote = 'Y-谷氨酰转肽酶 | 36.7 | 41.2 | U/L';
+  const line = syntheticLine('same-source', quote, {sourceLineIds:['name','admission','discharge'],
+    nameReviewCandidate:{originalName:'Y-谷氨酰转肽酶',suggestedName:'γ-谷氨酰转肽酶',canonicalKey:'ggt',sourceLineIds:['name']}});
+  const plan=syntheticPlan([{pageNumber:1,lines:[line]}]);
+  const original=normalizeAiExtraction({observations:[{itemName:'Y-谷氨酰转肽酶',resultText:'36.7',numericValue:36.7,unit:'U/L',
+    examination:{timeText:'入院'},evidence:[{pageNumber:1,quote}]}]}).fields.observations[0];
+  const corrected:AiObservation={...original,itemName:'γ-谷氨酰转肽酶',evidence:[{pageNumber:1,quote,source:'vision',nameCorrected:true,
+    visionRegion:{candidateId:line.id,sourceLineIds:line.sourceLineIds,box:null}}]};
+  const variants:Partial<AiObservation>[]=[
+    {examination:{timeText:'出院'}}, {examination:{timeText:'入院',specimen:'尿液'}},
+    {examination:{timeText:'入院',method:'方法乙'}}, {method:'方法乙'},
+    {resultText:'41.2',numericValue:41.2}, {unit:'mU/L'},
+  ];
+  for (const variant of variants) {
+    const other={...original,...variant};
+    assert.deepEqual(withoutSupersededOcrObservations(plan,[original,other,corrected]),[other,corrected],JSON.stringify(variant));
+  }
+  plan.pages[0].lines.push(syntheticLine('same-text',quote,{sourceLineIds:['other-name','other-result']}));
+  assert.equal(withoutSupersededOcrObservations(plan,[original,corrected]).length,2,'an unlocated duplicate quote cannot be removed');
+  original.evidence[0].table={headerText:'项目 | 入院 | 出院 | 单位',headerSourceLineIds:[],rowSourceLineIds:line.sourceLineIds,resultColumn:null};
+  assert.deepEqual(withoutSupersededOcrObservations(plan,[original,corrected]),[corrected],'explicit origin disambiguates equal printed rows');
+});
+
+test('region-anchored single-result visual corrections replace OCR values and units through final fallback', async () => {
+  for (const [value,unit] of [[17,'U/L'],[12,'mU/L']] as const) await withReport(1,async({reportId,jobId})=>{
+    const db=getDatabase();
+    const raw=JSON.parse((db.prepare('SELECT lines_json AS lines FROM ocr_results WHERE page_id=?').get('page-1') as {lines:string}).lines);
+    raw[0].tableRetryBudget={rowUnresolved:1};
+    db.prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(raw),'page-1');
+    const plan=buildAiExtractionPlan(reportId);
+    const line=plan.pages[0].lines.find(line=>line.localObservations.length===1)!;
+    assert.ok(line);
+    const result=await executeAiExtractionPlan(jobId,reportId,async()=>emptyExtractionResult(),{visionReview:async()=>({
+      ...emptyExtractionResult(),...normalizeAiExtraction({observations:[{itemName:'ALT',resultText:String(value),numericValue:value,unit,
+        evidence:[{pageNumber:1,quote:line.text,source:'vision',visionRegion:{candidateId:line.id,sourceLineIds:line.sourceLineIds,box:line.box}}]}]}),
+    })});
+    assert.deepEqual(result.result.fields.observations.map(item=>[item.numericValue,item.unit]),[[value,unit]]);
+    assert.equal(result.result.fields.observations[0].evidence[0].source,'vision');
+    persistAiExtraction(reportId,jobId,result.result,result.inputCharacters);
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM observations WHERE report_id=?').get(reportId) as {count:number}).count,1);
+  },()=>['项目名称 | 结果 | 单位','ALT | 12 | U/L']);
+});
+
+test('visual value replacement never crosses result columns, examination identity or missing image anchors', async () => {
+  await withReport(1,async({reportId})=>{
+    const plan=buildAiExtractionPlan(reportId);
+    const line=plan.pages[0].lines.find(line=>line.localObservations.length===1)!;
+    const original=normalizeAiExtraction({observations:[{itemName:'ALT',resultText:'12',numericValue:12,unit:'U/L',evidence:[{pageNumber:1,quote:line.text}]}]}).fields.observations[0];
+    const corrected:AiObservation={...original,resultText:'17',numericValue:17,evidence:[{pageNumber:1,quote:line.text,source:'vision',
+      visionRegion:{candidateId:line.id,sourceLineIds:line.sourceLineIds,box:line.box}}]};
+    for (const examination of [{timeText:'复查'},{specimen:'尿液'},{method:'方法乙'}]) {
+      assert.equal(withoutSupersededOcrObservations(plan,[original,{...corrected,examination}]).length,2);
+    }
+    assert.equal(withoutSupersededOcrObservations(plan,[original,{...corrected,method:'方法乙'}]).length,2);
+    assert.equal(withoutSupersededOcrObservations(plan,[original,{...corrected,evidence:[{pageNumber:1,quote:line.text,source:'vision',imageOnly:true}]}]).length,2);
+    const originalEvidence=original.evidence[0];
+    originalEvidence.table={headerText:'项目 | 结果 | 单位',headerSourceLineIds:[],rowSourceLineIds:line.sourceLineIds,
+      resultColumn:{index:99,headerText:'另一结果列',selectionBasis:'explicit_current_result_header'}};
+    assert.equal(withoutSupersededOcrObservations(plan,[original,corrected]).length,2);
+    delete originalEvidence.table;
+    line.localObservationCandidates=[...line.localObservations,{...line.localObservations[0],examination:{timeText:'复查'},resultText:'22',numericValue:22}];
+    assert.equal(withoutSupersededOcrObservations(plan,[original,corrected]).length,2,'multiple acquisitions require per-result provenance');
+  },()=>['项目名称 | 结果 | 单位','ALT | 12 | U/L']);
+});
+
+
+test('merging equal OCR and visual results preserves image review evidence and acquisition identity', () => {
+  const quote='合成测定甲 | 12 | U/L';
+  const base=normalizeAiExtraction({observations:[{itemName:'合成测定甲',resultText:'12',numericValue:12,unit:'U/L',
+    examination:{timeText:'入院'},evidence:[{pageNumber:1,quote}]}]}).fields.observations[0];
+  const visual={...base,evidence:[{pageNumber:1,quote,source:'vision' as const,nameCorrected:true,
+    visionRegion:{candidateId:'row',sourceLineIds:['result'],box:null}}]};
+  const result=(observations:AiObservation[])=>({...emptyExtractionResult(),...normalizeAiExtraction({observations})});
+  const merged=mergeAiExtractionResults([result([base]),result([visual])]);
+  assert.equal(merged.fields.observations.length,1);
+  assert.ok(merged.fields.observations[0].evidence.some(evidence=>evidence.source==='vision'&&evidence.nameCorrected&&evidence.visionRegion));
+  for (const variant of [{examination:{timeText:'出院'}},{examination:{timeText:'入院',specimen:'尿液'}},
+    {examination:{timeText:'入院',method:'方法乙'}},{method:'方法乙'}]) {
+    assert.equal(mergeAiExtractionResults([result([base]),result([{...visual,...variant}])]).fields.observations.length,2,JSON.stringify(variant));
+  }
+});
+
+test('ambiguous OCR numeric cells never become a numeric fragment or close before regional visual review', async () => {
+  for (const [printed, corrected, useVision, suppliedNumber] of [
+    ['O.12',0.12,false,null],['O.12',0.12,true,null],['1O.2',10.2,true,2],
+  ] as const) await withReport(1,async({reportId,jobId})=>{
+    const cells=['合成检测项甲',printed,'U/L'].map((text,index)=>({id:`ambiguous-${index}`,text,confidence:.999,
+      box:[index*250,50,index*250+180,75]}));
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=? WHERE page_id=?').run(JSON.stringify(cells),'page-1');
+    const quote=`合成检测项甲 | ${printed} | U/L`;
+    let visualCalls=0;
+    const execution=await executeAiExtractionPlan(jobId,reportId,async()=>({...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+      itemName:'合成检测项甲',resultText:printed,numericValue:suppliedNumber,unit:'U/L',evidence:[{pageNumber:1,quote}],
+    }]})}),{visionReview:async input=>{
+      visualCalls++;
+      assert.ok(input.result.fields.observations.every(item=>item.numericValue===null),'a digit tail/prefix is not a measured number');
+      const selected=input.candidates.find(candidate=>candidate.line.text===quote);
+      assert.ok(selected,'echoing the uncertain OCR cell must not suppress the region candidate');
+      assert.equal(selected.line.ocrResultAmbiguous,true);
+      if (!useVision) return null;
+      return {...emptyExtractionResult(),...normalizeAiExtraction({observations:[{
+        itemName:'合成检测项甲',resultText:String(corrected),numericValue:corrected,unit:'U/L',
+        evidence:[{pageNumber:1,quote,source:'vision',visionRegion:{candidateId:selected.line.id,sourceLineIds:selected.line.sourceLineIds,box:selected.line.box}}],
+      }]})};
+    }});
+    assert.equal(visualCalls,1);
+    assert.equal(execution.unmatchedCandidates,useVision?0:1);
+    assert.equal(execution.result.fields.observations.length,1);
+    assert.equal(execution.result.fields.observations[0].numericValue,useVision?corrected:null);
+    assert.equal(execution.result.fields.observations[0].resultText,useVision?String(corrected):printed);
+    persistAiExtraction(reportId,jobId,execution.result,execution.inputCharacters);
+    const stored=getDatabase().prepare('SELECT numeric_value AS value FROM observations WHERE report_id=?').all(reportId);
+    assert.deepEqual(stored.map(row=>row.value),[useVision?corrected:null]);
+  });
+});
+
+test('table ordinals are cleaned after trusted evidence is restored at persistence', async () => {
+  await withReport(1,async({reportId,jobId})=>{
+    const raw=[['项目','结果','参考区间','单位'],['8合成项目[SYN]','12','0-10','U/L']]
+      .flatMap((cells,row)=>cells.map((text,col)=>({id:`synthetic-${row}-${col}`,text,confidence:.99,
+        box:[col*220,row*60,col*220+150,row*60+20]})));
+    getDatabase().prepare('UPDATE ocr_results SET lines_json=?').run(JSON.stringify(raw));
+    const executor:AiExecutor=async()=>({provider:'test',model:'test',promptVersion:'test',rawResponseJson:'{}',promptTokens:0,completionTokens:0,elapsedMs:0,...normalizeAiExtraction({observations:[{
+      itemName:'8合成项目[SYN]',resultText:'12',numericValue:12,unit:'U/L',referenceLow:0,referenceHigh:10,referenceText:'0-10',
+      evidence:[{pageNumber:1,quote:'8合成项目[SYN] | 12'}],
+    }]})});
+    const execution=await executeAiExtractionPlan(jobId,reportId,executor,{visionReview:async()=>null});
+    persistAiExtraction(reportId,jobId,execution.result,execution.inputCharacters);
+    const rows=getDatabase().prepare('SELECT item_name AS name,item_code AS code,evidence_json AS evidence,display_abnormal_flag AS flag FROM observations WHERE report_id=?').all(reportId) as Array<{name:string;code:string;evidence:string;flag:string|null}>;
+    assert.equal(rows.length,1);
+    assert.equal(rows[0].name,'合成项目');
+    assert.equal(rows[0].code,'SYN');
+    assert.match(rows[0].evidence,/8合成项目/);
+    assert.equal(rows[0].flag,'high');
+  });
 });

@@ -176,6 +176,11 @@
   .datetime-wheel-item { font-size: 15px; }
 }
 
+/* When the viewport is shorter than the picker, keep all controls reachable. */
+@media (min-width: 761px) {
+  .datetime-picker-panel { overflow-y: auto; overscroll-behavior: contain; }
+}
+
 /*
  * PC（宽屏+精确指针）下面板按桌面弹层尺寸收紧：
  * 宽度 460→340、滚轮区 280→232，居中偏移同步折算

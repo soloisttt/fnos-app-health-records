@@ -2,7 +2,7 @@
   "$schema": "../schemas/indicators.schema.json",
   "formatVersion": 1,
   "layer": "core",
-  "revision": 17,
+  "revision": 18,
   "indicators": [
     {
       "canonicalKey": "cbc_wbc",
@@ -2350,6 +2350,36 @@
         "糖代谢"
       ],
       "explanation": "表示非固定空腹或餐后时点测得的血糖。"
+    },
+    {
+      "canonicalKey": "insulin_fasting",
+      "displayName": "空腹胰岛素",
+      "categoryKey": "glucose_metabolism",
+      "order": 32,
+      "kind": "quantitative",
+      "valueType": "numeric",
+      "specimen": null,
+      "defaultUnit": null,
+      "unitDimension": "other",
+      "aliases": [
+        "空腹胰岛素",
+        "空腹胰岛素测定",
+        "胰岛素(空腹)",
+        "胰岛素空腹"
+      ],
+      "allowedUnits": [
+        "μU/mL",
+        "μIU/mL",
+        "mIU/L",
+        "pmol/L"
+      ],
+      "sectionHints": [
+        "空腹",
+        "糖代谢",
+        "胰岛功能",
+        "胰岛素释放试验"
+      ],
+      "explanation": "明确标注空腹条件的胰岛素结果；与餐后或其他时点分开，不跨单位或检测方法自动换算。"
     },
     {
       "canonicalKey": "electrolyte_chloride",

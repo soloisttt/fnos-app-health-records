@@ -8,6 +8,7 @@ export type ConfirmOptions = {
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
+  choice?: { label: string; checked: boolean; change: (checked: boolean) => Promise<string> };
   run: () => Promise<void> | void;
 };
 
@@ -40,5 +41,18 @@ export function useConfirm() {
       if (state.value === current) current.loading = false;
     }
   }
-  return { state: readonly(state), ask, cancel, confirm };
+  async function choose(checked: boolean) {
+    const current = state.value;
+    if (!current?.choice || current.loading) return;
+    current.loading = true;
+    try {
+      const message = await current.choice.change(checked);
+      if (state.value === current) { current.message = message; current.choice.checked = checked; }
+    } catch (cause) {
+      useToast().show(cause instanceof Error ? cause.message : '预检失败，请重试', 3600);
+    } finally {
+      if (state.value === current) current.loading = false;
+    }
+  }
+  return { state: readonly(state), ask, cancel, confirm, choose };
 }

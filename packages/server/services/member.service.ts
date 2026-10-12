@@ -27,7 +27,7 @@ type PermissionInput = {
   version?: unknown;
 };
 
-function requireAuthenticated(user: RequestUser) {
+export function requireAuthenticated(user: RequestUser) {
   if (!user.authenticated) throw createError({ statusCode: 401, statusMessage: "请先登录" });
 }
 
@@ -319,7 +319,10 @@ export function listMemberSharingAccounts(user: RequestUser, memberId: string) {
     SELECT u.id, u.display_name AS displayName
     FROM users u ORDER BY u.display_name, u.id
   `).all() as Array<{ id: string; displayName: string }>;
-  return accounts.filter(account => isUsableMemberAccount(account.id));
+  const usable = accounts.filter(account => isUsableMemberAccount(account.id));
+  if (getAppConfig().authMode !== 'local') return usable;
+  const username = getDatabase().prepare('SELECT username FROM local_accounts WHERE user_id = ?');
+  return usable.map(account => ({ ...account, username: (username.get(account.id) as {username: string}).username }));
 }
 function writeMemberPermission(user:RequestUser,memberId:string,input:PermissionInput) {
  const userId=typeof input.userId==='string'?input.userId:'';

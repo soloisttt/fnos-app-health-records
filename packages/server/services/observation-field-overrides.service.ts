@@ -35,6 +35,7 @@ type OverrideRow = {
   observationId: string | null;
   fieldsJson: string;
   isManualCreated: number;
+  evidenceJson?: string | null;
 };
 
 export type AppliedObservationOverride = {
@@ -47,10 +48,10 @@ function compactIdentity(value: unknown) {
   return String(value || "").normalize("NFKC").toLocaleLowerCase("zh-CN").replace(/\s+/g, "").trim();
 }
 
-export function observationSourceKey(input: EditableObservationFields & Partial<Pick<PersistableObservation, "evidence" | "method">>, reportId?: string) {
+export function observationSourceKey(input: EditableObservationFields & Partial<Pick<PersistableObservation, "evidence" | "method">>, reportId?: string, normalizeSeparators = true) {
   const evidence = (input.evidence || []).map((entry) => ({
     pageNumber: reportId ? (entry.pageId || (getDatabase().prepare("SELECT id FROM report_pages WHERE report_id=? AND page_number=?").get(reportId,Number(entry.pageNumber)||0) as {id:string}|undefined)?.id || Number(entry.pageNumber) || 0) : Number(entry.pageNumber) || 0,
-    quote: compactIdentity(entry.quote),
+    quote: normalizeSeparators ? compactIdentity(entry.quote).replace(/[|｜:：]/g, "") : compactIdentity(entry.quote),
     ...(typeof entry.examinationSourceKey==='string' ? {examinationSourceKey:entry.examinationSourceKey} : {}),
   }));
   return createHash("sha256").update(JSON.stringify({
@@ -62,6 +63,11 @@ export function observationSourceKey(input: EditableObservationFields & Partial<
   })).digest("hex");
 }
 
+function sourceKeyVariants(input: PersistableObservation, reportId: string) {
+  return [observationSourceKey(input, reportId), observationSourceKey(input),
+    observationSourceKey(input, reportId, false), observationSourceKey(input, undefined, false)];
+}
+
 function parseFields(value: string): EditableObservationFields | null {
   try {
     const parsed = JSON.parse(value) as EditableObservationFields;
@@ -71,20 +77,37 @@ function parseFields(value: string): EditableObservationFields | null {
   }
 }
 
+function savedSourceEvidence(row: Pick<OverrideRow, 'fieldsJson' | 'evidenceJson'>, reportId: string): PersistableObservation['evidence'] {
+  try {
+    const saved = JSON.parse(row.fieldsJson)._sourceEvidence;
+    const current = JSON.parse(row.evidenceJson || '[]');
+    const evidence = Array.isArray(saved) ? saved : Array.isArray(current) ? current : [];
+    return evidence.map(entry => {
+      const page = entry.pageId
+        ? getDatabase().prepare('SELECT id, page_number AS pageNumber FROM report_pages WHERE report_id=? AND id=?').get(reportId, entry.pageId)
+        : getDatabase().prepare('SELECT id, page_number AS pageNumber FROM report_pages WHERE report_id=? AND page_number=?').get(reportId, Number(entry.pageNumber) || 0);
+      return page ? {...entry, pageId: page.id, pageNumber: page.pageNumber} : entry;
+    });
+  } catch { return []; }
+}
+
 export function applyObservationFieldOverrides(
   reportId: string,
   observations: PersistableObservation[],
 ): AppliedObservationOverride[] {
   const rows = getDatabase().prepare(`
-    SELECT id, source_key AS sourceKey, observation_id AS observationId,
-      fields_json AS fieldsJson, is_manual_created AS isManualCreated
-    FROM observation_field_overrides WHERE report_id = ? ORDER BY created_at, id
+    SELECT override.id, source_key AS sourceKey, observation_id AS observationId,
+      fields_json AS fieldsJson, is_manual_created AS isManualCreated, o.evidence_json AS evidenceJson
+    FROM observation_field_overrides override LEFT JOIN observations o ON o.id=override.observation_id
+    WHERE override.report_id = ? ORDER BY override.created_at, override.id
   `).all(reportId) as OverrideRow[];
   const bySourceKey = new Map(rows.map((row) => [row.sourceKey, row]));
   const used = new Set<string>();
   const suppressed = new Set((getDatabase().prepare('SELECT source_key FROM observation_suppressions WHERE report_id=?').all(reportId) as {source_key:string}[]).map(row=>row.source_key));
-  const result = observations.filter(observation=>!suppressed.has(observationSourceKey(observation,reportId)) && !suppressed.has(observationSourceKey(observation))).map((observation) => {
-    const override = bySourceKey.get(observationSourceKey(observation,reportId)) || bySourceKey.get(observationSourceKey(observation));
+  const result = observations.filter(observation=>!sourceKeyVariants(observation, reportId).some(key => suppressed.has(key))).map((observation) => {
+    // One quote can contain several items. Only a full source identity may bind an
+    // override; unmatched manual values are retained separately below.
+    const override = sourceKeyVariants(observation, reportId).map(key => bySourceKey.get(key)).find(Boolean);
     const fields = override ? parseFields(override.fieldsJson) : null;
     if (!override || !fields || used.has(override.id)) {
       return { observation, overrideId: null, manualCreated: false };
@@ -101,7 +124,7 @@ export function applyObservationFieldOverrides(
     const fields = parseFields(row.fieldsJson);
     if (!fields) continue;
     result.push({
-      observation: { ...fields, normalizedName: null, method: "manual", evidence: [] },
+      observation: { ...fields, normalizedName: null, method: "manual", evidence: savedSourceEvidence(row, reportId) },
       overrideId: row.id,
       manualCreated: Boolean(row.isManualCreated),
     });
@@ -245,13 +268,13 @@ export function updateManualObservation(
       o.reference_text AS referenceText, o.abnormal_flag AS abnormalFlag,
       o.evidence_json AS evidenceJson, o.method, override.id AS overrideId,
       override.source_key AS sourceKey, override.canonical_key AS currentCanonicalKey,
-      override.is_manual_created AS isManualCreated
+      override.is_manual_created AS isManualCreated, override.fields_json AS fieldsJson
     FROM observations o
     LEFT JOIN observation_field_overrides override ON override.observation_id = o.id
     WHERE o.id = ? AND o.report_id = ?
   `).get(observationId, reportId) as (EditableObservationFields & {
     evidenceJson: string; method: string | null; overrideId: string | null; sourceKey: string | null;
-    currentCanonicalKey: string | null; isManualCreated: number | null;
+    currentCanonicalKey: string | null; isManualCreated: number | null; fieldsJson: string | null;
   }) | undefined;
   if (!current) throw createError({ statusCode: 404, statusMessage: "指标不存在" });
   const excluded = db.prepare("SELECT 1 FROM observation_normalizations WHERE observation_id = ? AND matched_by = 'manual_exclusion'").get(observationId);
@@ -270,6 +293,12 @@ export function updateManualObservation(
   if ((current.currentCanonicalKey || null) !== canonicalKey) changedFields.push("canonicalKey" as keyof EditableObservationFields);
   db.exec("BEGIN IMMEDIATE");
   try {
+    if (input.expectedSourceVersion !== undefined) {
+      const version = db.prepare('SELECT source_version AS version FROM reports WHERE id=?').get(reportId) as {version:number};
+      if (!Number.isInteger(input.expectedSourceVersion) || input.expectedSourceVersion !== version.version) {
+        throw createError({ statusCode: 409, statusMessage: "报告已更新，请刷新后重新校对，当前输入尚未保存" });
+      }
+    }
     const display = deriveObservationDisplayAbnormal({
       storedFlag: fields.abnormalFlag, resultText: fields.resultText, supportingText: [],
       numericValue: fields.numericValue, referenceLow: fields.referenceLow,
@@ -294,7 +323,8 @@ export function updateManualObservation(
         canonical_key = excluded.canonical_key, updated_by = excluded.updated_by,
         updated_at = CURRENT_TIMESTAMP
     `).run(
-      overrideId, reportId, sourceKey, observationId, JSON.stringify(fields), canonicalKey,
+      overrideId, reportId, sourceKey, observationId, JSON.stringify({ ...fields,
+        _sourceEvidence: savedSourceEvidence({fieldsJson:current.fieldsJson || '{}',evidenceJson:current.evidenceJson}, reportId) }), canonicalKey,
       current.isManualCreated ? 1 : 0, user.id,
     );
     db.prepare("UPDATE reports SET source_version = source_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(reportId);

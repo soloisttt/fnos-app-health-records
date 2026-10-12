@@ -20,7 +20,9 @@ const accessOpen = ref(false);
 const editingId = ref("");
 const saving = ref(false);
 const error = ref("");
-const accessUsers = ref<Array<Pick<AccessUser, "id" | "displayName">>>([]);
+type SharingAccount = Pick<AccessUser, "id" | "displayName"> & { username?: string };
+const accessUsers = ref<SharingAccount[]>([]);
+const accountLabel = (user: SharingAccount) => user.username ? `${user.displayName}（${user.username}）` : user.displayName;
 const memberAccess = ref<MemberAccess[]>([]);
 const accessMember = ref<HealthMember | null>(null);
 const selectedMemberIds = ref<string[]>([]);
@@ -55,7 +57,8 @@ async function saveBatchPermission() {
   const userId = batchUserId.value;
   const permission = batchPermission.value;
   const canManageSharing = permission === "manager" && batchSharing.value;
-  const accountName = accessUsers.value.find(account => account.id === userId)?.displayName || "";
+  const account = accessUsers.value.find(account => account.id === userId);
+  const accountName = account ? accountLabel(account) : "";
   confirmDialog.ask({
     title: "确认设置所选成员的共享权限",
     message: `将「${scopeLabel.value}」共 ${members.length} 位成员对「${accountName}」的权限统一设为${permission === "manager" ? "管理（可上传、修改和删除报告）" : permission === "viewer" ? "仅查看" : "无权限"}${canManageSharing ? "，并允许再次共享" : "，不允许再次共享"}。会覆盖该账号在所选成员上的原权限，未选成员不受影响。`,
@@ -86,15 +89,21 @@ const editorTitle = computed(() => editingId.value ? "编辑成员" : "添加家
 useScrollLock(computed(() => editorOpen.value || accessOpen.value));
 
 function onModalKeydown(event: KeyboardEvent) {
-  if (event.key !== "Escape") return;
-  if (accessOpen.value) accessOpen.value = false;
+  if (event.key !== "Escape" || confirmDialog.state.value || saving.value) return;
+  if (accessOpen.value) closeAccess();
   else if (editorOpen.value) editorOpen.value = false;
 }
 watch([editorOpen, accessOpen], ([editor, access]) => {
   if (editor || access) window.addEventListener("keydown", onModalKeydown);
   else window.removeEventListener("keydown", onModalKeydown);
 });
-onBeforeUnmount(() => window.removeEventListener("keydown", onModalKeydown));
+onBeforeUnmount(() => { ++scopeRequest; window.removeEventListener("keydown", onModalKeydown); });
+function closeAccess() {
+  if (saving.value || confirmDialog.state.value) return;
+  ++scopeRequest;
+  accessOpen.value = false;
+  scopeLoading.value = false;
+}
 
 function canManageMember(member: HealthMember) {
   return member.permission === "manager";
@@ -164,8 +173,12 @@ async function removeMember(member: HealthMember) {
 async function openAccess(member: HealthMember) {
   if (!member.canManageSharing) return;
   error.value = "";
-  ++scopeRequest;
-  scopeLoading.value = false;
+  const sequence = ++scopeRequest;
+  scopeLoading.value = true;
+  accessOpen.value = true;
+  memberAccess.value = [];
+  scopePermissions.value = {};
+  accessUsers.value = [];
   accessMember.value = member;
   selectedMemberIds.value = [member.id];
   batchUserId.value = "";
@@ -174,39 +187,56 @@ async function openAccess(member: HealthMember) {
   try {
     const [permissions, accounts] = await Promise.all([
       request<MemberAccess[]>(`members/${member.id}/permissions`),
-      request<Array<Pick<AccessUser, "id" | "displayName">>>(`members/${member.id}/sharing-accounts`)
+      request<SharingAccount[]>(`members/${member.id}/sharing-accounts`)
     ]);
+    if (sequence !== scopeRequest) return;
     memberAccess.value = permissions;
     scopePermissions.value = {[member.id]: permissions};
     accessUsers.value = accounts;
     accessOpen.value = true;
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "权限加载失败";
-  }
+    if (sequence === scopeRequest) error.value = cause instanceof Error ? cause.message : "权限加载失败";
+  } finally { if (sequence === scopeRequest) scopeLoading.value = false; }
 }
 
 function currentPermission(userId: string) {
   return memberAccess.value.find((item) => item.userId === userId)?.permission || "";
 }
 
+function changeDelegation(userId: string, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const requested = input.checked;
+  input.checked = Boolean(memberAccess.value.find(item => item.userId === userId)?.canManageSharing);
+  void changePermission(userId, 'manager', requested);
+}
 async function changePermission(userId: string, value: string, sharing=false) {
-  if (!accessMember.value || selectedMemberIds.value.length !== 1 || scopeLoading.value || !scopePermissions.value[selectedMemberIds.value[0]]) return;
+  if (!accessMember.value || saving.value || selectedMemberIds.value.length !== 1 || scopeLoading.value || !scopePermissions.value[selectedMemberIds.value[0]]) return;
+  const memberId = selectedMemberIds.value[0];
+  const version = memberAccess.value[0]?.version || 0;
+  const memberName = sharingMembers.value.find(member => member.id === memberId)?.displayName || '';
+  const account = accessUsers.value.find(user => user.id === userId);
+  const run = () => applyPermission(memberId, version, userId, value, sharing);
   if(value==='manager' || sharing || userId===app.session.value?.id) {
-    confirmDialog.ask({title:'确认修改共享权限',message:sharing?'允许该账号向其他人共享此成员的全部报告。':value==='manager'?'管理账号可上传、修改和删除报告。':'降低或撤销自己的权限可能无法再次管理该档案。',confirmText:'确认',run:()=>applyPermission(userId,value,sharing)});
+    const permission = value === 'manager' ? '管理（可上传、修改和删除报告）' : value === 'viewer' ? '仅查看' : '无权限';
+    confirmDialog.ask({title:'确认修改共享权限',message:`将「${memberName}」对「${account ? accountLabel(account) : ''}」的权限设为${permission}${sharing ? '，并允许向其他账号共享' : '，不允许再次共享'}。${userId === app.session.value?.id ? '降低或撤销自己的权限可能无法再次管理该档案。' : ''}`,confirmText:'确认',run});
     return;
   }
-  await applyPermission(userId,value,sharing);
+  await run();
 }
-async function applyPermission(userId:string,value:string,sharing:boolean) {
-  if(!accessMember.value || saving.value || scopeLoading.value || selectedMemberIds.value.length !== 1 || !scopePermissions.value[selectedMemberIds.value[0]]) return;
-  saving.value=true;
+async function applyPermission(memberId:string,version:number,userId:string,value:string,sharing:boolean) {
+  if(saving.value) return;
+  saving.value=true; error.value='';
   try {
-    memberAccess.value = await request(`members/${selectedMemberIds.value[0]}/permissions`, {
+    const permissions = await request<MemberAccess[]>(`members/${memberId}/permissions`, {
       method: "PUT",
-      body: JSON.stringify({ userId, permission: value || null,canManageSharing:sharing,version:memberAccess.value[0]?.version||0 })
+      body: JSON.stringify({ userId, permission: value || null,canManageSharing:sharing,version })
     });
+    if (selectedMemberIds.value.length === 1 && selectedMemberIds.value[0] === memberId) {
+      memberAccess.value = permissions;
+      scopePermissions.value[memberId] = permissions;
+      if (!permissions.length) accessOpen.value=false;
+    }
     await app.refreshMembers();
-    if(!memberAccess.value.length) accessOpen.value=false;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "授权失败";
   } finally {saving.value=false;}
@@ -251,7 +281,7 @@ const permissionOptions = [
       <button type="button" :aria-pressed="!showHidden" :class="{ active: !showHidden }" @click="showHidden=false">常用档案</button>
       <button type="button" :aria-pressed="showHidden" :class="{ active: showHidden }" @click="showHidden=true">已隐藏档案</button>
     </div>
-    <p v-if="!displayedMembers.length" class="member-empty">{{ showHidden ? '没有已隐藏档案' : '暂无可见档案，可添加成员或请家人共享。' }}</p>
+    <p v-if="!displayedMembers.length" class="member-empty">{{ showHidden ? '没有已隐藏档案' : '暂无可访问的档案，可添加成员或联系管理员分配权限。' }}</p>
     <div class="member-list">
       <article v-for="member in displayedMembers" :key="member.id" class="member-row">
         <span class="member-avatar" aria-hidden="true">{{ member.displayName.slice(0, 1) }}</span>
@@ -291,10 +321,10 @@ const permissionOptions = [
     </section>
   </div>
 
-  <div v-if="accessOpen" class="modal-backdrop" @click.self="accessOpen = false">
+  <div v-if="accessOpen" class="modal-backdrop" @click.self="closeAccess">
     <section class="modal-panel member-access-modal" role="dialog" aria-modal="true" aria-label="访问权限">
       <span class="sheet-grabber" aria-hidden="true"></span>
-      <header><div><ShieldCheck :size="20" /><h3>设置共享权限</h3></div><button type="button" title="关闭" @click="accessOpen = false"><X :size="19" /></button></header>
+      <header><div><ShieldCheck :size="20" /><h3>设置共享权限</h3></div><button type="button" title="关闭" @click="closeAccess"><X :size="19" /></button></header>
       <div class="sharing-scope">
         <p>成员范围 · 已选 {{ selectedMemberIds.length }} 位</p>
         <div class="sharing-member-options">
@@ -307,7 +337,7 @@ const permissionOptions = [
       <p v-if="scopeLoading" class="member-empty" role="status">正在加载所选成员权限…</p>
       <p v-else-if="!selectedMemberIds.length" class="member-empty">请至少选择一位成员。</p>
       <form v-else-if="selectedMemberIds.length > 1" class="member-form" @submit.prevent="saveBatchPermission">
-        <label><span>接收账号</span><FormSelect v-model="batchUserId" :options="accessUsers.map(user => ({value:user.id,label:user.displayName}))" placeholder="请选择账号" aria-label="接收账号" :disabled="saving" /></label>
+        <label><span>接收账号</span><FormSelect v-model="batchUserId" :options="accessUsers.map(user => ({value:user.id,label:accountLabel(user)}))" placeholder="请选择账号" aria-label="接收账号" :disabled="saving" /></label>
         <label><span>统一设置权限</span><FormSelect v-model="batchPermission" :options="permissionOptions" aria-label="批量权限" :disabled="saving" /></label>
         <label v-if="batchPermission === 'manager'" class="sharing-batch-delegation"><input v-model="batchSharing" type="checkbox" :disabled="saving" />允许管理共享（可向其他账号授权）</label>
         <p class="sharing-batch-note">将覆盖接收账号在所选成员上的原权限。提交前会再次确认；任一成员校验失败，整批不生效。</p>
@@ -317,18 +347,18 @@ const permissionOptions = [
         <p v-if="!accessUsers.length" class="member-empty">暂无可用账号，请对方先登录本应用。</p>
         <article v-for="user in accessUsers" :key="user.id">
           <span class="member-avatar small" aria-hidden="true">{{ user.displayName.slice(0, 1) }}</span>
-          <div><strong>{{ user.displayName }}</strong><span>{{ currentPermission(user.id) ? "已共享" : "尚未共享" }}</span></div>
+          <div><strong>{{ accountLabel(user) }}</strong><span>{{ currentPermission(user.id) ? "已共享" : "尚未共享" }}</span></div>
           <FormSelect
             v-if="currentPermission(user.id)"
             :model-value="currentPermission(user.id)"
             :options="permissionOptions"
-            :aria-label="`${user.displayName}的权限`"
+            :aria-label="`${accountLabel(user)}的权限`"
             class="access-select"
             :disabled="saving"
             @change="changePermission(user.id, $event)"
           />
           <button v-else class="sharing-soft-button" :disabled="saving" @click="changePermission(user.id,'viewer')">共享为仅查看</button>
-          <label class="sharing-delegation" v-if="currentPermission(user.id)==='manager'"><input type="checkbox" :disabled="saving" :checked="Boolean(memberAccess.find(item=>item.userId===user.id)?.canManageSharing)" @change="changePermission(user.id,'manager',($event.target as HTMLInputElement).checked)" /><span><strong>允许管理共享</strong><small>可向其他账号授权或撤销访问</small></span></label>
+          <label class="sharing-delegation" v-if="currentPermission(user.id)==='manager'"><input type="checkbox" :disabled="saving" :checked="Boolean(memberAccess.find(item=>item.userId===user.id)?.canManageSharing)" @change="changeDelegation(user.id, $event)" /><span><strong>允许管理共享</strong><small>可向其他账号授权或撤销访问</small></span></label>
 
         </article>
       </div>

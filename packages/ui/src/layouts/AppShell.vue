@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MemberManager from "../components/MemberManager.vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Activity, Bell, Camera, ChartNoAxesCombined, ChevronsUpDown, ClipboardList, FolderHeart, LayoutDashboard, Search, UserRound, X } from "@lucide/vue";
 import appIcon from "../assets/app-icon.png";
@@ -14,6 +14,16 @@ const route = useRoute();
 const memberSheetOpen = ref(false);
 const topbarSearchFocused = ref(false);
 const topbarSearchInput = ref<HTMLInputElement | null>(null);
+// Startup feedback sync is bounded to 30 seconds. Refresh the local badge once
+// afterwards, without polling the remote feedback service or delaying app loading.
+let startupNoticeRefresh: ReturnType<typeof setTimeout> | undefined;
+onMounted(() => {
+  if (app.session.value?.isAdmin) startupNoticeRefresh = setTimeout(() => {
+    if (app.session.value?.isAdmin) void app.refreshReminderCount();
+  }, 30000);
+});
+onBeforeUnmount(() => { if (startupNoticeRefresh) clearTimeout(startupNoticeRefresh); });
+
 
 /* 首次使用引导：管理员且 OCR/AI 未配齐时自动弹出，完成引导或配置齐全后不再出现 */
 type SetupGuideStatus = { ocrInstalled: boolean; aiConfigured: boolean; guideDismissed: boolean };
@@ -224,7 +234,7 @@ const navItems = [
         </template>
       </header>
       <main class="page-content">
-        <MemberManager v-if="!app.selectedMemberId.value && !route.path.startsWith('/me')" />
+        <MemberManager v-if="!app.selectedMemberId.value && !route.path.startsWith('/me') && route.path !== '/reminders'" />
         <RouterView v-else v-slot="{ Component }">
           <Transition name="page-fade" mode="out-in" @before-leave="savePageScroll" @enter="restorePageScroll">
             <KeepAlive :key="`${app.session.value?.id}:${app.selectedMemberId.value}:${app.accessVersion.value}`">

@@ -18,6 +18,48 @@ import {
 } from "../services/ai-input-planner.service.ts";
 import { buildAiExtractionInput } from "../services/ai-extraction.service.ts";
 import { installRemoteDictionarySnapshotForTests } from "../services/indicator-dictionary.service.ts";
+import { medicationLayouts, nonMedicationLayouts } from "./fixtures/medication-layouts.ts";
+
+test("routes medication layouts and continuation pages at both extraction depths", () => {
+  for (const layout of medicationLayouts) {
+    for (const depth of ["overview", "detailed"] as const) {
+      const plan = planRebuiltOcrPages("report", rebuildOcrPages(layout.pages.map((lines, index) =>
+        page(index + 1, [...lines]))), depth);
+      const units = plan.units.filter(unit => unit.route === "narrative" && unit.includesMedicationContent);
+      assert.ok(units.length, `${layout.name}: ${depth}`);
+      assert.deepEqual([...new Set(units.flatMap(unit => unit.pageNumbers))], layout.pages.map((_, i) => i + 1));
+      assert.match(units.map(unit => unit.text).join("\n"), /阿莫西林胶囊/);
+      if (layout.pages.length > 1) {
+        const split = splitAiExtractionUnit(plan, units[0]);
+        assert.ok(split.length);
+        assert.ok(split.every(unit => unit.includesMedicationContent));
+      }
+    }
+  }
+});
+
+test("overview does not route billing, leaflets, allergies, or unrelated following pages as medication", () => {
+  for (const lines of nonMedicationLayouts) {
+    const plan = planRebuiltOcrPages("report", rebuildOcrPages([page(1, [...lines])]), "overview");
+    assert.ok(!plan.units.some(unit => unit.route === "narrative"));
+  }
+  const pages = rebuildOcrPages([
+    page(1, ['用药清单', '阿莫西林胶囊 0.25g', '用法：口服 每日3次']),
+    page(2, ['医疗收费票据', '阿莫西林胶囊 0.25g', '总金额：12.00']),
+  ]);
+  const plan = planRebuiltOcrPages("report", pages, "overview");
+  assert.deepEqual(plan.units.filter(unit => unit.route === "narrative").flatMap(unit => unit.pageNumbers), [1]);
+});
+
+test("medication continuation requires adjacent pages and retains Chinese quantity units", () => {
+  const first = page(1, ["用药清单", "阿莫西林胶囊 24粒"]);
+  for (const [pageNumber, expected] of [[2, [1, 2]], [3, [1]]] as const) {
+    const plan = planRebuiltOcrPages("report", rebuildOcrPages([
+      first, page(pageNumber, ["维生素C片 20片"]),
+    ]), "overview");
+    assert.deepEqual(plan.units.filter(unit => unit.route === "narrative").flatMap(unit => unit.pageNumbers), expected);
+  }
+});
 
 const plannerStorageDir = mkdtempSync(
   join(tmpdir(), "health-records-ai-planner-"),
@@ -70,8 +112,9 @@ test("table structure restores cells that OCR never emitted without fabricating 
   const unsafe = raw.map(line => line.tableCell.row === 1 ? { ...line, tableCell: undefined, tableUnsafe: true } : line);
   const [fallback] = rebuildOcrPages([{ pageId: "table-page", pageNumber: 1, linesJson: JSON.stringify(unsafe) }]);
   const unsafeLine = fallback.lines.find(line => line.text.startsWith("尿比重"));
-  assert.equal(unsafeLine?.tableStructureUnsafe, true);
-  assert.deepEqual(unsafeLine?.localObservations, []);
+  assert.equal(unsafeLine?.tableStructureUnsafe, false);
+  assert.equal(unsafeLine?.localObservation?.numericValue, 1.015);
+  assert.equal(unsafeLine?.localObservation?.unit, null);
 });
 
 test("structured result columns qualify unknown numeric and textual items after abbreviation", () => {
@@ -2679,19 +2722,11 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
   assert.ok(wbcLine);
   assert.doesNotMatch(wbcLine.text, /深圳HR/);
   assert.equal(wbcLine.sourceLineIds.includes("wbc-marker"), false);
-  assert.equal(
-    wbcLine.expectedLocalObservationCount,
-    2,
-    JSON.stringify({
-      text: wbcLine.text,
-      candidate: wbcLine.candidate,
-      candidateKind: wbcLine.candidateKind,
-      role: wbcLine.role,
-      boundary: wbcLine.boundary,
-      tableHeaderText: wbcLine.tableHeaderText,
-      localObservationCount: wbcLine.localObservations.length,
-    }),
-  );
+  assert.equal(wbcLine.localObservations.length, 1);
+  assert.equal(wbcLine.sourceLineIds.includes('baso-item'), false);
+  const basoLine = reportPage.lines.find(line => line.sourceLineIds.includes('baso-item'))!;
+  assert.equal(basoLine.tableStructureUnsafe, true);
+  assert.equal(basoLine.localObservations.length, 0);
   assert.deepEqual(
     [
       byName.get("白细胞数目(WBC)")?.numericValue,
@@ -2702,8 +2737,12 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
     ],
     [5, 5.56, 1.96, 0.23, 49.1],
   );
-  assert.equal(rbcLine?.localObservations.length, 2);
-  assert.equal(byName.has("血小板体积分布宽度(PDVW)"), false);
+  assert.equal(rbcLine?.localObservations.length, 1);
+  assert.equal(rbcLine?.sourceLineIds.includes('neut-count-item'), false);
+  // Printed arrows are an abnormal flag; retain the observed number without
+  // trying to repair an outlier to a medically plausible value.
+  assert.equal(byName.get("血小板体积分布宽度(PDVW)")?.numericValue, 76);
+  assert.equal(byName.get("血小板体积分布宽度(PDVW)")?.abnormalFlag, 'high');
   assert.equal(byName.get("平均红细胞血红蛋白浓度(MCHC)")?.unit, null);
   assert.deepEqual(byName.get("白细胞数目(WBC)")?.sourceMap.result.sourceLineIds, [
     "wbc-result",
@@ -2713,13 +2752,13 @@ test("extracts both repeated CBC panels by coordinates and sends partial rows to
     ["header-6"],
   );
   assert.ok(scalar);
-  assert.equal(scalar.candidateRowCount, 4);
+  assert.equal(scalar.candidateRowCount, 2);
   const aiCandidateText = scalar.candidateFacts
     .map((fact) => fact.sourceText)
     .join("\n");
   assert.match(aiCandidateText, /嗜碱性粒细胞百分比/);
   assert.match(aiCandidateText, /中性粒细胞百分比/);
-  assert.match(aiCandidateText, /血小板体积分布宽度/);
+  assert.doesNotMatch(aiCandidateText, /血小板体积分布宽度/);
   assert.doesNotMatch(aiCandidateText, /红细胞数目\(RBC\)/);
 });
 
@@ -4314,7 +4353,7 @@ test("extracts the real ophthalmology summary and filters routine negative exam 
   ]);
   const page = rebuilt[0];
   const filtered = page.lines.find(
-    (line) => line.text === golden.expected.filteredNegativeExamRow.text,
+    (line) => line.text.replace(/\s*\|\s*$/, '') === golden.expected.filteredNegativeExamRow.text,
   );
   assert.ok(filtered, "真实裂隙灯阴性查体行必须保留审计轨迹");
   assert.deepEqual(
@@ -4323,7 +4362,7 @@ test("extracts the real ophthalmology summary and filters routine negative exam 
   );
   assert.deepEqual(
     filtered.sourceCells.map((cell) => cell.text),
-    golden.expected.filteredNegativeExamRow.sourceCellTexts,
+    [...golden.expected.filteredNegativeExamRow.sourceCellTexts, ''],
   );
   assert.equal(filtered.candidate, false);
   assert.equal(filtered.candidateKind, null);
@@ -4738,6 +4777,24 @@ test("defaults to the detailed extraction depth and records it on the plan", () 
   assert.equal(plan.extractionDepth, "detailed");
 });
 
+test("overview prescriptions retain medication units for single and merged multiple pages", () => {
+  for (const pageCount of [1, 2]) {
+    const pages = rebuildOcrPages(Array.from({ length: pageCount }, (_, index) => page(index + 1, [
+      "电子处方笺",
+      "药品名称 | 规格 | 用法用量 | 数量",
+      "阿莫西林胶囊 | 0.25g | 口服 每日3次 | 24粒",
+    ])));
+    const plan = planRebuiltOcrPages("report", pages, "overview");
+    const medications = plan.units.filter(unit => unit.route === "narrative");
+    assert.ok(medications.length > 0);
+    assert.deepEqual([...new Set(medications.flatMap(unit => unit.pageNumbers))],
+      Array.from({ length: pageCount }, (_, index) => index + 1));
+    assert.match(medications[0].text, /阿莫西林胶囊/);
+    assert.match(medications[0].text, /口服 每日3次/);
+    assert.equal(plan.units.filter(unit => unit.route === "document").length, 1);
+  }
+});
+
 test("overview depth keeps scalar and morphology extraction but drops narrative units", () => {
   const rows = [
     page(1, [
@@ -4847,6 +4904,21 @@ test("reconstructs two-line table names with one result and retains cell sources
   }
 });
 
+test("retains unfamiliar and alphanumeric wrapped names as candidates with original cell sources", () => {
+  for (const [first, second] of [['合成检测项','目甲'], ['糖类抗原','19-9'], ['合成检测','(A2)']]) {
+    const [rebuilt] = rebuildOcrPages([{pageId:'wrapped',pageNumber:1,linesJson:JSON.stringify([
+      {id:'name-a',text:first,box:[10,30,110,40]}, {id:'name-b',text:second,box:[10,44,90,54]},
+      {id:'value',text:'2.50',box:[150,37,180,47]}, {id:'unit',text:'U/L',box:[210,37,255,47]},
+    ])}]);
+    const row = rebuilt.lines.find(line => line.text.startsWith(first+second))!;
+    assert.ok(row, first+second);
+    assert.equal(row.candidateKind, 'scalar');
+    assert.deepEqual(row.sourceCells[0].sourceLineIds, ['name-a','name-b']);
+    assert.deepEqual(row.sourceCells[1].sourceLineIds, ['value']);
+    if (first.startsWith('合成')) assert.equal(row.localObservations.length, 0, 'unknown identities remain for AI verification');
+  }
+});
+
 test("leaves ambiguous or unsupported wrapped table names unchanged", () => {
   const base = [
     { id: "a", text: "低密度脂蛋", box: [10, 30, 110, 40] },
@@ -4859,7 +4931,7 @@ test("leaves ambiguous or unsupported wrapped table names unchanged", () => {
     [...base, { id: "header", text: "项目", box: [10, 41, 90, 43] }],
     base.map((line) => line.id === "b" ? { ...line, box: [10, 60, 90, 70] } : line),
     base.map((line) => line.id === "b" ? { ...line, box: [45, 44, 125, 54] } : line),
-    base.map((line) => line.id === "b" ? { ...line, text: "未知片段" } : line),
+    base.map((line) => line.id === "b" ? { ...line, text: "请咨询医生" } : line),
     base.map((line) => line.id === "v" ? { ...line, box: [] } : line),
     base.slice(0, 2),
     [base[0], { ...base[1], text: "参考范围" }, base[2]],

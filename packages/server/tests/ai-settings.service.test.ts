@@ -35,6 +35,27 @@ function storedSettingsJson() {
   ).get() as { valueJson: string }).valueJson;
 }
 
+test("replacing a profile key persists across database reopen and is used by tasks", async () => {
+  await withDatabase(() => {
+    const initial = saveAiSettings({
+      enabled: true,
+      profiles: [{ id: "synthetic-profile", provider: "deepseek", apiKey: "synthetic-old-key" }],
+      defaultProfileId: "synthetic-profile"
+    });
+    saveAiSettings({
+      ...initial,
+      profiles: initial.profiles.map((profile) => ({ ...profile, apiKey: "synthetic-new-key" }))
+    });
+    assert.equal(storedSettingsJson().includes("synthetic-new-key"), false);
+    assert.equal(getAiTaskSettings("report_extraction", true).apiKey, "synthetic-new-key");
+    closeDatabaseForTests();
+    assert.equal(getAiSettings(true).apiKey, "synthetic-new-key");
+    // 后续保存其他配置时不携带 Key，应保留替换后的值。
+    saveAiSettings({ ...getAiSettings(), requestTimeoutSeconds: 900 });
+    assert.equal(getAiTaskSettings("report_extraction", true).apiKey, "synthetic-new-key");
+  });
+});
+
 test("migrates the legacy flat AI configuration into a connection profile", async () => {
   await withDatabase(() => {
     saveAiSettings({

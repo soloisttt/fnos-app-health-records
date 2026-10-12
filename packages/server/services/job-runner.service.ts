@@ -368,7 +368,7 @@ export function claimNextJob() {
     `,
       )
       .get(candidate.id) as JobRow;
-    if (job.pipelineVersion !== "page-append-v1") db.prepare(
+    if (job.pipelineVersion !== "page-append-v1" && job.pipelineVersion !== "page-orientation-v1") db.prepare(
       "UPDATE reports SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'trashed'",
     ).run(job.reportId);
     appendJobEvent({
@@ -863,6 +863,8 @@ function completeJob(job: JobRow, response: WorkerResponse) {
       db.prepare(
         "DELETE FROM ocr_results WHERE page_id = ? AND job_id <> ?",
       ).run(job.pageId, job.id);
+      db.prepare("UPDATE report_pages SET ocr_rotation = ? WHERE id = ?")
+        .run(job.rotation || 0, job.pageId);
       db.exec("COMMIT");
     } catch (error) {
       rollbackAfterError(db);
@@ -910,6 +912,7 @@ function completeJob(job: JobRow, response: WorkerResponse) {
         typeof ocrMeta.imageCoverage === "number"
           ? ocrMeta.imageCoverage
           : undefined,
+      tableRetryBudget: response.lines?.[0]?.tableRetryBudget,
       elapsedMs: response.elapsedMs,
       workerRssBytes: response.workerRssBytes,
       workerPeakRssBytes: response.workerPeakRssBytes,
@@ -966,6 +969,7 @@ export function reconcileReportProcessingStatus(reportId: string) {
   const context = loadReportProcessingBatchContext(reportId);
   if (context.currentBatch?.kind === "page_append") return previous.status;
   const currentJobs = context.currentBatch?.jobs || [];
+  if (currentJobs.length && currentJobs.every(job => job.pipelineVersion === "page-orientation-v1")) return previous.status;
   const hasActive = currentJobs.some((job) =>
     ["queued", "processing"].includes(job.status),
   );
@@ -1315,6 +1319,7 @@ export async function processNextJob(
             warningUnits: execution.warningUnits,
             unmatchedCandidates: execution.unmatchedCandidates,
             tableSerialGapPages: execution.tableSerialGapPages,
+            layoutWarnings: execution.layoutWarnings,
             promptTokens: extraction.promptTokens,
             completionTokens: extraction.completionTokens,
             elapsedMs: extraction.elapsedMs,

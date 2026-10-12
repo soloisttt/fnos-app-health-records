@@ -76,6 +76,22 @@ test('migration drains requests, verifies copies, switches database and retains 
   });
 });
 
+test('backup after migration and database restart uses the relocated archive', async () => {
+  await fixture(async (source, _target, rootId) => {
+    getDatabase().exec("INSERT INTO users(id,display_name,is_gateway_admin) VALUES('backup-admin','Test',1)");
+    await startStorageMigration(rootId);
+    await waitForStorageMigration();
+    const state = getStorageMigration()!;
+    assert.equal(state.phase, 'completed', state.error || 'migration failed');
+    closeDatabase();
+    const user = { id: 'backup-admin', displayName: 'Test', provider: 'development' as const, authenticated: true, isGatewayAdmin: true };
+    const backup = createBackup(user);
+    assert.equal(backup.path.startsWith(join(state.target, 'backups', 'full')), true);
+    assert.equal(existsSync(join(source, 'backups', 'full', backup.filename)), false);
+    assert.equal(execFileSync('tar', ['-xOzf', backup.path, './reports/synthetic.txt'], { encoding: 'utf8' }), 'synthetic content');
+  });
+});
+
 test('fixed app directory never overwrites an existing directory or dangling link', async () => {
   await fixture(async (_source, target, rootId) => {
     const destination = join(target, getAppConfig().appName);

@@ -441,9 +441,14 @@ export function listProcessingJobs(user: RequestUser, reportId: string) {
     ORDER BY e.created_at, e.rowid
   `).all(reportId) as Array<{ jobId: string; detailJson: string }>;
   const tableSerialGapPagesByJob = new Map<string, number[]>();
+  const layoutWarningsByJob = new Map<string, Array<{pageNumber:number;uncoveredResults:number;uncertainRows:number}>>();
   for (const event of aiCompletedEvents) {
     try {
-      const detail = JSON.parse(event.detailJson) as { tableSerialGapPages?: unknown };
+      const detail = JSON.parse(event.detailJson) as { tableSerialGapPages?: unknown; layoutWarnings?: unknown };
+      if (Array.isArray(detail.layoutWarnings)) layoutWarningsByJob.set(event.jobId, detail.layoutWarnings.filter(item =>
+        item && Number.isInteger(item.pageNumber) && item.pageNumber > 0 && Number.isInteger(item.uncoveredResults)
+        && item.uncoveredResults >= 0 && Number.isInteger(item.uncertainRows) && item.uncertainRows >= 0)
+        .map(item=>({pageNumber:item.pageNumber,uncoveredResults:item.uncoveredResults,uncertainRows:item.uncertainRows})));
       const pages = Array.isArray(detail.tableSerialGapPages)
         ? detail.tableSerialGapPages.filter((page): page is number => typeof page === "number" && Number.isFinite(page))
         : [];
@@ -500,7 +505,8 @@ export function listProcessingJobs(user: RequestUser, reportId: string) {
       unmatchedCandidates: jobUnits
         .filter((unit) => unit.unitType !== "supplement")
         .reduce((sum, unit) => sum + Math.max(0, unit.candidateCount - unit.matchedCount), 0),
-      tableSerialGapPages: tableSerialGapPagesByJob.get(job.id) || []
+      tableSerialGapPages: tableSerialGapPagesByJob.get(job.id) || [],
+      layoutWarnings: layoutWarningsByJob.get(job.id) || [],
     };
   });
 }

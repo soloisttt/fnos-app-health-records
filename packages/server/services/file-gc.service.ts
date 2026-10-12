@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDatabase, runInTransaction } from "../database/client";
 import { createId } from "../utils/identifier";
 import { getAppConfig } from "../utils/runtime-config";
+import { reportPagePreviewPaths } from '../utils/report-page-previews';
 
 export type FileGarbageCandidate = {
   storagePath: string | null | undefined;
@@ -33,6 +34,8 @@ function safeStoragePath(relativePath: string) {
 }
 
 function referencedFileCount(db: DatabaseSync, storagePath: string) {
+  const preview = storagePath.match(/^previews\/(?:vision\/)?([^/]+)\/([^/]+?)(?:\.r(?:0|90|180|270))?\.jpg$/);
+  if (preview && db.prepare('SELECT 1 FROM report_pages WHERE report_id=? AND id=?').get(preview[1],preview[2])) return 1;
   const row = db.prepare(`
     SELECT
       (SELECT COUNT(*) FROM report_page_append_files f JOIN report_page_appends b ON b.id=f.batch_id WHERE f.storage_path=? AND b.state NOT IN ('cancelled','noop','complete','ocr_only')) +
@@ -41,10 +44,8 @@ function referencedFileCount(db: DatabaseSync, storagePath: string) {
       (SELECT COUNT(*) FROM report_pages WHERE thumbnail_path = ?) +
       (SELECT COUNT(*) FROM health_members WHERE avatar_path = ?) +
       (SELECT COUNT(*) FROM report_note_assets WHERE storage_path = ? OR thumbnail_path = ? OR preview_path = ?) +
-      (SELECT COUNT(*) FROM reports WHERE ? LIKE 'previews/' || id || '/%'
-        OR ? LIKE 'previews/vision/' || id || '/%'
-        OR ? LIKE 'report-exports/' || id || '-%.pdf') AS count
-  `).get(storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath) as { count: number };
+      (SELECT COUNT(*) FROM reports WHERE ? LIKE 'report-exports/' || id || '-%.pdf') AS count
+  `).get(storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath, storagePath) as { count: number };
   return Number(row.count || 0);
 }
 
@@ -168,11 +169,12 @@ function referencedStoragePaths() {
   const db = getDatabase();
   const paths = new Set<string>();
   const pages = db.prepare(`
-    SELECT storage_path AS storagePath, thumbnail_path AS thumbnailPath FROM report_pages
-  `).all() as Array<{ storagePath: string; thumbnailPath: string | null }>;
+    SELECT id, report_id AS reportId, storage_path AS storagePath, thumbnail_path AS thumbnailPath FROM report_pages
+  `).all() as Array<{ id:string; reportId:string; storagePath: string; thumbnailPath: string | null }>;
   for (const page of pages) {
     if (page.storagePath) paths.add(page.storagePath);
     if (page.thumbnailPath) paths.add(page.thumbnailPath);
+    for (const path of reportPagePreviewPaths(page.reportId,page.id)) paths.add(path);
   }
   const avatars = db.prepare("SELECT avatar_path AS avatarPath FROM health_members WHERE avatar_path IS NOT NULL")
     .all() as Array<{ avatarPath: string }>;
@@ -206,7 +208,7 @@ export function scanOrphanStorageFiles(minimumAgeMs = 24 * 60 * 60_000) {
         if (!referenced.has(storagePath)) {
           candidates.push({
             storagePath,
-            fileKind: storagePath.startsWith("thumbnails/") ? "thumbnail" : "original"
+            fileKind: storagePath.startsWith("thumbnails/") ? "thumbnail" : storagePath.startsWith('previews/') ? 'other' : "original"
           });
         }
       } catch {
@@ -218,5 +220,6 @@ export function scanOrphanStorageFiles(minimumAgeMs = 24 * 60 * 60_000) {
   walk(join(storageRoot, "reports"));
   walk(join(storageRoot, "thumbnails"));
   walk(join(storageRoot, "report-notes"));
-  return { scannedRoots: 3, queued: enqueueFileGarbage(candidates, "orphan_scan", getDatabase(), 0) };
+  walk(join(storageRoot, 'previews'));
+  return { scannedRoots: 4, queued: enqueueFileGarbage(candidates, "orphan_scan", getDatabase(), 0) };
 }

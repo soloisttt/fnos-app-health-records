@@ -1,3 +1,4 @@
+import { hasLostMeasurementBound, leadingMeasurementNumber, measurementEvidenceRegions } from '../utils/measurement-bound';
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -31,10 +32,10 @@ import {
  * AI 视觉复核：文本解析（含遗漏补提取）结束后，把仍存在未确认指标候选的页面原图
  * 发送给视觉模型逐行核对，补充文本链路漏掉的指标。
  *
- * 反幻觉设计：模型只允许核对服务端给出的候选行，验收门要求返回的 q 必须逐字命中
+ * 异常页面的整页补提取另行标记待人工核对；普通候选验收要求 q 必须逐字命中
  * 某一候选行（宽白/标点不敏感），命中后证据固定为该 OCR 候选行原文并标记
- * source: "vision"；数值与单位以图片为准，因此归一化证据闸门对纯视觉来源跳过
- * 数值/单位回指（见 indicator-normalization.service.ts 的 visionOnlyEvidence）。
+ * source: "vision"，并保留来源区域。项目名称也须锚定候选；数值或单位与
+ * OCR 冲突时保留待人工核对，不直接放行默认趋势。
  *
  * 隐私边界：页面原图无法像文本一样自动脱敏，设置页开关旁有明确告知；
  * 只在"详细"解析程度下触发，单份报告默认最多 3 页。
@@ -49,7 +50,7 @@ export const aiVisionReviewPolicy = {
   maxOutputTokens: 2_048,
 } as const;
 
-export const aiVisionReviewPromptVersion = "vision-review-v1";
+export const aiVisionReviewPromptVersion = "vision-review-v5-name-verification";
 
 export type AiVisionReviewEvent = {
   type: "vision_review_started" | "vision_review_completed" | "vision_review_failed";
@@ -69,6 +70,7 @@ export type AiVisionReviewInput = {
   result: AiExtractionResult;
   /** 文本链路仍未确认的指标候选行（由编排层用候选闭环语义筛出） */
   candidates: VisionReviewCandidateLine[];
+  pageReviews?: Array<{ pageId: string; pageNumber: number }>;
 };
 
 export type VisionReviewImage = {
@@ -104,6 +106,7 @@ type VisionReviewPageGroup = {
   pageNumber: number;
   lines: PlannedOcrLine[];
   omittedCandidates: number;
+  pageReview?: boolean;
 };
 
 export function groupVisionReviewPages(
@@ -211,7 +214,7 @@ async function loadVisionReviewImage(
 
   const isPdf = row.mimeType === "application/pdf";
   const cacheRelative = isPdf
-    ? join("previews", reportId, `${pageId}.jpg`)
+    ? join("previews", reportId, `${pageId}.r${row.rotation || 0}.jpg`)
     : join("previews", "vision", reportId, `${pageId}.r${row.rotation || 0}.jpg`);
   const cachePath = resolveStoragePath(cacheRelative);
   if (!usableJpeg(cachePath)) {
@@ -249,21 +252,29 @@ async function loadVisionReviewImage(
   };
 }
 
-function visionReviewSystemPrompt() {
+function visionReviewSystemPrompt(pageReview = false) {
+  if (pageReview) return `对照报告原图复核整页所有定量和定性指标，特别检查 OCR 未列出的行。只提取清晰可读且具有项目名和本次结果的测量，不输出表头、器官描述、结论或参考值作为结果。不得推测。保留 <、>、≤、≥ 等符号。只返回 JSON {"observations":[...]}，每项包含 n 项目名、r 结果文本、v 数值（定性或限值可为空）、u 单位、p 页码、q 来源原文；图片中有参考范围时必须保留 ref 原文和可明确读取的 lo/hi 上下限，有异常箭头或标志时保留 f（high、low、abnormal、normal），有方法时保留 m。不按数值推测未印出的异常标记，不猜参考范围。已有 OCR 候选的项目，q 必须原样填写对应候选行，数值、单位及名称按图片核对；不要因修正读数而改写 q。仅对候选未列出的新项目，q 填写图片中该项目及结果的逐字原文。名称核对提示仅帮助定位，图片看不清时不得按提示猜测。时间或标本不同时分别输出 examination.timeText / specimen，并在 q 中保留对应标签。`;
   return `你是体检报告复核助手。用户提供报告单页的原件图片，以及该页 OCR 识别出的候选行；这些候选行疑似包含健康指标，但文本解析未能确认。
 任务：对照图片逐行核对候选行。候选行确实是定量或定性指标（有项目名和本次结果）时输出该指标；候选行是表头、注释、叙述或参考说明时不要输出。
 数值、单位、参考范围以图片为准；候选行文本与图片不一致时以图片为准；图片中看不清的值不得推测。
-q 必须原样填写对应候选行的文本，不得改写、合并候选行，不得输出候选行以外的内容。
+少量候选附有形近字名称核对提示。提示仅帮助定位，不是答案；只有图片清晰支持时才修正名称，不得改成相近但不同的医学项目。
+q 必须原样填写对应候选行的文本，不得改写、合并候选行，不得输出候选行以外的内容。同名项目在不同来源行、日期或标本下是独立结果，逐项保留；日期或阶段明确时输出 examination.timeText，逐字引用对应标签。
 只返回一个可被 JSON.parse 解析的 JSON 对象 {"observations":[...]}：每项必填 n（项目名）、r（结果文本）、p（页码）、q（候选行原文）；可选 s（章节）、c（项目代码）、v（数值）、u（单位）、lo、hi（参考上下限）、ref（参考文本）、f（异常标记，只能是 high、low、abnormal、normal）、m（方法）。没有可确认的指标时返回 {"observations":[]}。不要 Markdown、注释或前后说明。`;
 }
 
 function visionReviewUserText(group: VisionReviewPageGroup) {
   const redacted = group.lines.map((line) => redactAiInputText(line.text));
   return [
+    group.pageReview ? '请核对整页指标完整性；下列 OCR 候选仅供定位，未列出的清晰指标也需核对。' : '',
     `第 ${group.pageNumber} 页候选行（共 ${group.lines.length} 行）：`,
-    ...redacted.map((text, index) => `[${index + 1}] ${text}`),
+    ...redacted.map((text, index) => {
+      const review = group.lines[index].nameReviewCandidate;
+      return `[${index + 1}] ${text}${review ? `\n名称核对提示：请从原图确认“${redactAiInputText(review.originalName)}”是否为“${redactAiInputText(review.suggestedName)}”；q 仍填写上一行原文。` : ''}`;
+    }),
     group.omittedCandidates
-      ? `（另有 ${group.omittedCandidates} 行候选超出本次复核范围，无需处理）`
+      ? group.pageReview
+        ? `（候选列表省略 ${group.omittedCandidates} 行，请以原图为准核对整页）`
+        : `（另有 ${group.omittedCandidates} 行候选超出本次复核范围，无需处理）`
       : "",
   ]
     .filter(Boolean)
@@ -280,7 +291,7 @@ function parseVisionJson(content: string) {
 
 /*
  * 验收门：只接受能把 q 逐字回指到本页某一候选行的指标；证据统一改写成
- * 候选行原文 + source:"vision"。同名指标已在文本结果中出现于本页时视为重复，拒收。
+ * 候选行原文 + source:"vision"。按来源和检查时间去重，允许同页同名的不同测量。
  */
 export function acceptVisionObservations(
   parsed: AiObservation[],
@@ -289,13 +300,13 @@ export function acceptVisionObservations(
 ) {
   const accepted: AiObservation[] = [];
   let rejected = 0;
-  const existingNames = new Set(
-    result.fields.observations
-      .filter((item) =>
-        item.evidence.some((entry) => entry.pageNumber === group.pageNumber),
-      )
-      .map((item) => compactNameText(item.itemName)),
-  );
+  const occurrence = (item: AiObservation, quote: string) => JSON.stringify([
+    compactNameText(item.itemName), compactQuoteText(quote),
+    compactNameText(item.examination?.timeText), compactNameText(item.examination?.specimen),
+    compactNameText(item.resultText), compactNameText(item.unit),
+  ]);
+  const seen = new Set(result.fields.observations.flatMap(item => item.evidence
+    .filter(entry => entry.pageNumber === group.pageNumber).map(entry => occurrence(item, entry.quote))));
   for (const observation of parsed) {
     const quotes = observation.evidence.map((entry) => entry.quote);
     /* 模型看到的是脱敏后的候选行；匹配时原文与脱敏形态都认，
@@ -310,21 +321,63 @@ export function acceptVisionObservations(
       }),
     );
     if (!matched) {
-      rejected += 1;
+      const quote = observation.evidence.find(entry => entry.pageNumber === group.pageNumber)?.quote || '';
+      const name = compactNameText(observation.itemName);
+      const text = compactNameText(quote);
+      const duplicate = [...result.fields.observations, ...accepted].some(item =>
+        compactNameText(item.itemName) === name && item.resultText === observation.resultText
+        && item.unit === observation.unit && item.examination?.timeText === observation.examination?.timeText
+        && item.examination?.specimen === observation.examination?.specimen
+        && item.evidence.some(entry => entry.pageNumber === group.pageNumber));
+      if (group.pageReview && !duplicate && name.length >= 2 && text.includes(name)
+        && observation.resultText.trim() && text.includes(compactNameText(observation.resultText))
+        && !/^(?:备注|说明|参考范围|参考值|单位|签名|审核)$/.test(name)
+        && !hasLostMeasurementBound(observation.resultText, observation.numericValue, quote)) {
+        accepted.push({ ...observation, evidence: [{pageNumber: group.pageNumber, quote, source: 'vision', imageOnly: true}] });
+      } else rejected += 1;
       continue;
     }
     const name = compactNameText(observation.itemName);
-    if (
-      existingNames.has(name) ||
-      accepted.some((item) => compactNameText(item.itemName) === name)
-    ) {
+    const sourceName = compactNameText(matched.text);
+    const code = compactNameText(observation.itemCode);
+    const review = matched.nameReviewCandidate;
+    const nameCorrected = Boolean(review && name === compactNameText(review.suggestedName)
+      && sourceName.includes(compactNameText(review.originalName))
+      && matched.sourceLineIds?.length && Array.isArray(matched.box) && matched.box.length
+      && matched.box.flat().every(Number.isFinite)
+      && review.sourceLineIds.length && review.sourceLineIds.every(id => matched.sourceLineIds.includes(id)));
+    const anchored = name.length >= 2 && sourceName.includes(name)
+      || code.length >= 2 && sourceName.includes(code) || nameCorrected;
+    const time = observation.examination?.timeText;
+    const scopedResults = measurementEvidenceRegions(matched.text, [nameCorrected ? review!.originalName : observation.itemName, observation.itemCode || '']);
+    // A name correction must retain the result from that same source region.
+    const correctedResultMatches = !nameCorrected || scopedResults.some(region => {
+      const number = leadingMeasurementNumber(region);
+      return number !== null
+        ? number === leadingMeasurementNumber(observation.resultText) && (observation.numericValue === null || number === observation.numericValue)
+        : compactNameText(region).startsWith(compactNameText(observation.resultText));
+    });
+    if ((scopedResults.length ? scopedResults : [matched.text]).some(region => hasLostMeasurementBound(observation.resultText, observation.numericValue, region)) || !anchored || /^(?:备注|说明|参考范围|参考值|单位|签名|审核)$/.test(name)
+      || !correctedResultMatches
+      || (time && !compactNameText([matched.text, matched.tableHeaderText].join(' ')).includes(compactNameText(time)))) {
       rejected += 1;
       continue;
     }
+    const identity = occurrence(observation, matched.text);
+    if (seen.has(identity)) {
+      rejected += 1;
+      continue;
+    }
+    seen.add(identity);
     accepted.push({
       ...observation,
       evidence: [
-        { pageNumber: group.pageNumber, quote: matched.text, source: "vision" },
+        { pageNumber: group.pageNumber, quote: matched.text, source: "vision",
+          ...(nameCorrected ? {nameCorrected: true} : {}),
+          ...(matched.sourceLineIds?.length ? {visionRegion: {
+            candidateId: matched.id, sourceLineIds: matched.sourceLineIds, box: matched.box,
+          }} : {}),
+        },
       ],
     });
   }
@@ -365,7 +418,15 @@ export const runVisionReview: AiVisionReviewExecutor = async (
   ) {
     return null;
   }
-  const pages = groupVisionReviewPages(input.candidates);
+  const pages = groupVisionReviewPages(input.candidates, Number.MAX_SAFE_INTEGER);
+  for (const page of input.pageReviews || []) {
+    const group = pages.find(group => group.pageId === page.pageId);
+    if (group) group.pageReview = true;
+    else pages.push({ ...page, lines: [], omittedCandidates: 0, pageReview: true });
+  }
+  pages.sort((a, b) => Number(Boolean(b.pageReview)) - Number(Boolean(a.pageReview)) || b.lines.length - a.lines.length || a.pageNumber - b.pageNumber);
+  pages.splice(configuredMaxPages());
+  pages.sort((a,b) => a.pageNumber-b.pageNumber);
   if (!pages.length) return null;
   const loadImage = options.loadImage || loadVisionReviewImage;
   const chat = options.chat || executeAiChatCompletion;
@@ -374,7 +435,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
 
   emit({
     type: "vision_review_started",
-    message: `视觉复核：${pages.length} 页存在 ${candidateCount} 个未确认指标候选，发送页面图给 ${settings.visionModel} 核对`,
+    message: `视觉复核：${pages.length} 页，${candidateCount} 个未确认候选，其中 ${pages.filter(page => page.pageReview).length} 页需核对整页完整性，发送页面图给 ${settings.visionModel} 核对`,
     detail: {
       model: settings.visionModel,
       pageNumbers: pages.map((page) => page.pageNumber),
@@ -410,7 +471,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
       if (!image) throw new Error("页面图片不可用");
       const request: AiRuntimeRequest = {
         messages: [
-          { role: "system", content: visionReviewSystemPrompt() },
+          { role: "system", content: visionReviewSystemPrompt(Boolean(group.pageReview)) },
           {
             role: "user",
             content: [
@@ -425,7 +486,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
           0,
         ),
         responseFormat: "json_object",
-        maxOutputTokens: aiVisionReviewPolicy.maxOutputTokens,
+        maxOutputTokens: group.pageReview ? 8192 : aiVisionReviewPolicy.maxOutputTokens,
         timeoutMs: settings.requestTimeoutSeconds * 1_000,
         timeoutCode: "AI_REQUEST_TIMEOUT",
         timeoutMessage: `视觉复核第 ${group.pageNumber} 页在 ${settings.requestTimeoutSeconds} 秒内未完成`,

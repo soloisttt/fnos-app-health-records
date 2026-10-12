@@ -1,6 +1,8 @@
+import { recordFeedbackStates,listFeedbackNotifications,updateFeedbackNotification } from '../services/feedback-sync.service';
+import { getFeedbackInstallation,readFeedbackInstallation } from '../services/feedback-installation.service';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync,rmSync,readFileSync,writeFileSync,existsSync } from 'node:fs';
+import { mkdtempSync,mkdirSync,rmSync,readFileSync,writeFileSync,existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,7 +12,7 @@ import { ensureMemberSharingDraft } from '../database/member-sharing-draft';
 import { bootstrapLocalAdministrator,createLocalAccount,setLocalAccountDisabled,deleteLocalAccount } from '../services/auth.service';
 import { createMember,setMemberPermission,assertMemberAccess,assertMemberManage,assertMemberShare,updateMember,listMemberSharingAccounts,setMembersPermission } from '../services/member.service';
 import { getAccountPreferences,updateAccountPreferences,setMemberHidden } from '../services/member-preferences.service';
-import { listMembers,listReports,createFullBackup,preflightStoredBackup,restoreBackup,getReportDetail } from '../services/records.service';
+import { listMembers,listReports,createFullBackup,preflightRestore,preflightStoredBackup,restoreBackup,restoreUploadedBackup,getReportDetail } from '../services/records.service';
 import { getReportExaminations,saveReportExamination } from '../services/report-examination.service';
 import { setExaminationDuplicateDecision,examinationDuplicateResolver } from '../services/examination-duplicate.service';
 import { getDeploymentIdentity } from '../utils/deployment-identity';
@@ -148,6 +150,56 @@ test('cross-instance restore isolates identities despite matching IDs and enable
  assert.equal(getDeploymentIdentity().id,'different-instance');
 }));
 
+test('legacy local backup accepts a rotated account ID only when the internal user and credential still match',()=>setup((dir,admin,a)=>{
+ const adminSelf=createMember(admin,{displayName:'合成管理员本人',createSelf:true});
+ const userSelf=createMember(a,{displayName:'合成普通账号本人',createSelf:true});
+ const backup=createFullBackup(admin);
+ const extracted=join(dir,'legacy-extracted');
+ const legacyArchive=join(dir,'legacy-backup.tar.gz');
+ mkdirSync(extracted);
+ execFileSync('tar',['-xzf',backup.path,'-C',extracted]);
+ const manifestPath=join(extracted,'manifest.json');
+ const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
+ delete manifest.identity;
+ writeFileSync(manifestPath,JSON.stringify(manifest));
+ execFileSync('tar',['-czf',legacyArchive,'-C',extracted,'.']);
+ const db=getDatabase();
+ db.prepare("UPDATE local_accounts SET id='rotated-admin-account' WHERE user_id=?").run(admin.id);
+ const plan=preflightRestore(admin,legacyArchive);
+ assert.equal(plan.strategy,'same');
+ const restored=restoreUploadedBackup(admin,legacyArchive,plan.token);
+ assert.equal(restored.identityRebind.userId,admin.id);
+ assert.deepEqual(listMembers(admin).map(member=>member.id),[adminSelf.id]);
+ assert.deepEqual(listMembers(a).map(member=>member.id),[userSelf.id]);
+ assert.equal(getDatabase().prepare('SELECT disabled_at FROM local_accounts WHERE user_id=?').get(a.id)!.disabled_at,null);
+ getDatabase().prepare("UPDATE local_accounts SET id='other-admin-account',password_hash='unrelated-credential' WHERE user_id=?").run(admin.id);
+ assert.equal(preflightRestore(admin,legacyArchive).strategy,'cross','a reused user ID without the same credential must stay isolated');
+}));
+
+test('the pre-restore safety backup restores the original admin after a cross-instance identity isolation',()=>setup((dir,admin,a)=>{
+ const adminSelf=createMember(admin,{displayName:'合成管理员本人',createSelf:true});
+ const userSelf=createMember(a,{displayName:'合成普通账号本人',createSelf:true});
+ const backup=createFullBackup(admin);
+ writeFileSync(join(dir,'deployment-identity.json'),JSON.stringify({id:'different-instance'}));
+ const crossPlan=preflightStoredBackup(admin,backup.id);
+ assert.equal(crossPlan.strategy,'cross');
+ const first=restoreBackup(admin,backup.id,crossPlan.token);
+ const isolatedAdmin={...admin,id:first.identityRebind.userId};
+ assert.equal(listMembers(isolatedAdmin).length,0);
+ const currentDb=getDatabase();
+ const currentHash=currentDb.prepare('SELECT password_hash AS hash FROM local_accounts WHERE user_id=?').get(isolatedAdmin.id)!.hash as string;
+ currentDb.prepare("UPDATE local_accounts SET password_hash='unrelated-credential' WHERE user_id=?").run(isolatedAdmin.id);
+ assert.equal(preflightStoredBackup(isolatedAdmin,first.safetyBackupId).strategy,'cross','same username with a different credential cannot adopt the source administrator');
+ currentDb.prepare('UPDATE local_accounts SET password_hash=? WHERE user_id=?').run(currentHash,isolatedAdmin.id);
+ const safetyPlan=preflightStoredBackup(isolatedAdmin,first.safetyBackupId);
+ assert.equal(safetyPlan.strategy,'same');
+ const second=restoreBackup(isolatedAdmin,first.safetyBackupId,safetyPlan.token);
+ assert.equal(second.identityRebind.userId,admin.id);
+ assert.deepEqual(listMembers(admin).map(member=>member.id),[adminSelf.id]);
+ assert.deepEqual(listMembers(a).map(member=>member.id),[userSelf.id]);
+ assert.equal(getDatabase().prepare('SELECT COUNT(*) AS n FROM identity_recovery_pending').get()!.n,0);
+}));
+
 test('draft only backfills unique creator self candidates, never delegated managers, and is repeatable',()=>{
  const db=new DatabaseSync(':memory:');
  try {
@@ -245,7 +297,8 @@ test('sharing account list requires member sharing rights and excludes unusable 
  db.exec("INSERT INTO users(id,display_name) VALUES('foreign-mode','其他环境'); INSERT INTO user_identities(id,user_id,provider,subject) VALUES('foreign-mode-id','foreign-mode','fnos_gateway','foreign-mode')");
  const accounts=listMemberSharingAccounts(a,member.id);
  assert.deepEqual(new Set(accounts.map(account=>account.id)),new Set([admin.id,a.id,b.id]));
- assert.deepEqual(Object.keys(accounts[0]).sort(),['displayName','id']);
+ assert.deepEqual(Object.keys(accounts[0]).sort(),['displayName','id','username']);
+ assert.equal((accounts.find(account => account.id === a.id) as {username?:string}).username, 'account-a');
  assert.equal(listMembers(admin).length,0);
  assert.throws(()=>setMemberPermission(a,member.id,{userId:inactive.userId,permission:'viewer',version:3}),status(404));
 }));
@@ -300,4 +353,41 @@ test('restoring an older backup without examination tables preserves unlinked ob
  assert.equal(result.observations[0].examinationId,null);
  assert.equal(getDatabase().prepare('SELECT COUNT(*) AS n FROM processing_jobs').get()!.n,0);
  assert.throws(()=>getReportExaminations(admin,'old-exam-report'),status(403));
+}));
+
+test('local sharing identifies duplicate names without exposing credentials',()=>setup((_dir,admin,a,b)=>{
+ const db=getDatabase();
+ db.prepare('UPDATE users SET display_name=? WHERE id IN (?,?)').run('synthetic duplicate',a.id,b.id);
+ const member=createMember(a,{displayName:'synthetic member',relationship:'other'});
+ const accounts=listMemberSharingAccounts(a,member.id);
+ assert.equal((accounts.find(account=>account.id===a.id) as {username?:string}).username,'account-a');
+ assert.equal((accounts.find(account=>account.id===b.id) as {username?:string}).username,'account-b');
+ for(const account of accounts) assert.deepEqual(Object.keys(account).sort(),['displayName','id','username']);
+}));
+
+test('full backup restore retains feedback identity and old backups preserve the target identity',()=>setup((_dir,admin)=>{
+ const oldBackup=createFullBackup(admin);
+ const id=getFeedbackInstallation();
+ const oldPlan=preflightStoredBackup(admin,oldBackup.id);
+ restoreBackup(admin,oldBackup.id,oldPlan.token);
+ assert.equal(readFeedbackInstallation(getDatabase()),id);
+ const newBackup=createFullBackup(admin);
+ getDatabase().prepare("DELETE FROM app_settings WHERE setting_key='x-client-id'").run();
+ const replacement=getFeedbackInstallation();assert.notEqual(id,replacement);
+ const plan=preflightStoredBackup(admin,newBackup.id);
+ restoreBackup(admin,newBackup.id,plan.token);
+ assert.equal(readFeedbackInstallation(getDatabase()),id);
+}));
+
+test('full backup restores feedback state and per-admin notification read position',()=>setup((_dir,admin)=>{
+ const db=getDatabase(),id=getFeedbackInstallation();
+ recordFeedbackStates(db,id,[{number:'B0001',status:'received',version:1}]);
+ recordFeedbackStates(db,id,[{number:'B0001',status:'confirmed',version:2}]);
+ const notice=listFeedbackNotifications(admin)[0];updateFeedbackNotification(admin,String(notice.id),'archived');
+ const backup=createFullBackup(admin);
+ recordFeedbackStates(db,id,[{number:'B0001',status:'in_progress',version:3}]);assert.equal(listFeedbackNotifications(admin).length,1);
+ const plan=preflightStoredBackup(admin,backup.id);restoreBackup(admin,backup.id,plan.token);
+ assert.equal(listFeedbackNotifications(admin).length,0);
+ assert.equal(getDatabase().prepare('SELECT status FROM feedback_sync_state').get()?.status,'confirmed');
+ recordFeedbackStates(getDatabase(),id,[{number:'B0001',status:'confirmed',version:2}]);assert.equal(listFeedbackNotifications(admin).length,0);
 }));

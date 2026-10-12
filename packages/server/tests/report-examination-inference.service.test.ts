@@ -11,6 +11,20 @@ import type { AiObservation } from '../services/ai-extraction.service';
 const page = (lines: string[], pageNumber = 1): ExaminationSourcePage => ({id:`page-${pageNumber}`,pageNumber,lines:lines.map(text=>({text}))});
 const observation = (quote: string, pageNumber = 1): AiObservation => ({sectionName:'检验',itemCode:null,itemName:'合成指标',normalizedName:null,resultText:'80',numericValue:80,unit:'U/L',referenceLow:null,referenceHigh:null,referenceText:null,abnormalFlag:null,method:null,evidence:[{pageNumber,quote}]});
 
+test('table separator normalization resolves one row but preserves ambiguous repeated rows', () => {
+ const quote='合成指标 80 U/L';
+ const unique=[page(['检查日期：2026-01-03','合成指标 | 80 | U/L'])];
+ const result=inferObservationExamination(observation(quote),unique);
+ assert.equal(result.certain,true);
+ assert.equal(result.sourceKey,inferObservationExamination(observation('合成指标 | 80 | U/L'),unique).sourceKey);
+ const repeated=[page(['报告编号：FIRST','检查日期：2026-01-03','合成指标 | 80 | U/L','报告编号：SECOND','检查日期：2026-01-04','合成指标 | 80 | U/L'])];
+ const uncertain=inferObservationExamination(observation(quote),repeated);
+ assert.equal(uncertain.certain,false);
+ assert.ok(uncertain.risks.includes('source_row_ambiguous'));
+ // Decimal points cannot be discarded when resolving source evidence.
+ assert.equal(inferObservationExamination(observation('合成指标 8.0 U/L'),unique).certain,false);
+});
+
 test('dated table columns retain equal and different measurements with separate verified times',()=>{
  for(const first of ['120','80']) {
   const row=`合成指标 | ${first} | 80 | U/L`;

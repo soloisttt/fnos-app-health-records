@@ -109,7 +109,7 @@ test("staged pages are invisible; PDF subset keeps source identity; restart, dup
     assert.equal(completed.state, "ocr_only");
     const rows = getDatabase()
       .prepare(
-        "SELECT id,page_number,source_page_number,rotation FROM report_pages ORDER BY page_number",
+        "SELECT id,page_number,source_page_number,rotation,ocr_rotation FROM report_pages ORDER BY page_number",
       )
       .all();
     assert.deepEqual(
@@ -119,6 +119,7 @@ test("staged pages are invisible; PDF subset keeps source identity; restart, dup
         [1, 0],
       ],
     );
+    assert.deepEqual(rows.map((p) => p.ocr_rotation), [90, 0]);
     assert.equal(calls.filter((c) => c.action === "ocr").length, 2);
     assert.equal(
       (
@@ -728,7 +729,7 @@ test("backup and same-instance restore preserve draft files, owner and selected 
     env.cleanup();
   }
 });
-test("existing v17 database receives unnumbered draft with backup and no schema increment", () => {
+test("existing database receives missing page append tables with backup and no schema increment", () => {
   const env = setup();
   try {
     env.db.exec(
@@ -745,11 +746,11 @@ test("existing v17 database receives unnumbered draft with backup and no schema 
     );
     assert.equal(
       db.prepare("SELECT MAX(version) AS n FROM schema_migrations").get()!.n,
-      17,
+      19,
     );
     assert.ok(
       readdirSync(join(env.directory, "backups/db")).some((name) =>
-        name.includes("v17-to-v17"),
+        name.includes("v19-to-v19"),
       ),
     );
     assert.equal(db.prepare("SELECT * FROM reports").all().length, 1);

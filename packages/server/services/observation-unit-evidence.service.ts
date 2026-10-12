@@ -46,7 +46,23 @@ export function linkedObservationUnitQuotes(reportId: string, evidenceJson: stri
     }
     if (!Number.isInteger(sourcePage) || sourcePage < 1 || sourcePage > rowPage
       || !sourceIds.every(id => lines.has(`${sourcePage}:${id}`) && !ambiguous.has(`${sourcePage}:${id}`))) continue;
-    quotes.push(...sourceIds.map(id => lines.get(`${sourcePage}:${id}`)!.text));
+    const printedUnit = typeof unit.text === 'string' ? unit.text.trim() : '';
+    if (!printedUnit) continue;
+    let sourceTexts = sourceIds.map(id => lines.get(`${sourcePage}:${id}`)!.text);
+    // One OCR line may contain several project/unit columns. Its other units
+    // cannot establish the selected field's provenance.
+    if (sourceTexts.length === 1) {
+      const cells = sourceTexts[0].split(/[|｜]/);
+      if (cells.length > 1 && Array.isArray(unit.cellIndices) && unit.cellIndices.length) {
+        if (!unit.cellIndices.every((index: unknown) => Number.isSafeInteger(index) && Number(index) >= 0 && Number(index) < cells.length)) continue;
+        sourceTexts = unit.cellIndices.map((index: number) => cells[index]);
+      }
+    }
+    const compact = (value: string) => value.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+    const escaped = compact(printedUnit).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (sourceTexts.some(text => new RegExp(`(?<![a-zµμ])${escaped}(?![a-zµμ/])`, 'i').test(compact(text)))) {
+      quotes.push(printedUnit);
+    }
   }
   return quotes;
 }

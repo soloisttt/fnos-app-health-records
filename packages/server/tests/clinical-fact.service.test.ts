@@ -119,11 +119,10 @@ test("keeps manually edited and deleted clinical facts protected across AI rerun
       SELECT is_deleted AS isDeleted, source, manual_fields_json AS manualFieldsJson
       FROM report_medications WHERE id = 'medication-ai'
     `).get() as { isDeleted: number; source: string; manualFieldsJson: string };
-    assert.deepEqual({ ...deleted }, {
-      isDeleted: 1,
-      source: "manual",
-      manualFieldsJson: '["*","deleted"]'
-    });
+    assert.equal(deleted.isDeleted, 1);
+    assert.equal(deleted.source, 'manual');
+    assert.ok(JSON.parse(deleted.manualFieldsJson).includes('deleted'));
+    assert.ok(JSON.parse(deleted.manualFieldsJson).some((value: string) => value.startsWith('source-medication-v1:')));
     const audits = db.prepare(`
       SELECT action FROM audit_logs WHERE target_type = 'clinical_fact' ORDER BY created_at, id
     `).all() as Array<{ action: string }>;

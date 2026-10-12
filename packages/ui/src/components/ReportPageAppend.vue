@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createUuid as createRequestKey } from "../utils/uuid";
 import {
   computed,
   onBeforeUnmount,
@@ -138,10 +139,6 @@ const canUseNasImport = computed(
     Boolean(app.session.value?.isAdmin),
 );
 const endpoint = `reports/${encodeURIComponent(props.reportId)}/page-appends`;
-// getRandomValues also works on HTTP NAS addresses, unlike randomUUID.
-function createRequestKey() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
-}
 const key = ref(createRequestKey()),
   finished = computed(() =>
     Boolean(

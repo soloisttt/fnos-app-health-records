@@ -564,7 +564,7 @@ function publish(b: Batch, keepIds?: string[]) {
     )) {
       if (!p.ocr_json) conflict("页面 OCR 尚未完成");
       db.prepare(
-        "INSERT INTO report_pages(id,report_id,page_number,original_name,storage_path,thumbnail_path,mime_type,file_size,sha256,rotation,source_page_number,source_page_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO report_pages(id,report_id,page_number,original_name,storage_path,thumbnail_path,mime_type,file_size,sha256,rotation,ocr_rotation,source_page_number,source_page_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
       ).run(
         p.id,
         b.report_id,
@@ -575,6 +575,7 @@ function publish(b: Batch, keepIds?: string[]) {
         p.mime_type,
         p.file_size,
         p.sha256,
+        p.rotation,
         p.rotation,
         p.mime_type === "application/pdf" ? p.source_page_number : null,
         p.mime_type === "application/pdf" ? p.source_page_count : null,

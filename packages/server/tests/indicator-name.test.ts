@@ -4,6 +4,23 @@ import { cleanIndicatorName } from '../utils/indicator-name.ts';
 import { sanitizeReportObservations, normalizeAiExtraction } from '../services/ai-extraction.service.ts';
 import { indicatorNameCandidates } from '../services/indicator-normalization.service.ts';
 
+test('table ordinals and footnotes are removed while codes and medical numbers survive', () => {
+  assert.deepEqual(cleanIndicatorName('8*★总蛋白[TP]'), {name:'总蛋白',code:'TP'});
+  assert.deepEqual(cleanIndicatorName('9球蛋白[GLO]', {tableOrdinal:true}), {name:'球蛋白',code:'GLO'});
+  assert.deepEqual(cleanIndicatorName('No.7 总蛋白[TP]'), {name:'总蛋白',code:'TP'});
+  assert.deepEqual(cleanIndicatorName('载脂蛋白A1/B[APOA/APOB]'), {name:'载脂蛋白A1/B',code:'APOA/APOB'});
+  for (const name of ['24小时尿蛋白定量','25羟维生素D','17-羟孕酮','1型胶原','β2微球蛋白','CD4+','HDL-C']) {
+    assert.equal(cleanIndicatorName(name,{tableOrdinal:true}).name,name);
+  }
+  assert.ok(indicatorNameCandidates('总蛋白[TP]').includes('tp'));
+  const ratio=sanitizeReportObservations(normalizeAiExtraction({observations:[{
+    itemName:'载脂蛋白A1/B[APOA/APOB]',normalizedName:'载脂蛋白 B',resultText:'1.2',numericValue:1.2,
+  }]}).fields.observations)[0];
+  assert.equal(ratio.itemName,'载脂蛋白A1/B');
+  assert.equal(ratio.normalizedName,null);
+  assert.equal(cleanIndicatorName('弓形虫抗体[IgM]').name,'弓形虫抗体[IgM]');
+});
+
 test('cleans edge decorations and separates marked codes without removing medical symbols', () => {
   for (const name of ['★合成指标', '合成指标 ★', '**¥ 合成指标 ￥**', '☆合成指标☆']) {
     assert.equal(cleanIndicatorName(name).name, '合成指标');

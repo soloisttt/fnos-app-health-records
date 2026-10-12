@@ -66,7 +66,7 @@ test("initializes the health records schema with WAL", () => {
       assert.equal(duplicateDecisionColumns.some((column) => column.name === columnName), true, `missing duplicate decision column ${columnName}`);
       assert.equal(duplicateHistoryColumns.some((column) => column.name === columnName), true, `missing duplicate history column ${columnName}`);
     }
-    assert.equal(schemaVersion, 17);
+    assert.equal(schemaVersion, 19);
     const organizationIndex = db.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'index' AND name = 'reports_organization_idx'
@@ -144,7 +144,7 @@ test("migrates an existing v1 database to PDF source page columns", () => {
     ]) {
       assert.equal(normalizationColumns.some((column) => column.name === columnName), true, `missing column ${columnName}`);
     }
-    assert.equal(schemaVersion, 17);
+    assert.equal(schemaVersion, 19);
     const upgrades = getDatabase().prepare("SELECT COUNT(*) AS count FROM app_upgrade_history WHERE status = 'completed'").get() as
       { count: number };
     assert.equal(upgrades.count, 1);
@@ -691,7 +691,7 @@ test("repairs report-type enum values persisted as body parts on the current sch
   const legacy = new DatabaseSync(databasePath);
   legacy.exec(schemaSql);
   for (let version = 1; version <= schemaVersion; version += 1) {
-    legacy.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(version);
+    legacy.prepare("INSERT INTO schema_migrations (version,checksum) VALUES (?,?)").run(version, version === 18 ? "manual:018-preserve-ocr-page-orientation" : "legacy");
   }
   legacy.prepare("INSERT INTO users (id, display_name) VALUES ('legacy-user', '旧用户')").run();
   legacy.prepare(`
@@ -738,7 +738,7 @@ test("repairs incompatible AI report sections without removing manual content", 
   const legacy = new DatabaseSync(databasePath);
   legacy.exec(schemaSql);
   for (let version = 1; version <= schemaVersion; version += 1) {
-    legacy.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(version);
+    legacy.prepare("INSERT INTO schema_migrations (version,checksum) VALUES (?,?)").run(version, version === 18 ? "manual:018-preserve-ocr-page-orientation" : "legacy");
   }
   legacy.exec(`
     INSERT INTO users (id, display_name) VALUES ('legacy-user', '旧用户');

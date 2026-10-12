@@ -201,9 +201,9 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 16px; }
 .brand img { width: 34px; height: 34px; border-radius: 9px; box-shadow: var(--shadow-s); }
-.brand div, .account-summary div { display: grid; gap: 2px; min-width: 0; }
+.brand div, .sidebar .account-summary > div { display: grid; gap: 2px; min-width: 0; }
 .brand strong { font-size: 15px; }
-.brand span, .account-summary span { color: var(--muted); font-size: 11px; }
+.brand span, .sidebar .account-summary span { color: var(--muted); font-size: 11px; }
 
 .member-picker-card {
   display: grid; gap: 5px; width: 100%; margin: 0 0 14px; padding: 8px 10px;
@@ -232,8 +232,9 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 .desktop-nav a:hover { background: var(--fill-1); }
 .desktop-nav a.primary { color: var(--brand-strong); }
 .desktop-nav a.router-link-active { background: var(--brand-soft); color: var(--brand-strong); }
-.account-summary { margin-top: auto; border-top: 1px solid var(--line); padding: 12px 6px 0; display: flex; gap: 9px; align-items: center; }
-.account-summary strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .account-summary { margin-top: auto; border-top: 1px solid var(--line); padding: 12px 6px 0; display: flex; gap: 9px; align-items: center; }
+.sidebar .account-summary > div { flex: 1; }
+.sidebar .account-summary strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .workspace { min-width: 0; min-height: 100dvh; }
 .page-content { width: min(1420px, 100%); margin: 0 auto; padding: 30px 34px 64px; }
@@ -1791,6 +1792,8 @@ button.entry-row-open:disabled { cursor: default; }
   position: sticky; top: 0; z-index: 3; min-height: 48px; padding: 8px 14px; border-bottom: 1px solid var(--line);
   background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
+.local-file-selection-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; }
+.local-file-selection-actions small { color: var(--muted); }
 .local-file-toolbar nav { min-width: 0; display: flex; align-items: center; gap: 3px; overflow-x: auto; scrollbar-width: none; }
 .local-file-toolbar nav::-webkit-scrollbar { display: none; }
 .local-file-toolbar nav svg { flex: 0 0 auto; color: var(--muted); }
@@ -2370,6 +2373,7 @@ button.entry-row-open:disabled { cursor: default; }
 .backup-list > .preview-hint { margin: 12px 16px 0; }
 .backup-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px 0; }
 .settings-band > header .backup-header-actions .header-action { margin-left: 0; }
+.settings-form .repair-actions { padding: 0; justify-content: flex-start; }
 .backup-header-actions .muted-action { background: var(--fill-1); color: var(--ink); }
 .native-file-action { position: relative; overflow: hidden; cursor: pointer; }
 .native-file-action input[type="file"] {
@@ -2512,9 +2516,9 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 }
 .account-row:hover { background: var(--fill-1); }
 .account-row:last-child { border-bottom: 0; }
-.account-summary { min-width: 0; display: grid; gap: 4px; }
-.account-summary strong, .account-summary .account-username { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-summary strong { font-size: 13px; }
+.account-row .account-summary { min-width: 0; display: grid; gap: 4px; }
+.account-row .account-summary strong, .account-row .account-summary .account-username { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-row .account-summary strong { font-size: 13px; }
 .account-username { color: var(--muted); font-size: 11px; }
 .account-meta { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .account-role, .account-password-status, .account-status-disabled {
@@ -2622,6 +2626,7 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 .access-list article { min-height: 68px; padding: 11px 18px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 36px minmax(0, 1fr) 112px; align-items: center; gap: 11px; }
 .access-list article > div { min-width: 0; display: grid; gap: 3px; }
 .access-list article > div strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-access-modal .access-list article > div strong { white-space: normal; overflow-wrap: anywhere; }
 
 .sheet-header, .modal-panel > .sheet-header { gap: 0; }
 .sheet-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px 8px 18px; border-bottom: 1px solid var(--line); }

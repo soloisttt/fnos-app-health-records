@@ -55,18 +55,18 @@ watch(selectedMemberId, (value) => {
 });
 
 async function refreshReminderCount(memberId = selectedMemberId.value) {
-  if (!session.value?.authenticated || !memberId) {
+  if (!session.value?.authenticated) {
     pendingReminderCount.value = 0;
     return;
   }
   try {
     const [reminders, notifications] = await Promise.all([
-      request<Reminder[]>(`reminders?memberId=${encodeURIComponent(memberId)}`),
-      request<AppNotification[]>(`notifications?memberId=${encodeURIComponent(memberId)}`)
+      memberId ? request<Reminder[]>(`reminders?memberId=${encodeURIComponent(memberId)}`) : Promise.resolve([]),
+      request<AppNotification[]>(memberId ? `notifications?memberId=${encodeURIComponent(memberId)}` : 'notifications')
     ]);
     if(memberId!==selectedMemberId.value) return;
     pendingReminderCount.value = reminders.filter((item) => item.status === "pending").length
-      + notifications.filter((item) => item.status === "unread").length;
+      + notifications.filter((item) => item.status === "unread" && (item.type !== "feedback_updated" || session.value?.isAdmin)).length;
   } catch (cause) {
     pendingReminderCount.value = 0;
     console.warn("[health-records] 提醒计数刷新失败", cause);

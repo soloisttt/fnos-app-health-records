@@ -4,6 +4,7 @@ import { snapshotExaminationAssignments, restoreExaminationAssignments } from ".
 import { snapshotPublishedRecords, assertPublishedRecordsRetained } from "./page-append-result-guard.service";
 import { rollbackAfterError, getDatabase } from "../database/client";
 import { createId } from "../utils/identifier";
+import { medicationSourceIdentity, originalMedicationIdentity } from '../utils/medication-source-identity';
 import { cleanIndicatorName } from "../utils/indicator-name";
 import { cleanOcrResult } from "../utils/ocr-result";
 import { getAiTaskSettings } from "./ai-settings.service";
@@ -28,6 +29,7 @@ import {
   buildAiExtractionPlan,
   estimateAiUnitRequestOutput,
   localObservationsForLine,
+  observationFieldConfidenceIssue,
   redactAiInputText,
 } from "./ai-input-planner.service";
 import type {
@@ -50,7 +52,7 @@ import {
 } from "./observation-interpretation.service";
 import { assessObservationReference } from "./observation-reference.service";
 
-export const aiExtractionPromptVersion = "health-record-routed-v10-examinations";
+export const aiExtractionPromptVersion = "health-record-routed-v11-medication-layouts";
 const maxInputCharacters = 80_000;
 const reportTypeAliases: Record<string, string> = {
   physical_exam: "checkup",
@@ -155,9 +157,19 @@ export type AiEvidence = {
   /*
    * 视觉复核来源标记。视觉补充的指标数值/单位以图片为准、可能本就不存在于 OCR 文本，
    * 该标记穿透 normalize/merge/persist 落入 evidence_json，
-   * 归一化证据闸门对纯视觉来源跳过数值/单位回指（验收门已锚定真实 OCR 候选行）。
+   * 与 OCR 不一致的数值或单位保留供复核，人工确认后才允许进入默认趋势。
    */
   source?: "vision";
+  /** Image-only additions require manual verification before trend admission. */
+  imageOnly?: boolean;
+  /** Region-anchored visual name correction; keep pending until a person verifies it. */
+  nameCorrected?: boolean;
+  /** Set only from local OCR field provenance during persistence. */
+  ocrLowConfidence?: boolean;
+  /** Local OCR provenance only; never accepted from a model response. */
+  ocrReferenceConfidence?: number;
+  /** Original OCR region retained when the image disagrees with its text. */
+  visionRegion?: { candidateId: string; sourceLineIds: string[]; box: unknown };
   /** Coordinate verifier proved an independent name/value cell pair in one OCR row group. */
   coordinateVerified?: true;
 };
@@ -337,6 +349,7 @@ export type AiExtractionFields = {
 };
 
 export type AiExtractionInput = {
+  includesMedicationContent?: boolean;
   reportId: string;
   text: string;
   inputCharacters: number;
@@ -527,6 +540,10 @@ function evidenceValue(value: unknown): AiEvidence[] {
         ? ({ source: "vision" } as const)
         : null;
     const raw = item as Record<string, unknown>;
+    const region = raw.visionRegion as AiEvidence['visionRegion'] | undefined;
+    const visionRegion = source && region && typeof region.candidateId === 'string' && Array.isArray(region.sourceLineIds)
+      ? {candidateId:region.candidateId.slice(0,200),sourceLineIds:region.sourceLineIds.filter(id=>typeof id==='string').slice(0,50),
+        box:Array.isArray(region.box) && region.box.flat().every(Number.isFinite) ? region.box : null} : null;
     const coordinateVerified = raw.coordinateVerified === true
       ? ({ coordinateVerified: true } as const)
       : null;
@@ -535,7 +552,9 @@ function evidenceValue(value: unknown): AiEvidence[] {
     const table = rawTable && typeof rawTable.headerText === "string" && Array.isArray(rawTable.headerSourceLineIds) && Array.isArray(rawTable.rowSourceLineIds)
       ? { headerText: rawTable.headerText.slice(0, 1000), headerSourcePageNumber: numberValue(rawTable.headerSourcePageNumber), headerSourceLineIds: rawTable.headerSourceLineIds.filter((id): id is string => typeof id === "string").slice(0, 50), rowSourceLineIds: rawTable.rowSourceLineIds.filter((id): id is string => typeof id === "string").slice(0, 50), resultColumn: rawColumn && Number.isSafeInteger(rawColumn.index) ? { index: Number(rawColumn.index), headerText: textValue(rawColumn.headerText, 200), selectionBasis: rawColumn.selectionBasis === "local_source_map" ? "local_source_map" as const : "explicit_current_result_header" as const } : null }
       : null;
-    return [{ pageNumber, quote, ...(source || {}), ...(coordinateVerified || {}), ...(table ? { table } : {}) }];
+    return [{ pageNumber, quote, ...(source || {}), ...(source && raw.imageOnly === true ? {imageOnly: true} : {}),
+      ...(source && visionRegion && raw.nameCorrected === true ? {nameCorrected: true} : {}),
+      ...(visionRegion ? {visionRegion} : {}), ...(coordinateVerified || {}), ...(table ? { table } : {}) }];
   });
 }
 
@@ -1519,6 +1538,7 @@ function effectiveContentTypes(input: AiExtractionInput) {
 
 function narrativeContract(input: AiExtractionInput) {
   const types = new Set(effectiveContentTypes(input));
+  if (input.includesMedicationContent) types.add("prescription");
   const parts = [
     `当前任务只整理原报告叙事章节，不输出 observations、morphologyFindings 或文档概况字段。所有 content 必须忠实保留原文，不得概括或补写。`,
   ];
@@ -1557,7 +1577,10 @@ function narrativeContract(input: AiExtractionInput) {
       `住院可输出 clinicalDiagnosis、diagnoses、medications、procedures，以及 sectionKey 为 inpatient_course、inpatient_discharge_instructions 的 reportSections。`,
     );
   }
-  if (types.has("prescription")) parts.push(`处方只输出 medications。`);
+  if (types.has("prescription")) parts.push(`处方只输出 medications。用药可出现在门诊病历、住院记录、出院带药或独立用药清单中，不要求有“处方”标题。
+编号列表、表格、药名与用法分行、多栏和跨页续表均按同一药品条目关联；只有相同编号、明确表格列或连续上下文能证明归属时才合并，不能把相邻栏或下一药品的剂量拼给上一药品。跨页证据分别保留页码；证据不足的规格、剂量、频次留空。
+药品规格不是每次剂量，数量不是疗程；保留盐型、剂型及不同规格，不根据商品名推断通用名。频次缩写及即刻、必要时等原样保留，不换算或补全。处方 context=prescription、门诊用药 context=outpatient、住院用药 context=inpatient、出院带药 context=discharge；按条目所在章节判断。
+停用、暂停、调整或既往用药只能按原文明示保留在 instructions，不能改成当前正在使用；单纯过敏史、药品说明书中的示例及收费明细不作为用药事实。不得添加任何用药建议。`);
   if (types.has("billing"))
     parts.push(
       `票据只输出 billingSummary、billingItems，金额必须来自原文，不得自行计算。`,
@@ -2593,15 +2616,7 @@ function mergeReportObservationPair(left: AiObservation, right: AiObservation) {
       ? fallback[key]
       : value;
   };
-  const evidence = [...left.evidence, ...right.evidence].filter(
-    (entry, index, entries) =>
-      entries.findIndex(
-        (candidate) =>
-          candidate.pageNumber === entry.pageNumber &&
-          compactObservationIdentity(candidate.quote) ===
-            compactObservationIdentity(entry.quote),
-      ) === index,
-  );
+  const evidence = uniqueObservationEvidence([...left.evidence, ...right.evidence]);
   return {
     ...primary,
     sectionName: fill("sectionName"),
@@ -2661,17 +2676,25 @@ function strictNumericObservationResult(value: string) {
 }
 
 function uniqueObservationEvidence(evidence: AiEvidence[]) {
-  return evidence
-    .filter((entry) => entry.pageNumber > 0 && entry.quote.trim())
-    .filter(
-      (entry, index, entries) =>
-        entries.findIndex(
-          (candidate) =>
-            candidate.pageNumber === entry.pageNumber &&
-            compactObservationIdentity(candidate.quote) ===
-              compactObservationIdentity(entry.quote),
-        ) === index,
-    );
+  const unique = new Map<string, AiEvidence>();
+  for (const entry of evidence) {
+    if (!(entry.pageNumber > 0 && entry.quote.trim())) continue;
+    const key = `${entry.pageNumber}:${compactObservationIdentity(entry.quote)}`;
+    const previous = unique.get(key);
+    if (!previous) { unique.set(key, entry); continue; }
+    // Identical source text must not erase the visual provenance or a pending
+    // review flag simply because the text result was collected first.
+    const merged = { ...previous, ...entry,
+      ...(previous.source || entry.source ? {source: 'vision' as const} : {}),
+      ...(entry.visionRegion || previous.visionRegion ? {visionRegion: entry.visionRegion || previous.visionRegion} : {}),
+      ...(previous.table || entry.table ? {table: previous.table || entry.table} : {}),
+    };
+    for (const flag of ['imageOnly','nameCorrected','ocrLowConfidence','coordinateVerified'] as const) {
+      if (previous[flag] || entry[flag]) merged[flag] = true;
+    }
+    unique.set(key, merged);
+  }
+  return [...unique.values()];
 }
 
 
@@ -2681,7 +2704,9 @@ function uniqueObservationEvidence(evidence: AiEvidence[]) {
  */
 export function sanitizeReportObservations(observations: AiObservation[]) {
   const sanitized = observations.flatMap((observation) => {
-    const cleanedName = cleanIndicatorName(observation.itemName);
+    const cleanedName = cleanIndicatorName(observation.itemName, {
+      tableOrdinal: observation.evidence.some(entry => Boolean(entry.table)),
+    });
     const normalizedItemName = cleanedName.name;
     /* 小结枚举回声（"3、血清总胆固醇测定增高:5.48…"）：名称带序号前缀、
        结果却是建议类长文（真实测量值埋在名称里）。明细页的同名指标已存在，
@@ -2771,6 +2796,9 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       {
         ...observation,
         itemName,
+        normalizedName: /载脂蛋白|APO/i.test(itemName) && /[\/／]|比值|比例/.test(itemName)
+          && observation.normalizedName && !/[\/／]|比值|比例/.test(observation.normalizedName)
+          ? null : observation.normalizedName === observation.itemName ? itemName : observation.normalizedName,
         itemCode: observation.itemCode || cleanedName.code,
         resultText,
         numericValue,
@@ -2910,7 +2938,10 @@ function validatePersistedObservationEvidence(
   return observations.map((observation) => ({
     ...observation,
     evidence: uniqueObservationEvidence(
-      observation.evidence.flatMap((evidence) => {
+      observation.evidence.flatMap((evidence): AiEvidence[] => {
+        if (evidence.source === 'vision' && evidence.imageOnly && pages.has(evidence.pageNumber)) {
+          return [{...evidence, coordinateVerified: undefined}];
+        }
         const quote = compactPersistedEvidence(evidence.quote);
         if (quote.length < 2) return [];
         const plannedLines = plannedPages.get(evidence.pageNumber) || [];
@@ -2951,6 +2982,8 @@ function validatePersistedObservationEvidence(
                 /* 视觉复核来源标记随证据改写一并保留，
                    归一化闸门据此区分"以图为准"的数值/单位 */
                 ...(evidence.source ? { source: evidence.source } : {}),
+                ...(evidence.visionRegion ? { visionRegion: evidence.visionRegion } : {}),
+                ...(evidence.nameCorrected && evidence.source === 'vision' ? { nameCorrected: true } : {}),
                 ...(evidence.coordinateVerified ? { coordinateVerified: true as const } : {}),
               },
             ]
@@ -3046,11 +3079,13 @@ function localFactMatchScore(
 ) {
   const observationNames = new Set(
     [observation.itemName, observation.normalizedName]
+      .flatMap(name => [name, cleanIndicatorName(name || '', {tableOrdinal:true}).name])
       .map(compactObservationIdentity)
       .filter(Boolean),
   );
   const factNames = new Set(
     [fact.itemName, fact.normalizedName]
+      .flatMap(name => [name, cleanIndicatorName(name || '', {tableOrdinal:true}).name])
       .map(compactObservationIdentity)
       .filter(Boolean),
   );
@@ -3071,7 +3106,7 @@ function bestLocalFact(observation: AiObservation, line: PlannedOcrLine) {
   return (
     localObservationsForLine(line)
       .map((fact) => ({ fact, score: localFactMatchScore(observation, fact) }))
-      .filter((candidate) => candidate.score >= 5)
+      .filter((candidate) => candidate.score >= 6)
       .sort(
         (left, right) =>
           right.score - left.score ||
@@ -3165,12 +3200,26 @@ function enrichPersistedObservationEvidence(
     evidence: observation.evidence.map((evidence) => {
       evidence = { ...evidence, pageId: plannedPages.find(page => page.pageNumber === evidence.pageNumber)?.pageId };
       const quote = compactPersistedEvidence(evidence.quote);
-      const line = (linesByPage.get(evidence.pageNumber) || []).find(
+      const pageLines = linesByPage.get(evidence.pageNumber) || [];
+      const exactLine = pageLines.find(
         (candidate) => compactPersistedEvidence(candidate.text) === quote,
       );
+      // A validated quote can be one original OCR cell inside a reconstructed
+      // row. Keep its field confidence instead of requiring the full row quote.
+      const sourceLines = exactLine ? [] : pageLines.filter(candidate =>
+        candidate.sourceCells?.some(cell => compactPersistedEvidence(cell.text) === quote)
+        || compactPersistedEvidence(candidate.text).includes(quote));
+      const line = exactLine || (sourceLines.length === 1 ? sourceLines[0] : null);
       if (!line) return evidence;
       const table = structuredTableEvidence(line, observation);
-      return table ? { ...evidence, table } : evidence;
+      const confidence = observationFieldConfidenceIssue(line, observation);
+      return {
+        ...evidence,
+        ...(table ? { table } : {}),
+        ...(confidence.fields.length ? { ocrLowConfidence: true } : {}),
+        ...(confidence.referenceConfidence !== null && confidence.referenceConfidence < .65
+          ? { ocrReferenceConfidence: confidence.referenceConfidence } : {}),
+      };
     }),
   }));
 }
@@ -3383,6 +3432,7 @@ export function deduplicateReportObservations(
 type ProtectedClinicalFact = {
   identity: string;
   evidenceJson: string;
+  originalIdentity?: string;
 };
 
 function clinicalIdentity(...parts: Array<string | number | null | undefined>) {
@@ -3425,6 +3475,24 @@ function clinicalFactProtected(
   });
 }
 
+function medicationFactProtected(rows: ProtectedClinicalFact[], identity: string, evidence: AiEvidence[]) {
+  const keys = (value: string | AiEvidence[]) => {
+    let entries: AiEvidence[] = [];
+    try {
+      const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : value;
+      if (Array.isArray(parsed)) entries = parsed;
+    } catch { return []; }
+    return entries.filter(item => item.quote?.trim()).map(item =>
+      `${item.pageNumber}|${item.quote.normalize('NFKC').toLowerCase().replace(/[\s|:]/g, '')}`);
+  };
+  const incoming = keys(evidence);
+  return rows.some(row => {
+    if (row.identity !== identity && row.originalIdentity !== identity) return false;
+    const saved = keys(row.evidenceJson);
+    return !saved.length || !incoming.length || incoming.some(key => saved.includes(key));
+  });
+}
+
 function protectedClinicalFacts(reportId: string) {
   const db = getDatabase();
   const where =
@@ -3452,17 +3520,17 @@ function protectedClinicalFacts(reportId: string) {
       db
         .prepare(
           `
-      SELECT medication_context AS type, medication_name AS name,
-        evidence_json AS evidenceJson FROM report_medications WHERE ${where}
+      SELECT *, evidence_json AS evidenceJson FROM report_medications WHERE ${where}
     `,
         )
         .all(reportId) as Array<{
-        type: string;
-        name: string;
+        [key: string]: unknown;
+        manual_fields_json: string;
         evidenceJson: string;
       }>
     ).map((row) => ({
-      identity: clinicalIdentity(row.type, row.name),
+      identity: medicationSourceIdentity(row),
+      originalIdentity: originalMedicationIdentity(row.manual_fields_json),
       evidenceJson: row.evidenceJson,
     })),
     procedures: (
@@ -3582,10 +3650,10 @@ export function persistAiExtraction(
   });
   const fields = {
     ...normalized.fields,
-    observations: enrichPersistedObservationEvidence(
+    observations: sanitizeReportObservations(enrichPersistedObservationEvidence(
       reportId,
       normalized.fields.observations,
-    ),
+    )),
   };
   const examinationPagesForOverrides=examinationSourcePages(reportId);
   const observationsWithOverrides = applyObservationFieldOverrides(
@@ -3818,9 +3886,9 @@ export function persistAiExtraction(
     ).run(reportId);
     for (const medication of fields.medications) {
       if (
-        clinicalFactProtected(
+        medicationFactProtected(
           protectedClinical.medications,
-          clinicalIdentity(medication.context, medication.medicationName),
+          medicationSourceIdentity(medication),
           medication.evidence,
         )
       )

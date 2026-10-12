@@ -137,7 +137,7 @@ onBeforeUnmount(() => observer?.disconnect());
 
 <template>
   <section ref="root" class="settings-page system-logs-page">
-    <SubPageHeader title="系统日志" description="应用运行异常、接口失败与日志占用">
+    <SubPageHeader back-to="/me/maintenance" back-label="返回维护工具" title="系统日志" description="应用运行异常、接口失败与日志占用">
       <button class="icon-button" type="button" title="刷新" :disabled="loading || refreshing" @click="refresh">
         <RefreshCw :size="17" :class="{ 'spin-icon': loading || refreshing }" />
       </button>

@@ -1,3 +1,4 @@
+import { hasLostMeasurementBound, hasLostMeasurementInterval, parseExactMeasurement, leadingMeasurementNumber, measurementEvidenceRegions } from '../utils/measurement-bound';
 import { memberAccessSql } from "./member.service";
 import { rollbackAfterError, getDatabase } from "../database/client";
 import { createHash } from "node:crypto";
@@ -16,9 +17,10 @@ import {
 import { assertMemberManage } from "./member.service";
 import { assessObservationReference } from "./observation-reference.service";
 import { linkedObservationUnitQuotes } from "./observation-unit-evidence.service";
+import { unitFromResultCell } from "./measurement-units.service";
 
 export function activeIndicatorNormalizationVersion() {
-  return `indicator-normalization-p10-unit-provenance-v3-${activeIndicatorDictionaryVersion()}`;
+  return `indicator-normalization-p13-field-confidence-width-identity-${activeIndicatorDictionaryVersion()}`;
 }
 
 function normalizationVersion() {
@@ -314,13 +316,17 @@ const indicatorCodePattern = /^[A-Za-z][A-Za-z0-9.+-]{0,15}[#%]?$/;
 export function indicatorNameCandidates(value: string | null | undefined) {
   // Only remove edge footnote markers from lookup candidates; keep persisted source
   // names, internal operators and measurement qualifiers intact.
-  const raw = cleanIndicatorName(value || "").name;
+  const cleaned = cleanIndicatorName(value || "");
+  const raw = cleaned.name
+    // 表格序号后紧跟的星号是脚注/异常标记；只在后面明确是中文项目名时移除。
+    .replace(/^\s*(?:no\.?\s*)?\d{1,3}\s*(?:[.、)）:：]\s*)?[*﹡★☆]\s*(?=[\p{Script=Han}])/iu, "");
   if (!raw) return [];
   const candidates = new Set<string>();
   const add = (candidate: string | null | undefined) => {
     const compact = compactIndicatorKey(candidate);
     if (compact) candidates.add(compact);
   };
+  add(cleaned.code);
   // 部分报告会把表格序号 OCR 到指标名称前，序号不是指标语义的一部分。
   // 同时覆盖「3.项目」「3、项目」「（3）项目」「No.3 项目」和「3 项目」等变体。
   const withoutLeadingOrdinal = raw
@@ -492,6 +498,7 @@ const unitAliases: Record<string, string> = {
     "u/ml": "U/mL",
     "iu/l": "U/L",
     "miu/l": "mIU/L",
+    "μu/ml": "μU/mL",
     "uiu/ml": "μIU/mL",
     "μiu/ml": "μIU/mL",
     "pmol/l": "pmol/L",
@@ -613,16 +620,17 @@ const unitAliases: Record<string, string> = {
 
 function parseNumericResultText(value: string | null | undefined) {
   if (!value) return null;
-  const normalized = value.replace(/,/g, "").replace(/[<>≤≥]/g, " ");
-  const match = normalized.match(/[-+]?\d+(?:\.\d+)?/);
+  const normalized = value.normalize('NFKC').replace(/,/g, "").replace(/[<>≤≥]/g, " ");
+  const match = normalized.match(/[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/);
   if (!match) return null;
   const parsed = Number(match[0]);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 function observationEvidenceNumbers(value: unknown) {
-  const normalized = String(value || "").normalize("NFKC").replace(/[−–—]/g, "-");
-  return [...normalized.matchAll(/(?:^|[^\d.])([-+]?\d+(?:\.\d+)?)(?![\d.])/g)]
+  const normalized = String(value || "").normalize("NFKC").replace(/[−–—]/g, "-")
+    .replace(/(?<=\d),(?=\d{3}(?:\D|$))/g, '');
+  return [...normalized.matchAll(/(?:^|[^\d.])([-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)(?![\d.])/g)]
     .map((match) => Number(match[1]))
     .filter((number) => Number.isFinite(number));
 }
@@ -656,6 +664,57 @@ function observationEvidenceQuotes(row: Pick<ObservationRow, "evidenceJson">) {
   } catch {
     return [];
   }
+}
+
+/** Names may use trusted aliases, but values and units must still come from that item's cells. */
+function trustedObservationNames(row: ObservationRow) {
+  const identities = [...new Set(candidateAliases(row)
+    .filter(candidate => candidate.sourceOrigin !== 'ai_normalized_name' && candidate.alias.aliasSource !== 'ai_suggestion')
+    .map(candidate => candidate.alias.indicatorId))];
+  if (identities.length !== 1) return [];
+  const aliases = getDatabase().prepare(`
+    SELECT alias_name AS aliasName, scope, hospital_name AS hospitalName,
+      department_name AS departmentName, report_type AS reportType
+    FROM indicator_aliases WHERE indicator_id = ? AND enabled = 1 AND source <> 'ai_suggestion'
+  `).all(identities[0]) as AliasRow[];
+  return aliases.filter(alias => aliasAppliesToObservation(alias, row)).map(alias => alias.aliasName);
+}
+
+function observationResultEvidence(row: ObservationRow): string[] {
+  let entries: Array<{pageNumber?: number; quote?: string; table?: {headerText?: string; resultColumn?: {index?: number}; sourceMap?: {result?: {text?: string}; unit?: {text?: string; inherited?: boolean}}}}>;
+  try { const parsed = JSON.parse(row.evidenceJson || '[]'); if (!Array.isArray(parsed)) return []; entries = parsed; } catch { return []; }
+  const directNames = [row.itemName, ...indicatorNameCandidates(row.itemName)];
+  const codeNames = [row.itemCode || '', ...indicatorNameCandidates(row.itemCode)];
+  const hasDirectSource = entries.some(entry => entry && typeof entry.quote === 'string'
+    && measurementEvidenceRegions(entry.quote, [...directNames, ...codeNames]).length > 0);
+  let aliases: string[] | undefined;
+  return entries.flatMap(entry => {
+    if (!entry || typeof entry.quote !== 'string' || !(Number(entry.pageNumber) > 0)) return [];
+    const source = entry.table?.sourceMap;
+    if (source?.result?.text && leadingMeasurementNumber(source.result.text) !== null) {
+      return [[source.result.text, source.unit?.inherited ? '' : source.unit?.text].filter(Boolean).join(' ')];
+    }
+    const index = entry.table?.resultColumn?.index;
+    const cells = entry.quote.split(/[|｜]/).map(cell => cell.trim());
+    if (Number.isSafeInteger(index) && index! >= 0 && cells[index!]) {
+      // The result column was verified by the local planner before persistence.
+      const headers = (entry.table?.headerText || '').split(/[|｜]/);
+      const nameColumn = (text: string) => /项目|名称|\btest\b|\bitem\b/i.test(text);
+      let start = index!;
+      let end = index! + 1;
+      while (start > 0 && !nameColumn(headers[start] || '')) start -= 1;
+      while (end < headers.length && !nameColumn(headers[end])) end += 1;
+      const unitIndex = headers.findIndex((text, i) => i >= start && i < end && /单位|\bunits?\b/i.test(text));
+      return [[cells[index!], unitIndex >= 0 ? cells[unitIndex] : ''].filter(Boolean).join(' ')];
+    }
+    const direct = measurementEvidenceRegions(entry.quote, directNames);
+    if (direct.length) return direct;
+    const coded = measurementEvidenceRegions(entry.quote, codeNames);
+    if (coded.length) return coded;
+    if (hasDirectSource) return [];
+    aliases ??= trustedObservationNames(row);
+    return measurementEvidenceRegions(entry.quote, aliases);
+  });
 }
 
 /**
@@ -802,7 +861,23 @@ export function assessPersistedObservationReference(row: {
     low: row.referenceLow, high: row.referenceHigh, text: row.referenceText
   });
   if (reference.status !== "trusted" || !row.hasAiExtraction || row.manualReviewed) return reference;
-  const numbers = observationEvidenceQuotes(row).flatMap(observationEvidenceNumbers);
+  try {
+    const evidence = JSON.parse(row.evidenceJson || '[]') as Array<{ocrReferenceConfidence?:number;table?: {sourceMap?: {reference?: {confidence?: number | null}}}}>;
+    if (Array.isArray(evidence) && evidence.some(entry => {
+      const confidence = entry?.ocrReferenceConfidence ?? entry?.table?.sourceMap?.reference?.confidence;
+      return typeof confidence === 'number' && confidence < .65;
+    })) return { ...reference, low: null, high: null, status: 'raw_only' as const, reason: '参考范围 OCR 置信度不足，已停止用于自动判定' };
+  } catch { /* Missing or malformed evidence is checked below. */ }
+  const referenceSources: string[] = [];
+  try {
+    const entries=JSON.parse(row.evidenceJson || '[]');
+    if (Array.isArray(entries)) for (const entry of entries) {
+      const source=entry?.table?.sourceMap?.reference;
+      if (typeof source?.text==='string' && /参考|正常范围/.test(source.headerText || '')
+        && Array.isArray(source.sourceLineIds) && source.sourceLineIds.length) referenceSources.push(source.text);
+    }
+  } catch { /* Fall back to quoted evidence. */ }
+  const numbers = [...observationEvidenceQuotes(row), ...referenceSources].flatMap(observationEvidenceNumbers);
   if ([reference.low, reference.high].some((bound) => bound !== null
     && !numbers.some((value) => sameObservationEvidenceNumber(value, bound)))) {
     return {
@@ -816,7 +891,7 @@ export function assessPersistedObservationReference(row: {
 /**
  * 视觉复核来源的观测：数值与单位以页面图片为准，可能本就不存在于 OCR 文本
  * （OCR 误读正是复核要修正的场景）。此类观测的验收门已在视觉复核阶段锚定
- * 真实 OCR 候选行，这里识别"全部证据均为视觉来源"以跳过数值/单位回指。
+ * 真实 OCR 候选行；这里只选择提示语，视觉来源仍须校验数值与单位归属。
  */
 function visionOnlyEvidence(row: Pick<ObservationRow, "evidenceJson">) {
   if (typeof row.evidenceJson !== "string") return false;
@@ -842,9 +917,17 @@ function observationEvidenceQualityIssue(row: ObservationRow) {
   // 内存待落库项与未经过 AI 持久化链路的历史/手工数据不套用本闸门。
   if (row.evidenceJson === undefined || !row.hasAiExtraction) return null;
   const manuallyReviewed = Boolean(row.manualReviewed);
-  // 纯视觉来源与人工确认同等对待：跳过名称/数值/单位的 OCR 回指，
-  // 但仍要求存在可核验证据（验收门已保证 quote 是真实 OCR 候选行）。
-  const anchorBypassed = manuallyReviewed || visionOnlyEvidence(row);
+  // Image corrections remain visible, but a model is not a manual reviewer.
+  // Values conflicting with OCR need confirmation before entering trends.
+  const anchorBypassed = manuallyReviewed;
+  if (!manuallyReviewed) {
+    try {
+      const evidence = JSON.parse(row.evidenceJson || '[]') as Array<{imageOnly?: boolean;nameCorrected?: boolean;ocrLowConfidence?: boolean}>;
+      if (evidence.some(item => item.imageOnly)) return "原图补提取结果需人工核对后进入趋势";
+      if (evidence.some(item => item.nameCorrected)) return "原图复核修正的项目名称需人工核对后进入趋势";
+      if (evidence.some(item => item.ocrLowConfidence)) return "项目、结果或单位 OCR 置信度不足，请对照原图核对后进入趋势";
+    } catch { /* Missing evidence is handled below. */ }
+  }
   const quotes = observationEvidenceQuotes(row);
   if (!quotes.length && !manuallyReviewed) return "缺少可核验的 OCR 证据，禁止进入默认趋势";
   const nameSearchQuotes = quotes.flatMap((quote) => [
@@ -856,25 +939,43 @@ function observationEvidenceQualityIssue(row: ObservationRow) {
     .map(compactObservationEvidence)
     .filter((value) => value.length >= 2);
   const numericValue = row.numericValue ?? parseNumericResultText(row.resultText);
-  const sourceNumbers = quotes.flatMap(observationEvidenceNumbers);
+  const resultRegions = observationResultEvidence(row);
+  const sourceNumbers = resultRegions.map(leadingMeasurementNumber).filter((value): value is number => value !== null);
   const nameBackReferenced = !nameCandidates.length || nameSearchQuotes.some((quote) =>
     nameCandidates.some((name) => quote.includes(name) || name.includes(quote))
   );
+  const side = row.itemName.match(/^(左|右)(?:侧)?/)?.[1];
+  const vascularKind = /踝肱指数/.test(row.itemName) ? 'ABI'
+    : /肱踝脉搏波传导速度/.test(row.itemName) ? 'PWV' : null;
+  const contextualAnchor = Boolean(side && vascularKind && quotes.some(quote => {
+    if (vascularKind === 'PWV' && !/PWV|脉搏波传导速度/i.test(quote)) return false;
+    const name = row.itemName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const label = vascularKind === 'ABI' ? `${side}(?:侧)?踝(?:肱指数)?` : `${side}(?:侧)?`;
+    const matches = quote.matchAll(new RegExp(`(?:${name}|${label})\\s*(?:${vascularKind === 'ABI' ? 'ABI' : '(?:ba)?PWV'}\\s*)?[：:|]?\\s*([-+]?\\d+(?:\\.\\d+)?)`, 'gi'));
+    return [...matches].some(match => numericValue !== null && sameObservationEvidenceNumber(Number(match[1]), numericValue));
+  }));
+  // A shared code (ABI/baPWV) never establishes which side owns the value.
+  if (!anchorBypassed && side && vascularKind && !contextualAnchor) {
+    return "左右侧结果无法回指对应 OCR 数值，禁止进入默认趋势";
+  }
   if (!anchorBypassed && !nameBackReferenced) {
-    // AI 常把原文口语化表述规范为标准名（如「左踝：1.08」→「左侧踝肱指数」），
-    // 名称字面无法回指但数值锚点完整时，不否决整条证据链；
-    // 仅当名称与数值都无法回指时才判定证据链断裂。
-    const numericAnchored = numericValue !== null
-      && sourceNumbers.some((value) => sameObservationEvidenceNumber(value, numericValue));
-    if (!numericAnchored) return "项目名称无法回指 OCR 证据，禁止进入默认趋势";
+    // Synonyms require an enabled, scoped dictionary alias for the same identity.
+    // Equal values alone cannot identify an item on a multi-row report.
+    const aliasAnchored = trustedObservationNames(row).some(alias => {
+      const name = compactObservationEvidence(alias);
+      if (name.length < 2) return false;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return nameSearchQuotes.some(quote => new RegExp(`(?<![a-z])${escaped}(?![a-z])`, 'i').test(quote));
+    });
+    if (!contextualAnchor && !aliasAnchored) return "项目名称无法回指 OCR 证据，禁止进入默认趋势";
   }
 
   const resultValue = parseNumericResultText(row.resultText);
   if (numericValue !== null && resultValue !== null && !sameObservationEvidenceNumber(numericValue, resultValue)) {
     return "结构化数值与结果文本不一致，禁止进入默认趋势";
   }
-  if (!anchorBypassed && numericValue !== null && !sourceNumbers.some((value) => sameObservationEvidenceNumber(value, numericValue))) {
-    return "结果数值无法回指 OCR 证据，禁止进入默认趋势";
+  if (!anchorBypassed && !contextualAnchor && numericValue !== null && !sourceNumbers.some((value) => sameObservationEvidenceNumber(value, numericValue))) {
+    return visionOnlyEvidence(row) ? "视觉复核数值与 OCR 不一致，请对照原图确认后进入趋势" : "结果数值无法回指 OCR 证据，禁止进入默认趋势";
   }
 
   const rawUnit = row.unit?.trim() || null;
@@ -899,10 +1000,19 @@ function observationEvidenceQualityIssue(row: ObservationRow) {
     const containsUnit = (quote: string) => unitCandidates.some(unit => {
       const escaped = unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       // A smaller unit token must not match inside another prefix or compound unit (g/L in mg/L).
-      const unitText = quote.split(/[（）()，,。:：;；、|｜]+/).map(compactUnit).join(' ');
+      const unitText = quote.replace(/(?<=\d)\s*[HL](?=\s|$)/gi, ' ')
+        .split(/[（）()，,。:：;；、|｜\s]+/).map(compactUnit).join(' ');
       return new RegExp(`(?<![a-zµμ])${escaped}(?![a-zµμ/])`, 'i').test(unitText);
     });
-    const unitAnchored = quotes.some(containsUnit)
+    const unitAnchored = (contextualAnchor ? quotes : resultRegions).some(quote => {
+      // Ignore following projects in an inline paragraph; only the first unit after the result can qualify.
+      const tail = quote.normalize('NFKC').replace(/^[↑↓▲▼⬆⬇]?\s*(?:<=|>=|[<>≤≥])?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?\s*/, '')
+        .replace(/^[HL↑↓▲▼⬆⬇]\s*/i, '').trim();
+      if (contextualAnchor) return containsUnit(quote);
+      const unitText = compactUnit(tail);
+      return unitCandidates.some(unit => unitText.startsWith(unit)
+        && !/[a-zµμ/]/i.test(unitText.slice(unit.length, unit.length + 1)));
+    })
       || linkedObservationUnitQuotes(row.reportId, row.evidenceJson)
         .some(containsUnit);
     if (!unitAnchored) {
@@ -919,6 +1029,7 @@ export function assessTrendAdmission(input: {
   numericValue: number | null; resultText: string; unit: string | null; evidenceJson: string;
   normalizationQuality?: string | null; normalizationMatchedBy?: string | null;
   normalizationExcludedReason?: string | null; canonicalKey?: string | null; canonicalName?: string | null;
+  canonicalUnit?: string | null;
   hasAiExtraction?: number; manualReviewed?: number | boolean;
   hospitalName?: string | null; reportType?: string; reportIssuedAt?: string | null;
 }) {
@@ -943,6 +1054,19 @@ export function assessTrendAdmission(input: {
     // Legacy standard records retain their existing admission; unknown records always require evidence or manual review.
     hasAiExtraction: standard ? input.hasAiExtraction : 1,
   };
+  if (/^[<>≤≥]/.test(input.resultText.normalize('NFKC').trim())) return deny('限值结果不能作为精确数值进入趋势');
+  const exactValue = parseExactMeasurement(input.resultText, input.unit || (standard ? input.canonicalUnit || null : null), normalizeUnit);
+  if (exactValue === null || !sameObservationEvidenceNumber(value, exactValue)) {
+    return deny('结果不是明确的单个数值，区间或叙述结果不能进入数值趋势');
+  }
+  if (standard && input.hasAiExtraction && !input.manualReviewed && input.canonicalUnit
+    && !input.unit?.trim() && !unitFromResultCell(input.resultText)) return deny('缺少原始单位，请核对后进入趋势');
+  const resultRegions = observationResultEvidence(row);
+  const boundRegions = resultRegions.length ? resultRegions : observationEvidenceQuotes(row);
+  if (!input.manualReviewed && boundRegions.some(quote =>
+    hasLostMeasurementBound(input.resultText, value, quote))) return deny('OCR 证据包含同值的限值表达，需人工确认是否为实测数值');
+  if (!input.manualReviewed && boundRegions.some(quote =>
+    hasLostMeasurementInterval(value, quote))) return deny('OCR 证据包含同值的区间表达，需人工确认是否为实测数值');
   const issue = observationEvidenceQualityIssue(row);
   if (issue) return deny(issue);
   if (standard) return { eligible: true, kind: 'standard', reason: null } as const;
@@ -952,16 +1076,11 @@ export function assessTrendAdmission(input: {
   // 后续补充机构后趋势键变化，该报告的点自动归入对应机构分组。
   if (!Number.isFinite(Date.parse(input.reportIssuedAt || ''))) return deny('请先确认报告日期');
   if (!input.unit?.trim()) return deny('未标准化结果需先确认单位');
-  // 机构内数值必须是明确的单值结果：允许“5.30 (mmol/L)↑”这类数值+内联单位/箭头写法
-  //（提取管线的常见输出），拒绝“<2”“5.3-6.1”等限值或区间表达；数值与文本一致性已在上方校验。
-  if (textValue === null || !/^[+-]?\d+(?:\.\d+)?\s*(?:[(（][^)）]*[)）]\s*)?[↑↓▲▼⬆⬇]?$/.test(input.resultText.trim())) {
-    return deny('结果不是明确数值或与结果文本不一致');
-  }
   // Unknown names cannot borrow the standard-name evidence fallback (which tolerates AI synonyms).
   if (!input.manualReviewed && !observationEvidenceQuotes(row).some(quote => compactObservationEvidence(quote).includes(compactObservationEvidence(input.itemName)))) {
     return deny('未标准化项目名称无法回指 OCR 证据');
   }
-  if (!input.manualReviewed && observationEvidenceQuotes(row).some(quote => {
+  if (!input.manualReviewed && boundRegions.some(quote => {
     const bounds = quote.normalize('NFKC').matchAll(/[<>≤≥]\s*([-+]?\d+(?:\.\d+)?)/g);
     return [...bounds].some(match => Number(match[1]) === value);
   })) return deny('OCR 证据包含同值的限值表达，需人工确认是否为实测数值');
@@ -1251,6 +1370,14 @@ function normalizeObservationAutomatically(row: ObservationRow): NormalizationRe
     || specimenContext((getDatabase().prepare('SELECT title FROM reports WHERE id = ?')
       .get(row.reportId) as { title: string } | undefined)?.title || '');
   const candidates = candidateAliases(row).filter(({ alias }) => {
+    // A ratio must never be admitted through its denominator's code or AI name.
+    if (/[\/／]|比值|比例/.test(row.itemName)
+      && /载脂蛋白|APO/i.test(row.itemName)
+      && !/[\/／]|比值|比例/.test(alias.displayName)) return false;
+    // RBC/PLT in a distribution-width name identifies the cell, not its count.
+    // Keep the full measurement meaning even when a split code or AI name matches.
+    if (/分布宽度/.test(row.itemName)
+      && /(?:^|_)(?:rbc|plt|wbc)(?:_|$)/.test(alias.canonicalKey)) return false;
     const blood = /^cbc_/.test(alias.canonicalKey) || ['whole_blood', 'serum', 'plasma'].includes(alias.specimen || '');
     const urine = alias.specimen === 'urine' || alias.canonicalKey.startsWith('urine_');
     const stool = alias.canonicalKey.startsWith('stool_');
@@ -1299,7 +1426,7 @@ function normalizeObservationAutomatically(row: ObservationRow): NormalizationRe
     resultTypeCompatible: boolean;
   };
   const scoredCandidates: ScoredCandidate[] = [];
-  const rawUnit = normalizeUnit(row.unit);
+  const rawUnit = normalizeUnit(row.unit || unitFromResultCell(row.resultText));
   const context = [row.sectionName, row.reportType, row.performingDepartment, row.reportingDepartment].filter(Boolean).join(" ");
   const stoolContext = /便常规|粪便|大便/.test(context);
   const urineContext = /尿常规|尿沉渣|尿镜检|尿液|尿标本/.test(context);
@@ -1463,6 +1590,7 @@ function normalizeObservationAutomatically(row: ObservationRow): NormalizationRe
     && !hasUniqueResultTypeEvidence;
   const numericValue = row.numericValue ?? parseNumericResultText(row.resultText);
   let quality = classifyQuality(selected.score, row, selected.alias);
+  const allowedUnitCount = new Set(parseStringList(selected.alias.allowedUnitsJson).map(normalizeUnit).filter(Boolean)).size;
   let conservativeReason: string | null = null;
   if (quality !== "excluded" && rawUnit && !selected.unitCompatible) {
     quality = "low";
@@ -1477,12 +1605,10 @@ function normalizeObservationAutomatically(row: ObservationRow): NormalizationRe
   } else if (
     quality !== "excluded"
     && !rawUnit
-    && !selected.alias.defaultUnit
-    && new Set(
-      parseStringList(selected.alias.allowedUnitsJson)
-        .map((unit) => normalizeUnit(unit))
-        .filter(Boolean)
-    ).size > 1
+    && !row.manualReviewed
+    // Retain legacy/manual import policy; unreviewed AI measurements require printed units.
+    && ((row.hasAiExtraction && selected.alias.valueType === 'numeric' && (selected.alias.defaultUnit || allowedUnitCount > 0))
+      || (!selected.alias.defaultUnit && allowedUnitCount > 1))
   ) {
     quality = "low";
     conservativeReason = "缺少单位，无法确定趋势计量口径，禁止进入默认趋势";
@@ -1503,6 +1629,7 @@ function normalizeObservationAutomatically(row: ObservationRow): NormalizationRe
     selected.alias.allowedUnitsJson
   ).canonicalUnit;
   const canonicalValue = numericValue === null || !selected.unitCompatible
+    || (row.hasAiExtraction && !rawUnit && Boolean(selected.alias.defaultUnit) && !row.manualReviewed)
     ? null
     : convertUnit(selected.alias.canonicalKey, numericValue, rawUnit, canonicalUnit);
   const excludedReason = quality === "excluded"
@@ -2259,9 +2386,9 @@ export function previewIndicatorNormalization(user: RequestUser) {
     JOIN observations o ON o.report_id = r.id
     WHERE ${memberAccessSql(user,'r.member_id',true)} AND r.status <> 'trashed' AND r.deleted_at IS NULL ORDER BY r.id`).all() as Array<{ id: string }>;
   const existing = new Map((db.prepare(`SELECT observation_id AS id, canonical_key AS canonicalKey,
-    canonical_name AS canonicalName, matched_by AS matchedBy, excluded_reason AS excludedReason,
+    canonical_name AS canonicalName, canonical_unit AS canonicalUnit, matched_by AS matchedBy, excluded_reason AS excludedReason,
     quality FROM observation_normalizations`).all() as Array<{
-      id: string; canonicalKey: string | null; canonicalName: string | null;
+      id: string; canonicalKey: string | null; canonicalName: string | null; canonicalUnit: string | null;
       matchedBy: string; excludedReason: string | null; quality: string;
     }>).map(row => [row.id, row]));
   const summary = { scanned: 0, eligible: 0, recovered: 0, removed: 0, pending: 0, excluded: 0 };
@@ -2273,7 +2400,7 @@ export function previewIndicatorNormalization(user: RequestUser) {
       const previous = existing.get(row.id);
       const admissionFor = (result: NonNullable<typeof previous>) => assessTrendAdmission({
         ...row, evidenceJson: row.evidenceJson || '[]',
-        canonicalKey: result.canonicalKey, canonicalName: result.canonicalName,
+        canonicalKey: result.canonicalKey, canonicalName: result.canonicalName, canonicalUnit: result.canonicalUnit,
         normalizationQuality: result.quality, normalizationMatchedBy: result.matchedBy,
         normalizationExcludedReason: result.excludedReason
       });
@@ -2885,7 +3012,7 @@ export function resolveIndicatorNormalizationIssue(
       upsertNormalization(result);
       const admission = assessTrendAdmission({
         ...row, evidenceJson: row.evidenceJson || '[]',
-        canonicalKey: result.canonicalKey, canonicalName: result.canonicalName,
+        canonicalKey: result.canonicalKey, canonicalName: result.canonicalName, canonicalUnit: result.canonicalUnit,
         normalizationQuality: result.quality, normalizationMatchedBy: result.matchedBy,
         normalizationExcludedReason: result.excludedReason
       });

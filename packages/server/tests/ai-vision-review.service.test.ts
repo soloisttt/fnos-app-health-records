@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { closeDatabaseForTests } from "../database/client.ts";
+import { closeDatabaseForTests, getDatabase } from "../database/client.ts";
 import { saveAiSettings } from "../services/ai-settings.service.ts";
 import {
   normalizeAiExtraction,
@@ -107,8 +107,8 @@ test("acceptVisionObservations anchors quotes to candidate lines and tags vision
     group,
     emptyResult(),
   );
-  assert.equal(accepted.length, 2);
-  assert.equal(rejected, 1);
+  assert.equal(accepted.length, 1);
+  assert.equal(rejected, 2);
   assert.deepEqual(accepted[0].evidence, [
     {
       pageNumber: 1,
@@ -118,7 +118,7 @@ test("acceptVisionObservations anchors quotes to candidate lines and tags vision
   ]);
 });
 
-test("acceptVisionObservations rejects same-name duplicates already extracted on the page", () => {
+test("acceptVisionObservations keeps same-name results from distinct source rows", () => {
   const group = groupVisionReviewPages([
     candidateLine("page-1", 1, 1, "血红蛋白 130 g/L"),
     candidateLine("page-1", 1, 2, "血小板计数 205 10^9/L"),
@@ -136,8 +136,8 @@ test("acceptVisionObservations rejects same-name duplicates already extracted on
     group,
     existing,
   );
-  assert.deepEqual(accepted.map((item) => item.itemName), ["血小板计数"]);
-  assert.equal(rejected, 1);
+  assert.deepEqual(accepted.map((item) => item.itemName), ["血红蛋白", "血小板计数"]);
+  assert.equal(rejected, 0);
 });
 
 async function withAiSettings(
@@ -163,6 +163,63 @@ async function withAiSettings(
     rmSync(storageDir, { recursive: true, force: true });
   }
 }
+
+test('vision admission verifies the item as well as its quote and preserves temporal occurrences', () => {
+  const quote = '合成项目甲 入院 12 U/L 出院 24 U/L';
+  const candidate = candidateLine('synthetic',1,1,quote);
+  candidate.line.sourceLineIds = ['synthetic-name','synthetic-result'];
+  candidate.line.box = [10,20,400,40];
+  const group = groupVisionReviewPages([candidate])[0];
+  const first = {...visionObservation('合成项目甲','12',quote), examination:{timeText:'入院'}};
+  const second = {...visionObservation('合成项目甲','24',quote), examination:{timeText:'出院'}};
+  const result = acceptVisionObservations([
+    first,second,first,visionObservation('无关项目乙','99',quote),
+    {...second,examination:{timeText:'未印出的日期'}},
+  ],group,emptyResult());
+  assert.equal(result.accepted.length,2);
+  assert.equal(result.rejected,3);
+  assert.deepEqual(result.accepted[0].evidence[0].visionRegion?.sourceLineIds,candidate.line.sourceLineIds);
+  const normalized = normalizeAiExtraction({observations:result.accepted});
+  assert.deepEqual(normalized.fields.observations[0].evidence[0].visionRegion?.box,[10,20,400,40]);
+  assert.equal(acceptVisionObservations([first],group,emptyResult([first])).accepted.length,0);
+});
+
+test('visual name correction requires a trusted candidate, source region and unchanged result', () => {
+  const quote = 'Y-谷氨酰转肽酶 | 18 | U/L';
+  const candidate = candidateLine('synthetic',1,1,quote);
+  Object.assign(candidate.line, {sourceLineIds:['name','value','unit'], box:[10,20,400,40],
+    nameReviewCandidate:{originalName:'Y-谷氨酰转肽酶',suggestedName:'γ-谷氨酰转肽酶',canonicalKey:'synthetic-gamma',sourceLineIds:['name']}});
+  const group = groupVisionReviewPages([candidate])[0];
+  const corrected = {...visionObservation('γ-谷氨酰转肽酶','18',quote),unit:'U/L'};
+  const result = acceptVisionObservations([corrected,
+    {...corrected,itemName:'无关项目'}, {...corrected,resultText:'19',numericValue:19}],group,emptyResult());
+  assert.equal(result.accepted.length,1);
+  assert.equal(result.rejected,2);
+  assert.equal(result.accepted[0].evidence[0].nameCorrected,true);
+  const normalized = normalizeAiExtraction({observations:result.accepted}).fields.observations[0];
+  assert.equal(normalized.evidence[0].nameCorrected,true);
+  assert.equal(normalized.evidence[0].quote,quote);
+  candidate.line.sourceLineIds=[];
+  assert.equal(acceptVisionObservations([corrected],group,emptyResult()).accepted.length,0);
+  candidate.line.sourceLineIds=['name','value','unit'];
+  candidate.line.text=quote.replace('18','<18');
+  assert.equal(acceptVisionObservations([{...corrected,evidence:[{pageNumber:1,quote:candidate.line.text}]}],group,emptyResult()).accepted.length,0);
+});
+
+test('visual re-reading can correct the value of an existing exact-source candidate', () => {
+  const quote='合成项目甲 | 1.27 | U/L';
+  const candidate=candidateLine('synthetic',1,1,quote);
+  Object.assign(candidate.line,{sourceLineIds:['name','value','unit'],box:[10,20,400,40]});
+  const group=groupVisionReviewPages([candidate])[0];
+  const original={...visionObservation('合成项目甲','1.27',quote),unit:'U/L'};
+  const corrected={...original,resultText:'1.21',numericValue:1.21};
+  const result=acceptVisionObservations([original,corrected],group,emptyResult([original]));
+  assert.equal(result.accepted.length,1);
+  assert.equal(result.rejected,1);
+  assert.equal(result.accepted[0].numericValue,1.21);
+  assert.equal(result.accepted[0].evidence[0].quote,quote);
+  assert.deepEqual(result.accepted[0].evidence[0].visionRegion?.sourceLineIds,['name','value','unit']);
+});
 
 function chatResponse(content: string): AiRuntimeResponse {
   return {
@@ -387,5 +444,61 @@ test("runVisionReview honors the AI_VISION_REVIEW_MAX_PAGES kill switch", async 
     } finally {
       delete process.env.AI_VISION_REVIEW_MAX_PAGES;
     }
+  });
+});
+
+test('vision review cannot silently turn detection limits into exact measurements', () => {
+  for (const bound of ['<', '>', '≤', '≥', '<=', '>=']) {
+    const quote = `合成项目甲 ${bound}2 U/L`;
+    const group = groupVisionReviewPages([candidateLine('p', 1, 1, quote)])[0];
+    const incorrect = visionObservation('合成项目甲', '2', quote);
+    assert.equal(acceptVisionObservations([incorrect], group, emptyResult()).accepted.length, 0);
+    assert.equal(acceptVisionObservations([{ ...incorrect, resultText: `${bound}2` }], group, emptyResult()).accepted.length, 1);
+  }
+});
+
+test('page review can recover an OCR-missed qualitative row without publishing it as verified', async () => {
+  await withAiSettings(true, async () => {
+    let calls = 0;
+    const result = await runVisionReview({reportId:'r',result:emptyResult(),candidates:[],pageReviews:[{pageId:'p',pageNumber:1}]}, {
+      loadImage:async () => ({dataUrl:'data:image/jpeg;base64,AAAA',bytes:4}),
+      chat:async (_config, request) => {
+        calls++;
+        assert.match(String(request.messages[0].content), /整页/);
+        return chatResponse(JSON.stringify({observations:[{n:'合成项目乙',r:'阴性',p:1,q:'合成项目乙 阴性'}]}));
+      },
+    });
+    assert.equal(calls,1);
+    assert.equal(result?.fields.observations.length,1);
+    assert.equal(result?.fields.observations[0].evidence[0].imageOnly,true);
+    const group = {pageId:'p',pageNumber:1,lines:[],omittedCandidates:0};
+    assert.equal(acceptVisionObservations(result!.fields.observations,group,emptyResult()).accepted.length,0);
+    assert.equal(acceptVisionObservations(result!.fields.observations,{...group,pageReview:true},result!).accepted.length,0);
+  });
+});
+
+test('PDF vision cache uses the current rotation instead of an existing stale preview', async () => {
+  await withAiSettings(true, async () => {
+    const db = getDatabase();
+    db.exec(`INSERT INTO users(id,display_name) VALUES('u','合成用户');
+      INSERT INTO health_members(id,display_name,created_by) VALUES('m','合成成员','u');
+      INSERT INTO reports(id,member_id,created_by,report_type,title,status) VALUES('r','m','u','laboratory','合成报告','ready');
+      INSERT INTO report_pages(id,report_id,page_number,original_name,storage_path,mime_type,file_size,sha256,rotation)
+      VALUES('p','r',1,'synthetic.pdf','synthetic.pdf','application/pdf',1,'synthetic',90);`);
+    const cache = join(process.env.STORAGE_DIR!, 'previews','r');
+    mkdirSync(cache,{recursive:true});
+    writeFileSync(join(cache,'p.jpg'),'old');
+    writeFileSync(join(cache,'p.r0.jpg'),'unrotated');
+    writeFileSync(join(cache,'p.r90.jpg'),'rotated');
+    let calls = 0;
+    await runVisionReview({reportId:'r',result:emptyResult(),candidates:[candidateLine('p',1,1,'合成项目甲 12 U/L')]},{
+      chat:async (_config,request) => {
+        calls++;
+        const parts = request.messages[1].content as Array<{type:string;image_url?:{url:string}}>;
+        assert.equal(parts.find(part => part.type==='image_url')?.image_url?.url, `data:image/jpeg;base64,${Buffer.from('rotated').toString('base64')}`);
+        return chatResponse('{"observations":[]}');
+      },
+    });
+    assert.equal(calls,1);
   });
 });

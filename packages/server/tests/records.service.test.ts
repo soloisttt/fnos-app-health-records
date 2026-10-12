@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { closeDatabaseForTests, getDatabase } from "../database/client.ts";
 import { schemaVersion } from "../database/schema.ts";
 import type { RequestUser } from "../domain/request-user.ts";
@@ -458,7 +460,7 @@ test("creates backups with on-storage staging and reports detailed failure reaso
           () => createBackup(manager),
           (error) => {
             assert.ok(error instanceof Error);
-            assert.match(error.message, /档案存储目录当前不可写/);
+            assert.match(error.message, /创建备份失败（创建备份暂存目录）.*文件访问或权限操作被拒绝/);
             assert.doesNotMatch(error.message, /EACCES|EPERM|\/backups/);
             assert.equal((error as Error & { status: number }).status, 503);
             assert.equal((error as Error & { data: { code: string } }).data.code, 'STORAGE_UNAVAILABLE');
@@ -472,11 +474,54 @@ test("creates backups with on-storage staging and reports detailed failure reaso
       const archives = readdirSync(join(storageDir, "backups", "full"))
         .filter((name) => name.endsWith(".tar.gz"));
       assert.deepEqual(archives, [backup.filename]);
+
+      // A readable database does not imply every migrated source file is readable.
+      mkdirSync(join(storageDir, 'reports'), { recursive: true });
+      const sourceFile = join(storageDir, 'reports', 'private-source.txt');
+      writeFileSync(sourceFile, 'synthetic', { mode: 0o000 });
+      try {
+        assert.throws(() => createBackup(manager), (error) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /创建备份失败（复制报告原件）/);
+          assert.doesNotMatch(error.message, /private-source|synthetic|EACCES|EPERM/);
+          assert.equal((error as Error & { data: { code: string } }).data.code, 'STORAGE_UNAVAILABLE');
+          return true;
+        });
+      } finally {
+        chmodSync(sourceFile, 0o600);
+      }
+      assert.deepEqual(readdirSync(join(storageDir, 'backups', 'full'))
+        .filter(name => name.endsWith('.tar.gz')), [backup.filename]);
     }
   } finally {
     closeDatabaseForTests();
     delete process.env.STORAGE_DIR;
     rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
+test('backup cleanup failure does not turn a saved archive into a failed operation', (t) => {
+  const storageDir = mkdtempSync(join(tmpdir(), 'backup-cleanup-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = storageDir;
+  const originalRemove = fs.rmSync;
+  try {
+    getDatabase().prepare('INSERT INTO users(id,display_name,is_gateway_admin) VALUES(?,?,1)')
+      .run(manager.id, manager.displayName);
+    t.mock.method(fs, 'rmSync', (path: Parameters<typeof fs.rmSync>[0], options: Parameters<typeof fs.rmSync>[1]) => {
+      if (String(path).includes('.staging-')) throw Object.assign(new Error('synthetic cleanup failure'), { code: 'EACCES' });
+      return originalRemove(path, options);
+    });
+    syncBuiltinESMExports();
+    const backup = createBackup(manager);
+    assert.ok(existsSync(backup.path));
+    assert.ok(listBackups(manager).some(item => item.id === backup.id));
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    originalRemove(storageDir, { recursive: true, force: true });
   }
 });
 

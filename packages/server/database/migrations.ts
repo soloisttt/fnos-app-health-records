@@ -1,3 +1,5 @@
+import { feedbackNotificationsSchemaSql } from "./feedback-notifications";
+import { ensurePageOrientationDraft } from "./page-orientation-draft";
 import type { DatabaseSync } from "node:sqlite";
 import {
   isAiReportStructuredSectionCompatible,
@@ -414,6 +416,18 @@ export const databaseMigrations: DatabaseMigration[] = [
       db.exec(institutionTrendRuleSchemaSql);
       db.exec(uploadReceiptSchemaSql);
     }
+  },
+  {
+    version: 18,
+    name: "preserve_ocr_page_orientation",
+    checksum: "manual:018-preserve-ocr-page-orientation",
+    up: ensurePageOrientationDraft
+  },
+  {
+    version: 19,
+    name: "add_feedback_status_notifications",
+    checksum: "manual:019-add-feedback-status-notifications",
+    up: (db) => db.exec(feedbackNotificationsSchemaSql)
   }
 ];
 

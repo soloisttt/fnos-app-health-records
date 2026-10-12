@@ -10,10 +10,34 @@ import {
   convertUnit,
   indicatorNameCandidates,
   listIndicatorNormalizationIssues,
-  normalizeReportObservations
+  normalizeReportObservations,
+  normalizeObservation
 } from "../services/indicator-normalization.service.ts";
 import { installRemoteDictionarySnapshotForTests } from "../services/indicator-dictionary.service.ts";
 import { getReportDetail, listTrendSeries } from "../services/records.service.ts";
+
+test('apolipoprotein ratios cannot match an individual protein through code or AI name', () => {
+  const storageDir=mkdtempSync(join(tmpdir(),'ratio-identity-'));
+  const previous=process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR=storageDir;
+  try {
+    getDatabase();
+    installRemoteDictionarySnapshotForTests();
+    const base={id:'synthetic',reportId:'synthetic',sectionName:null,itemCode:'APOB',
+      normalizedName:'载脂蛋白 B',resultText:'1.2',numericValue:1.2,unit:'g/L',referenceText:null,
+      reportType:'laboratory',hospitalName:null,performingDepartment:null,reportingDepartment:null};
+    const single=normalizeObservation({...base,itemName:'载脂蛋白B'});
+    assert.ok(single.canonicalKey);
+    for(const itemName of ['载脂蛋白A1/B','载脂蛋白A1/B[APOA/APOB]','载脂蛋白A1与B比值']) {
+      const ratio=normalizeObservation({...base,itemName,unit:null});
+      assert.notEqual(ratio.canonicalKey,single.canonicalKey);
+    }
+  } finally {
+    closeDatabaseForTests();
+    if(previous===undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR=previous;
+    rmSync(storageDir,{recursive:true,force:true});
+  }
+});
 
 test("reference evidence is independent of manual confirmation and range validity", () => {
   const input = { referenceLow: 5, referenceHigh: 21, referenceText: "5-21",

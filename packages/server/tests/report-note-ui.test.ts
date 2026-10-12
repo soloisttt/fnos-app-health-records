@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { computed, ref } from 'vue';
 import { transpile, ScriptTarget } from 'typescript';
 import { reportNoteLimits, type ReportNote } from '../../shared/report-notes.ts';
+import { createUuid as randomId } from '../../ui/src/utils/uuid';
 import { maxUploadFileBytes } from '../../shared/upload-limits.ts';
 
 const editor = readFileSync('packages/ui/src/components/ReportNoteEditor.vue', 'utf8');
@@ -13,7 +14,7 @@ function editorState(options: { note?: ReportNote; request?: (...args: any[]) =>
   const source = editor.split('<script setup lang="ts">')[1].split('</script>')[0].replace(/^import .*?;\n/gm, '');
   const events: unknown[][] = [];
   const disposers: Array<() => void> = [];
-  const bindings = { computed, ref, defineProps: () => ({ reportId: 'fixture', note: options.note || null }), defineEmits: () => (...args: unknown[]) => events.push(args),
+  const bindings = { computed, ref, randomId, defineProps: () => ({ reportId: 'fixture', note: options.note || null }), defineEmits: () => (...args: unknown[]) => events.push(args),
     onBeforeUnmount: (fn: () => void) => disposers.push(fn), onMounted: () => {}, useScrollLock: () => {}, useConfirm: () => ({ ask: () => {} }),
     request: options.request || (async () => ({})), requestUpload: options.upload || (async () => ({ uploadToken: 'fixture' })), apiUrl: (path: string) => `http://localhost/api/${path}`,
     reportNoteLimits, maxUploadFileBytes, window: { innerHeight: 800 }, document: { activeElement: null } };

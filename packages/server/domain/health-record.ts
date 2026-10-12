@@ -67,6 +67,7 @@ export type Observation = {
   displayCategory: "standardized" | "medical_candidate" | "technical_measurement" | "qualitative_finding" | "governance_noise";
   displayReason: string | null;
   manualReviewed?: boolean;
+  requiresVisualReview?: boolean;
   manualCreated?: boolean;
   manualCanonicalKey?: string | null;
 };
@@ -365,6 +366,7 @@ export type ReportPage = {
   width: number | null;
   height: number | null;
   rotation: number;
+  ocrStale: boolean;
   sourcePageNumber: number | null;
   sourcePageCount: number | null;
   hasThumbnail: boolean;

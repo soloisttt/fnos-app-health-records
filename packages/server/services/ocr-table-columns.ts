@@ -3,6 +3,22 @@ export function splitOcrTableCells(text: string): string[] {
   return text.split(/[|｜]/).map((cell) => cell.trim());
 }
 
+/** Only unambiguous header spellings; never fuzzy-correct a measurement name. */
+export function normalizeOcrTableHeader(text: string): string {
+  const compact = text.normalize('NFKC').trim().replace(/\s+/g, '').toLowerCase();
+  const aliases: Record<string,string> = {
+    test:'项目名称',testname:'项目名称',item:'项目名称',itemname:'项目名称',parameter:'参数',
+    result:'结果',results:'结果',value:'结果',unit:'单位',units:'单位',
+    reference:'参考范围',referencerange:'参考范围',referenceinterval:'参考范围',
+    flag:'标志','提示':'标志',method:'方法',code:'代码',no:'序号','no.':'序号',
+    '项目名称test':'项目名称','结果result':'结果','单位unit':'单位',
+    '结杲':'结果','结呆':'结果','参考范国':'参考范围',
+  };
+  const embedded = text.match(/^(.*?)[（(]([^()（）]+)[）)]$/);
+  if (embedded) return `${normalizeOcrTableHeader(embedded[1])}(${embedded[2]})`;
+  return aliases[compact] || text.trim().replace(/(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g,'');
+}
+
 /*
  * 检验单常见的行首序号列：表头没有序号列，数据行第一格却是 1~3 位序号
  * （尾部空列如"方法"被丢弃时，行格数还会恰好与表头相等，错位更隐蔽）。
@@ -56,7 +72,7 @@ function alignOcrRowCells(text: string, columns: string[]): string[] {
 /** Only split complete repeated project groups; never split history/result columns. */
 export function ocrProjectColumnGroups(header: string): Array<{ start: number; end: number }> {
   if (!isExplicitOcrTableHeader(header)) return [];
-  const cells = splitOcrTableCells(header);
+  const cells = splitOcrTableCells(header).map(normalizeOcrTableHeader);
   const starts = cells.flatMap((cell, index) => /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目)$/.test(cell) ? [index] : []);
   if (starts.length < 2 || starts[0] !== 0) return [];
   const groups = starts.map((start, index) => ({ start, end: starts[index + 1] ?? cells.length }));
@@ -64,6 +80,7 @@ export function ocrProjectColumnGroups(header: string): Array<{ start: number; e
 }
 
 export function isCurrentResultColumn(cell: string): boolean {
+  cell = normalizeOcrTableHeader(cell);
   return /(?:本次结果|检查结果|检验结果|测定值|实测值?|测量值|结果)/.test(cell)
     && !/(?:历史|既往|上次|前次|往年|预测|预计|%\s*预测|参考)/.test(cell);
 }
@@ -71,7 +88,7 @@ export function isCurrentResultColumn(cell: string): boolean {
 /** null means no usable header; [] means ambiguous structure: do not guess. */
 export function mappedOcrResultCells(text: string, header?: string | null): string[] | null {
   if (!header) return null;
-  const columns = splitOcrTableCells(header);
+  const columns = splitOcrTableCells(header).map(normalizeOcrTableHeader);
   const resultIndexes = columns.flatMap((cell, index) => isCurrentResultColumn(cell) ? [index] : []);
   if (!resultIndexes.length) return null;
   const cells = alignOcrRowCells(text, columns);
@@ -83,7 +100,7 @@ export function mappedOcrResultCells(text: string, header?: string | null): stri
 }
 
 export function isExplicitOcrTableHeader(text: string): boolean {
-  const cells = splitOcrTableCells(text);
+  const cells = splitOcrTableCells(text).map(normalizeOcrTableHeader);
   return cells.length >= 2
     && cells.every((cell) => !cell || /^(?:项目名称|项目|名称|参数|检验项目|检测项目|测定项目|序号|缩写|英文缩写|代码|结果|本次结果|检验结果|检查结果|测定值|实测值?|测量值|单位|异常|异常标志|标志|标记|参考范围|参考值|参考区间|历史结果|上次结果|前次结果|方法|方法学|检测方法)$/.test(cell.replace(/^(结果|本次结果|单位)[（(][^()（）]+[）)]$/, '$1')))
     && cells.some((cell) => /项目|名称|参数/.test(cell))
@@ -93,7 +110,7 @@ export function isExplicitOcrTableHeader(text: string): boolean {
 export function mappedOcrMeasurement(text: string, header?: string | null) {
   const results = mappedOcrResultCells(text, header);
   if (!header || results?.length !== 1) return null;
-  const columns = splitOcrTableCells(header);
+  const columns = splitOcrTableCells(header).map(normalizeOcrTableHeader);
   /* 兼容单列简写表头「项 | 结果 | …」（项=项目）；序号列错位已由 mappedOcrResultCells 对齐 */
   const names = columns.flatMap((cell, index) =>
     /(?:项目|名称|参数|^项$)/.test(cell) && !/(?:结果|参考|单位)/.test(cell) ? [index] : []);
@@ -106,7 +123,7 @@ export function mappedOcrMeasurement(text: string, header?: string | null) {
 /** Restore a unit only from the same explicit table; conflicting units stay unresolved. */
 export function mappedOcrUnit(text: string, header?: string | null): string | null {
   if (!header || !mappedOcrMeasurement(text, header)) return null;
-  const headers = splitOcrTableCells(header);
+  const headers = splitOcrTableCells(header).map(normalizeOcrTableHeader);
   const cells = alignOcrRowCells(text, headers);
   const units = headers.flatMap((h, i) => h === '单位' && cells[i] ? [cells[i]] : []);
   const shared = headers.flatMap(h => {

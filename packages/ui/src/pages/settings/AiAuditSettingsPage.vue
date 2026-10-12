@@ -141,7 +141,7 @@ onBeforeUnmount(() => observer?.disconnect());
 
 <template>
   <section ref="root" class="settings-page">
-    <SubPageHeader title="AI 审计" description="统计 AI 解析调用、成功失败、Token 消耗和最近任务" />
+    <SubPageHeader back-to="/me/maintenance" back-label="返回维护工具" title="AI 审计" description="统计 AI 解析调用、成功失败、Token 消耗和最近任务" />
     <PullIndicator :distance="pullDistance" :refreshing="refreshing" />
 
     <section class="settings-band">
