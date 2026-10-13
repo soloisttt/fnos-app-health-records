@@ -30,6 +30,19 @@ export function formatDatabaseTimeWithYear(value: string | null | undefined, emp
   return formatDatabaseTimeWith(value, localDateTimeWithYearOptions, empty);
 }
 
+/**
+ * 判断一个「本地时间」串（`YYYY-MM-DD HH:mm`，也接受 `T` 分隔）是否晚于当前时刻。
+ * 留 1 分钟容差：面板打开时自动填的「现在」，到保存时已经过去几十秒。
+ */
+export function isFutureMoment(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().replace(" ", "T");
+  if (!normalized) return false;
+  const date = new Date(normalized.length === 16 ? `${normalized}:00` : normalized);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() > Date.now() + 60_000;
+}
+
 function formatDatabaseTimeWith(value: string | null | undefined, options: Intl.DateTimeFormatOptions, empty: string) {
   if (!value) return empty;
   const date = parseDatabaseTimestamp(value);

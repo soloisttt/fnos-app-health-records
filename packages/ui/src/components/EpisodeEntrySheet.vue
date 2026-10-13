@@ -10,6 +10,7 @@ import { computed, ref, watch } from "vue";
 import { X } from "@lucide/vue";
 import DateTimePicker from "./DateTimePicker.vue";
 import { useScrollLock } from "../composables/useScrollLock";
+import { isFutureMoment } from "../utils/time";
 import type { CaseSymptomStatus } from "../types/api";
 
 export type EpisodeSheetMode = "symptom" | "medication";
@@ -46,11 +47,24 @@ const emit = defineEmits<{
 }>();
 
 const draft = ref<EpisodeSheetForm>({ ...props.form });
+/** 面板内的校验提示（时间不能填到未来），就地显示，不打扰整页 */
+const error = ref("");
 
 watch(
   () => props.open,
   (open) => {
-    if (open) draft.value = { ...props.form };
+    if (open) {
+      draft.value = { ...props.form };
+      error.value = "";
+    }
+  },
+);
+
+/* 改了时间就把提示收掉，不用等重新保存 */
+watch(
+  () => draft.value.at,
+  () => {
+    error.value = "";
   },
 );
 
@@ -85,6 +99,12 @@ const unitSuggestions = ["℃", "mmHg", "次/分", "kg"];
 
 function submit(repeat: boolean) {
   if (props.busy) return;
+  /* 今天还没到的时间点说明是填错了（例如现在是下午 3 点，却填了 22:30） */
+  if (isFutureMoment(draft.value.at)) {
+    error.value = "时间不能晚于现在，请重新选择";
+    return;
+  }
+  error.value = "";
   emit("save", { ...draft.value }, repeat);
 }
 </script>
@@ -197,6 +217,8 @@ function submit(repeat: boolean) {
             </div>
           </template>
         </div>
+
+        <p v-if="error" class="episode-sheet-error" role="alert">{{ error }}</p>
 
         <div class="episode-sheet-actions">
           <button type="button" class="episode-sheet-cancel" @click="emit('close')">取消</button>

@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch, onActivated } from "vue";
+import { computed, ref, watch, onActivated, onDeactivated } from "vue";
 import {
   ArrowLeft,
   ArrowUpDown,
-  CheckCircle2,
   ClipboardList,
   Copy,
-  FileText,
   Package,
   Plus,
+  Stethoscope,
   Thermometer,
   Trash2,
 } from "@lucide/vue";
@@ -33,6 +32,7 @@ import type {
 } from "../types/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
 import { copyTextToClipboard } from "../utils/clipboard";
+import { isFutureMoment } from "../utils/time";
 import { parseQuickEntry, type QuickEntryDraft } from "../utils/quick-entry";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
@@ -53,6 +53,32 @@ const causeOpen = ref(false);
 const causeDraft = ref("");
 const summaryOpen = ref(false);
 const quickInput = ref("");
+
+/**
+ * 「给医生看」是浮在时间轴上方的一张卡：点页面别处就收起来，
+ * 点卡片里面（比如要选中文字复制）不收起。
+ */
+const summaryCard = ref<HTMLElement | null>(null);
+const summaryToggle = ref<HTMLElement | null>(null);
+
+function closeSummaryOnOutside(event: PointerEvent) {
+  if (!summaryOpen.value) return;
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (summaryCard.value?.contains(target) || summaryToggle.value?.contains(target)) return;
+  summaryOpen.value = false;
+}
+
+function detachOutsideListener() {
+  document.removeEventListener("pointerdown", closeSummaryOnOutside, true);
+}
+
+watch(summaryOpen, (open) => {
+  if (open) document.addEventListener("pointerdown", closeSummaryOnOutside, true);
+  else detachOutsideListener();
+});
+
+onDeactivated(detachOutsideListener);
 
 /** 常用症状：第一次记录某个症状时不用打字 */
 const COMMON_SYMPTOMS = ["发热", "咳嗽", "流鼻涕", "鼻塞", "腹泻", "呕吐", "皮疹"];
@@ -315,13 +341,13 @@ function logSymptom(chip: { name: string; unit: string; showValue: boolean; exis
     intent: "log",
     subject: chip.name,
     showValue: chip.showValue,
+    /* 「记一次」只带名称、时间、单位：程度与部位是这条症状的固有描述，
+       面板里也不显示，跟着带到新记录上只会让时间轴多出一行看不懂的字（例：「消失 · 轻」） */
     form: {
       name: chip.name,
       at: nowLocal(),
       status: latest ? latest.status : "present",
       unit: latest?.measuredUnit ?? chip.unit,
-      severity: latest?.severity ?? "",
-      bodyPart: latest?.bodyPart ?? "",
     },
   });
 }
@@ -373,6 +399,12 @@ async function applyQuickDraft() {
     return;
   }
   const isMedication = parsed.kind === "medication";
+  /* 今天还没到的时间点（例如下午三点却写了 22:30）先拦下来，别把错数据记进去 */
+  const at = parsed.onsetAt || nowLocal();
+  if (isFutureMoment(at)) {
+    error.value = "时间不能晚于现在，请重新输入";
+    return;
+  }
   saving.value = true;
   error.value = "";
   try {
@@ -384,7 +416,7 @@ async function applyQuickDraft() {
           medicationName: parsed.name,
           dose: parsed.dose || null,
           route: parsed.route || null,
-          takenAt: parsed.onsetAt || nowLocal(),
+          takenAt: at,
         }),
       });
       const created = detail.value.intakes.find((item) => !before.has(item.id));
@@ -399,7 +431,7 @@ async function applyQuickDraft() {
         method: "POST",
         body: JSON.stringify({
           name: parsed.name,
-          onsetAt: parsed.onsetAt || nowLocal(),
+          onsetAt: at,
           status: "present",
           measuredValue: parsed.measuredValue || null,
           measuredUnit: parsed.measuredUnit || null,
@@ -502,7 +534,8 @@ function symptomItem(item: CaseSymptom, all: CaseSymptom[]): TimelineItem {
     key: `symptom:${item.id}`,
     title: item.name,
     detail: symptomMeta(item, all),
-    status: symptomStatusTag(item.status),
+    /* 体温只关心数值与间隔，「存在 / 加重」这类状态对体温没有意义，不上标签 */
+    status: value ? null : symptomStatusTag(item.status),
     value,
     category: value ? "temperature" : "symptom",
     reportId: null,
@@ -859,7 +892,8 @@ function symptomMeta(item: CaseSymptom, all: CaseSymptom[]) {
   const value = temperatureLevel(item.measuredValue, item.measuredUnit);
   if (item.measuredValue && !value) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
   if (item.durationText) parts.push(`持续${item.durationText}`);
-  if (item.severity) parts.push(item.severity);
+  /* 已经消失的症状不再显示「程度」：都好了还写「轻」会自相矛盾，也容易被误读成状态 */
+  if (item.severity && item.status !== "resolved") parts.push(item.severity);
   if (item.bodyPart) parts.push(item.bodyPart);
   const gap = gapText(item, all);
   if (gap) parts.push(gap);
@@ -1304,20 +1338,45 @@ onActivated(() => {
             {{ episodeStatusOf(detail.episode.status).label }}
           </span>
         </header>
-        <div class="entry-list-body">
-          <p class="episode-meta-line">
-            <span>起病 {{ formatDay(detail.episode.onsetAt) || "未记录" }}</span>
-            <span v-if="episodeDurationText">{{ episodeDurationText }}</span>
-            <span v-if="detail.episode.causeText">病因 {{ detail.episode.causeText }}</span>
+        <div class="entry-list-body episode-info-body">
+          <p class="episode-info-line">
+            <span class="episode-info-cause">
+              <em>病因</em>
+              <strong v-if="detail.episode.causeText">{{ detail.episode.causeText }}</strong>
+              <strong v-else class="is-empty">未填写</strong>
+            </span>
+            <span class="episode-info-actions">
+              <button
+                class="outline-action-button"
+                type="button"
+                :disabled="saving"
+                title="病因只有你自己知道，系统不做推断"
+                @click="causeOpen = !causeOpen"
+              >
+                {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
+              </button>
+              <button
+                v-if="detail.episode.status !== 'resolved'"
+                class="outline-action-button"
+                type="button"
+                :disabled="saving"
+                @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
+              >
+                标记痊愈
+              </button>
+              <button
+                v-else
+                class="outline-action-button"
+                type="button"
+                :disabled="saving"
+                @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
+              >
+                恢复进行中
+              </button>
+            </span>
           </p>
 
-          <div v-if="!causeOpen" class="episode-cause-row">
-            <button class="soft-action-button" type="button" @click="causeOpen = true">
-              {{ detail.episode.causeText ? "改病因" : "填病因" }}
-            </button>
-            <span class="episode-cause-hint">病因只有你自己知道，系统不做推断</span>
-          </div>
-          <form v-else class="entry-form" @submit.prevent="saveCause">
+          <form v-if="causeOpen" class="entry-form" @submit.prevent="saveCause">
             <label>
               <span>病因（自己填写，系统不做推断）</span>
               <input v-model="causeDraft" placeholder="例如 受凉、接触感冒的家人" />
@@ -1327,27 +1386,6 @@ onActivated(() => {
               <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
             </div>
           </form>
-
-          <div class="episode-actions">
-            <button
-              v-if="detail.episode.status !== 'resolved'"
-              class="soft-action-button"
-              type="button"
-              :disabled="saving"
-              @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
-            >
-              <CheckCircle2 :size="15" />标记为已痊愈
-            </button>
-            <button
-              v-else
-              class="soft-action-button"
-              type="button"
-              :disabled="saving"
-              @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
-            >
-              恢复为进行中
-            </button>
-          </div>
         </div>
       </section>
 
@@ -1458,40 +1496,44 @@ onActivated(() => {
               {{ option.label }}<span>{{ timelineCounts[option.value] }}</span>
             </button>
           </div>
-          <button
-            class="icon-action-button"
-            type="button"
-            :title="timelineDesc ? '改为从头看' : '最近的排前面'"
-            :aria-label="timelineDesc ? '改为从头看' : '最近的排前面'"
-            @click="timelineDesc = !timelineDesc"
-          >
-            <ArrowUpDown :size="17" />
-          </button>
-          <button
-            class="icon-action-button"
-            type="button"
-            title="给医生看的摘要"
-            aria-label="给医生看的摘要"
-            @click="summaryOpen = !summaryOpen"
-          >
-            <FileText :size="17" />
-          </button>
-          <button
-            class="icon-action-button"
-            type="button"
-            title="补录报告症状"
-            aria-label="补录报告症状"
-            :disabled="saving"
-            @click="importSymptomsFromReports()"
-          >
-            <ClipboardList :size="17" />
-          </button>
+          <div class="episode-icon-row">
+            <button
+              class="icon-action-button"
+              type="button"
+              :title="timelineDesc ? '改为从头看' : '最近的排前面'"
+              :aria-label="timelineDesc ? '改为从头看' : '最近的排前面'"
+              @click="timelineDesc = !timelineDesc"
+            >
+              <ArrowUpDown :size="17" />
+            </button>
+            <button
+              ref="summaryToggle"
+              class="icon-action-button"
+              type="button"
+              title="给医生看的摘要"
+              aria-label="给医生看的摘要"
+              :class="{ active: summaryOpen }"
+              @click="summaryOpen = !summaryOpen"
+            >
+              <Stethoscope :size="17" />
+            </button>
+            <button
+              class="icon-action-button"
+              type="button"
+              title="补录报告症状"
+              aria-label="补录报告症状"
+              :disabled="saving"
+              @click="importSymptomsFromReports()"
+            >
+              <ClipboardList :size="17" />
+            </button>
+          </div>
         </div>
       </div>
 
-      <section v-if="summaryOpen" class="settings-band entry-list-card">
+      <section v-if="summaryOpen" ref="summaryCard" class="settings-band entry-list-card">
         <header>
-          <div><FileText :size="18" /><h3>给医生看</h3></div>
+          <div><Stethoscope :size="18" /><h3>给医生看</h3></div>
           <button class="soft-action-button compact-soft" type="button" @click="copyDoctorSummary">
             <Copy :size="15" />复制
           </button>

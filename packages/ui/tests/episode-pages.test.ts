@@ -638,6 +638,8 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
             }),
             symptom({ id: "sym-cough", name: "咳嗽", source: "ai", reportId: "report-1" }),
             symptom({ id: "sym-nose", name: "鼻塞", onsetAt: "2026-10-13 16:30", status: "worse" }),
+            /* 「消失 + 程度轻」：状态要读成「消失」，不能被程度里的「轻」盖过去 */
+            symptom({ id: "sym-rash", name: "皮疹", onsetAt: "2026-10-13 17:00", severity: "轻", status: "resolved" }),
           ],
           medications: [],
           links: [],
@@ -678,13 +680,16 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
     expect(feverEvent.find(".episode-temp").text()).toBe("38.5℃");
     expect(feverEvent.find(".episode-temp-high").exists()).toBe(true);
-    /* 状态词单独加粗上色：存在=灰 */
-    const feverStatus = feverEvent.find(".episode-status");
-    expect(feverStatus.text()).toBe("存在");
-    expect(feverStatus.classes()).toContain("episode-status-same");
-    /* 加重=红 */
+    /* 体温只关心数值与间隔，「存在 / 加重」这类状态对体温没有意义，不挂状态标签 */
+    expect(feverEvent.find(".episode-status").exists()).toBe(false);
+    /* 其他症状：状态单独渲染成加粗药丸，加重=红 */
     const worseEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("鼻塞"))!;
     expect(worseEvent.find(".episode-status-worse").text()).toBe("加重");
+    /* 消失=灰底划线，且不会再和「程度」混成一行灰字 */
+    const goneEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("皮疹"))!;
+    expect(goneEvent.find(".episode-status-gone").text()).toBe("消失");
+    /* 已经消失的症状不再显示「程度」：否则会出现「消失 · 轻」这种自相矛盾 */
+    expect(goneEvent.text()).not.toContain("轻");
 
     /* 快速记录按钮用底色区分：记过的=绿底，没记过的=灰底 */
     const chipOf = (name: string) =>
@@ -735,6 +740,19 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(summary.text()).toContain("张铭浩");
     expect(summary.text()).toContain("呼吸道感染");
     expect(summary.text()).toContain("受凉");
+
+    /* 摘要面板很占位：点页面别处要自动收起来，但点面板里面不收 */
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await settle();
+    expect(wrapper.find(".episode-summary-text").exists()).toBe(false);
+
+    /* 病程信息压成一行：病因 + 右侧两个小按钮；起病日期不在卡片里重复（页面顶部已有） */
+    const info = wrapper.find(".episode-info-line");
+    expect(info.exists()).toBe(true);
+    expect(info.text()).toContain("病因");
+    expect(info.text()).toContain("受凉");
+    expect(info.text()).toContain("标记痊愈");
+    expect(wrapper.find(".episode-meta-line").exists()).toBe(false);
   });
 
   it("医生开的药点一下就记服药量，一句话记也直接入库（都不弹表单）", async () => {

@@ -23,6 +23,10 @@
   --danger-soft: #fbecec;
   --amber: #96650f;
   --amber-soft: #fbf1dd;
+  /* 体温专用：正常绿 / 低热亮橙 / 发热红（--amber 偏棕，做数值高亮不够醒目） */
+  --temp-normal: #1c8a52;
+  --temp-mid: #e8801a;
+  --temp-high: #d93a3a;
   --info: #2b5ea7;
   --info-soft: #e9f0fb;
   --green-ok: #20724a;
@@ -518,10 +522,10 @@ button.entry-row-open:disabled { cursor: default; }
   border-radius: 999px; background: var(--surface); color: var(--brand-strong); font-size: 12px;
 }
 /* A5 病程时间轴 */
-/* 病程信息卡片：状态标签在标题栏，操作按钮分列两端 */
-.episode-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .episode-timeline-intro { margin-top: 22px; }
-.episode-intro-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 时间轴头部：筛选一行、三个图标另起一行并右对齐，手机上不再挤成一坨 */
+.episode-intro-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.episode-icon-row { display: flex; align-items: center; gap: 10px; }
 .episode-timeline { list-style: none; margin: 0; padding: 0 0 0 2px; display: grid; }
 .episode-event {
   position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr);
@@ -578,6 +582,13 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-event-body strong { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
 .episode-event-body small { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .episode-event-body .row-actions { margin-left: 0; justify-content: flex-start; margin-top: 2px; }
+/* 时间轴上的操作按钮改成描边胶囊：去掉浅底、换成描边，边界更清楚 */
+.episode-timeline .row-actions button {
+  border: 1px solid var(--brand); background: var(--surface); color: var(--brand-strong);
+}
+.episode-timeline .row-actions button.danger-action {
+  border-color: var(--danger); background: var(--surface); color: var(--danger);
+}
 
 /* 图标按钮：手机上不占宽度（长文案会把「添加症状」挤出屏幕），用途写在 title/aria-label 里 */
 .icon-action-button {
@@ -586,12 +597,28 @@ button.entry-row-open:disabled { cursor: default; }
   background: var(--brand-softer); color: var(--brand-strong);
 }
 .icon-action-button:disabled { opacity: .62; cursor: not-allowed; }
+/* 「给医生看」展开时按钮本身也亮起来，和弹出的卡片呼应 */
+.icon-action-button.active { background: var(--brand); color: #fff; }
 .compact-soft { min-height: 30px; padding-inline: 10px; flex: 0 0 auto; }
 
-/* 病程信息：一行摘要 + 默认收起的病因（腾出位置给「快速记录」） */
-.episode-meta-line { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 10px; font-size: 12px; color: var(--muted); }
-.episode-cause-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.episode-cause-hint { font-size: 12px; color: var(--muted); }
+/* 描边小按钮：一眼看出「能点」（病程信息卡上的填病因 / 标记痊愈） */
+.outline-action-button {
+  min-height: 30px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface); color: var(--brand-strong); font-size: 12px; font-weight: 600;
+}
+.outline-action-button:disabled { opacity: .62; cursor: not-allowed; }
+
+/* 病程信息：压成一行 —— 病因 + 右侧两个小按钮（起病日期与病程天数在页面顶部和时间轴头部已有） */
+.episode-info-body { display: grid; gap: 10px; }
+.episode-info-line {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px 12px; margin: 0; font-size: 13px;
+}
+.episode-info-cause { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.episode-info-cause em { font-style: normal; color: var(--muted); font-size: 12px; }
+.episode-info-cause strong { font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.episode-info-cause strong.is-empty { color: var(--muted); font-weight: 400; }
+.episode-info-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
 
 /* 发热小结：最高 / 最近 / 天数 */
 .episode-fever-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -662,13 +689,16 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-visit-fields dd { margin: 0; display: grid; gap: 3px; min-width: 0; }
 .episode-visit-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
 .episode-visit-line-text { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+/* 就诊卡片里的编辑 / 移除：描边胶囊，比下划线文字更容易看出可以点 */
 .episode-visit-line button {
-  padding: 0; border: 0; background: transparent; color: var(--muted);
-  font-size: 11px; line-height: 1.6; text-decoration: underline;
+  padding: 2px 10px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface); color: var(--brand-strong);
+  font-size: 11px; line-height: 1.6; text-decoration: none;
 }
-.episode-visit-line button.danger-action { color: var(--danger); }
+.episode-visit-line button.danger-action { border-color: var(--danger); color: var(--danger); }
 .episode-visit-line button:disabled { opacity: .62; }
-.episode-visit-fields dd em {
+/* 就诊卡片里的「缺剂量」提示药丸；体温数值与状态标签有自己的配色，排除在外 */
+.episode-visit-fields dd em:not(.episode-temp):not(.episode-status) {
   margin-left: 6px; padding: 1px 6px; border-radius: 999px;
   background: var(--amber-soft); color: var(--amber); font-size: 11px; font-style: normal;
 }
@@ -719,8 +749,15 @@ button.entry-row-open:disabled { cursor: default; }
 }
 .episode-sheet-status-item.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-strong); font-weight: 600; }
 .episode-sheet-status-item.is-worse.active { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
-.episode-sheet-status-item.is-improved.active,
-.episode-sheet-status-item.is-resolved.active { border-color: var(--green-ok); background: var(--green-ok-soft); color: var(--green-ok); }
+.episode-sheet-status-item.is-improved.active { border-color: var(--green-ok); background: var(--green-ok-soft); color: var(--green-ok); }
+/* 消失：灰底（与时间轴一致），不要用绿色 —— 绿色是「减轻」的意思 */
+.episode-sheet-status-item.is-resolved.active {
+  border-color: var(--line-strong); background: var(--chip-plain-bg); color: var(--chip-plain-text);
+}
+/* 面板内的校验提示（例如时间填到了未来） */
+.episode-sheet-error {
+  margin: 0; padding: 10px 16px 0; color: var(--danger); font-size: 12px; line-height: 1.5;
+}
 .episode-sheet-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .episode-sheet-chips button {
   min-height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px;
@@ -762,22 +799,29 @@ button.entry-row-open:disabled { cursor: default; }
   .episode-sheet-save { flex: 1 1 auto; }
 }
 
-/* 体温按数值上色：正常绿、低热橙、发热红（38.5 是常见用药门槛） */
-.episode-temp { font-style: normal; font-weight: 700; margin-left: 4px; }
-.episode-temp-normal { color: var(--green-ok); }
-.episode-temp-mid { color: var(--amber); }
-.episode-temp-high { color: var(--danger); }
+/* 体温按数值上色：正常绿、低热亮橙、发热红（38.5 是常见用药门槛）；整个数值（含单位）同色 */
+.episode-temp { font-style: normal; font-weight: 700; margin-left: 4px; color: var(--ink); }
+.episode-temp-normal { color: var(--temp-normal); }
+.episode-temp-mid { color: var(--temp-mid); }
+.episode-temp-high { color: var(--temp-high); }
 
-/* 症状状态加粗上色：加重红、减轻绿、消失与存在灰 —— 扫一眼就知道在变好还是变坏 */
-.episode-status { font-style: normal; font-weight: 700; }
-.episode-status-worse { color: var(--danger); }
-.episode-status-better { color: var(--green-ok); }
-.episode-status-gone,
-.episode-status-same { color: var(--muted); }
+/* 症状状态：加粗 + 底色药丸 —— 和「程度（轻/中/重）」区分开，不让两者混在一行灰字里 */
+.episode-status {
+  font-style: normal; font-weight: 700; margin-left: 4px;
+  padding: 1px 8px; border-radius: 999px; font-size: 12px;
+  background: var(--fill-1); color: var(--muted);
+}
+.episode-status-worse { background: var(--danger-soft); color: var(--danger); }
+.episode-status-better { background: var(--green-ok-soft); color: var(--green-ok); }
+/* 消失：灰底 + 划线，一眼看出「已经没有了」 */
+.episode-status-gone {
+  background: var(--chip-plain-bg); color: var(--chip-plain-text); text-decoration: line-through;
+}
+.episode-status-same { background: var(--fill-1); color: var(--muted); }
 .episode-visit-line-text .episode-status { margin-left: 4px; }
 
 /* 时间轴分类筛选：全部 / 症状 / 体温 / 服药 */
-.episode-filter { display: flex; flex-wrap: wrap; gap: 6px; }
+.episode-filter { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .episode-filter button {
   min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px;
   background: var(--surface); color: var(--muted); font-size: 12px;
@@ -794,7 +838,8 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-timeline .episode-event--intake .status-label { background: var(--info-soft); color: var(--info); }
 
 @media (max-width: 760px) {
-  .episode-intro-actions { gap: 6px; }
+  .episode-intro-actions { gap: 8px; }
+  .episode-icon-row { gap: 8px; }
   .episode-intro-actions .soft-action-button { padding-inline: 9px; }
   .episode-fever-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
