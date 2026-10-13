@@ -637,6 +637,7 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
               measuredUnit: "℃",
             }),
             symptom({ id: "sym-cough", name: "咳嗽", source: "ai", reportId: "report-1" }),
+            symptom({ id: "sym-nose", name: "鼻塞", onsetAt: "2026-10-13 16:30", status: "worse" }),
           ],
           medications: [],
           links: [],
@@ -677,13 +678,36 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
     expect(feverEvent.find(".episode-temp").text()).toBe("38.5℃");
     expect(feverEvent.find(".episode-temp-high").exists()).toBe(true);
+    /* 状态词单独加粗上色：存在=灰 */
+    const feverStatus = feverEvent.find(".episode-status");
+    expect(feverStatus.text()).toBe("存在");
+    expect(feverStatus.classes()).toContain("episode-status-same");
+    /* 加重=红 */
+    const worseEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("鼻塞"))!;
+    expect(worseEvent.find(".episode-status-worse").text()).toBe("加重");
 
-    /* 快速记录：点一下症状弹出小面板（时间已填当前时间、状态可点），不再跳大表单 */
+    /* 快速记录按钮用底色区分：记过的=绿底，没记过的=灰底 */
     const chipOf = (name: string) =>
       wrapper.findAll(".episode-quick-chips button").find((button) => button.text() === name)!;
+    expect(chipOf("发热").classes()).toContain("is-recorded");
+    expect(chipOf("流鼻涕").classes()).not.toContain("is-recorded");
+
+    /* 分类筛选：只看「体温」时症状节点与就诊卡片都收起来 */
+    const filterOf = (label: string) =>
+      wrapper.findAll(".episode-filter button").find((button) => button.text().startsWith(label))!;
+    expect(filterOf("全部").text()).toContain("全部");
+    await filterOf("体温").trigger("click");
+    await settle();
+    expect(wrapper.find(".episode-event--symptom").exists()).toBe(false);
+    expect(wrapper.find(".episode-visit").exists()).toBe(false);
+    expect(wrapper.findAll(".episode-temp").length).toBeGreaterThan(0);
+    await filterOf("全部").trigger("click");
+    await settle();
+    expect(wrapper.find(".episode-visit").exists()).toBe(true);
+
+    /* 点一下症状弹出小面板（时间已填当前时间、状态可点），不再跳大表单 */
     /* 面板 Teleport 到 body，取最后一个（同一测试里会连开两次） */
     const latestSheet = () => [...document.body.querySelectorAll(".episode-sheet")].at(-1)!;
-    expect(chipOf("发热").exists()).toBe(true);
     await chipOf("咳嗽").trigger("click");
     await settle();
     expect(latestSheet()).toBeTruthy();
@@ -801,9 +825,15 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     await wrapper.find(".entry-row-open").trigger("click");
     await settle();
 
-    /* 医生开的药出现在快速记录里，点开是「记一次服药」，只要填个用量 */
+    /* 医生开的药：蓝底；卡片里的用药只显示剂量用法，不再重复报告名与医院（卡片头已经有了） */
     const chipOf = (name: string) =>
       wrapper.findAll(".episode-quick-chips button").find((button) => button.text().includes(name))!;
+    expect(chipOf("氨溴特罗口服溶液").classes()).toContain("is-medication");
+    const visitText = wrapper.find(".episode-visit").text();
+    expect(visitText).toContain("5ml 口服 bid（每日两次）");
+    expect(visitText.split("急诊儿科门诊记录").length - 1).toBe(1);
+
+    /* 医生开的药出现在快速记录里，点开是「记一次服药」，只要填个用量 */
     expect(chipOf("氨溴特罗口服溶液").exists()).toBe(true);
     await chipOf("氨溴特罗口服溶液").trigger("click");
     await settle();

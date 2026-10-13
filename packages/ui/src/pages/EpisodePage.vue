@@ -32,6 +32,7 @@ import type {
   EpisodeLinkedFact,
 } from "../types/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
+import { copyTextToClipboard } from "../utils/clipboard";
 import { parseQuickEntry, type QuickEntryDraft } from "../utils/quick-entry";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
@@ -428,8 +429,12 @@ type TimelineItem = {
   key: string;
   title: string;
   detail: string | null;
+  /** 症状状态：单独渲染，按含义加粗上色（加重红 / 减轻绿 / 消失·存在灰） */
+  status: { label: string; level: "worse" | "better" | "gone" | "same" } | null;
   /** 体温数值（按高低上色），没有则 null */
   value: { text: string; level: "normal" | "mid" | "high" } | null;
+  /** 时间轴分类，用于「全部 / 症状 / 体温 / 服药」筛选 */
+  category: "symptom" | "temperature" | "intake" | "other";
   reportId: string | null;
   derived: boolean;
   warn: boolean;
@@ -492,11 +497,14 @@ function gapText(item: CaseSymptom, all: CaseSymptom[]) {
 }
 
 function symptomItem(item: CaseSymptom, all: CaseSymptom[]): TimelineItem {
+  const value = temperatureLevel(item.measuredValue, item.measuredUnit);
   return {
     key: `symptom:${item.id}`,
     title: item.name,
     detail: symptomMeta(item, all),
-    value: temperatureLevel(item.measuredValue, item.measuredUnit),
+    status: symptomStatusTag(item.status),
+    value,
+    category: value ? "temperature" : "symptom",
     reportId: null,
     derived: false,
     warn: false,
@@ -509,8 +517,11 @@ function factItem(fact: EpisodeLinkedFact): TimelineItem {
   return {
     key: `fact:${fact.linkId}`,
     title: fact.label,
-    detail: factDetail(fact),
+    /* 只放纯内容：来源（报告名/医院/日期）在就诊卡片头部已经有了，重复三遍反而看不清 */
+    detail: fact.missing ? "内容已不存在，可移除这条归集" : fact.detail,
+    status: null,
     value: null,
+    category: "other",
     reportId: fact.reportId,
     derived: fact.derived,
     warn: fact.factType === "medication" && (fact.detail ?? "").trim() === "用药",
@@ -572,7 +583,7 @@ const timeline = computed<TimelineBlock[]>(() => {
     else block.others.push(item);
   }
 
-  /* 症状：来自报告主诉的归到那次就诊里，自己录的单独成节点 */
+  /* 症状：来自报告主诉的归到那次就诊里，自己录的单独成节点（体温单独一种节点，便于筛选） */
   for (const symptom of current.symptoms) {
     const visit = symptom.reportId ? visits.get(symptom.reportId) : undefined;
     const item = symptomItem(symptom, current.symptoms);
@@ -580,7 +591,8 @@ const timeline = computed<TimelineBlock[]>(() => {
       visit.symptoms.push({ ...item, key: `visit-symptom:${symptom.id}` });
       continue;
     }
-    pushLoose("symptom", "症状", symptom.onsetAt, item);
+    const isTemperature = item.category === "temperature";
+    pushLoose(isTemperature ? "temperature" : "symptom", isTemperature ? "体温" : "症状", symptom.onsetAt, item);
   }
 
   /* 自己补录的药（医生没开、或报告没抽到） */
@@ -589,7 +601,9 @@ const timeline = computed<TimelineBlock[]>(() => {
       key: `medication:${medication.id}`,
       title: medication.name,
       detail: manualMedicationDetail(medication),
+      status: null,
       value: null,
+      category: "other",
       reportId: null,
       derived: false,
       warn: false,
@@ -604,7 +618,9 @@ const timeline = computed<TimelineBlock[]>(() => {
       key: `intake:${intake.id}`,
       title: intake.medicationName,
       detail: intakeDetail(intake),
+      status: null,
       value: null,
+      category: "intake",
       reportId: null,
       derived: false,
       warn: false,
@@ -635,7 +651,9 @@ const timeline = computed<TimelineBlock[]>(() => {
           key: "resolved:main",
           title: "已痊愈",
           detail: null,
+          status: null,
           value: null,
+          category: "other",
           reportId: null,
           derived: false,
           warn: false,
@@ -651,9 +669,70 @@ const timeline = computed<TimelineBlock[]>(() => {
 
 /** 时间轴显示顺序：默认从早到晚；可切成"最近的在最上面"。 */
 const timelineDesc = ref(false);
-const displayTimeline = computed(() =>
-  timelineDesc.value ? [...timeline.value].reverse() : timeline.value,
-);
+
+/** 分类筛选：只看症状 / 体温 / 服药，长病程里找东西不用通读 */
+type TimelineFilter = "all" | "symptom" | "temperature" | "intake";
+const timelineFilter = ref<TimelineFilter>("all");
+const TIMELINE_FILTERS: Array<{ value: TimelineFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "symptom", label: "症状" },
+  { value: "temperature", label: "体温" },
+  { value: "intake", label: "服药" },
+];
+
+function blockItems(block: TimelineBlock): TimelineItem[] {
+  if (block.type !== "visit") return block.items;
+  return [
+    ...block.symptoms,
+    ...block.diagnoses,
+    ...block.medications,
+    ...block.procedures,
+    ...block.vaccinations,
+    ...block.others,
+  ];
+}
+
+const timelineCounts = computed(() => {
+  const counts = { all: 0, symptom: 0, temperature: 0, intake: 0 };
+  for (const block of timeline.value) {
+    for (const item of blockItems(block)) {
+      counts.all += 1;
+      if (item.category === "temperature") counts.temperature += 1;
+      else if (item.category === "symptom") counts.symptom += 1;
+      else if (item.category === "intake") counts.intake += 1;
+    }
+  }
+  return counts;
+});
+
+const displayTimeline = computed<TimelineBlock[]>(() => {
+  const ordered = timelineDesc.value ? [...timeline.value].reverse() : timeline.value;
+  const filter = timelineFilter.value;
+  if (filter === "all") return ordered;
+  const out: TimelineBlock[] = [];
+  for (const block of ordered) {
+    if (block.type === "visit") {
+      const symptoms = block.symptoms.filter((item) => item.category === filter);
+      if (!symptoms.length) continue;
+      /* 只看某一类时不再显示缺口提示，免得「没抽到用药」被误读成本次就诊少了什么 */
+      out.push({
+        ...block,
+        symptoms,
+        diagnoses: [],
+        medications: [],
+        procedures: [],
+        vaccinations: [],
+        others: [],
+        gaps: [],
+      });
+      continue;
+    }
+    const items = block.items.filter((item) => item.category === filter);
+    if (!items.length) continue;
+    out.push({ ...block, items });
+  }
+  return out;
+});
 
 const visitBlocks = computed(() => timeline.value.filter((block): block is VisitBlock => block.type === "visit"));
 
@@ -723,12 +802,26 @@ const symptomStatusLabel: Record<CaseSymptomStatus, string> = {
   unknown: "不确定",
 };
 
+/** 状态词的显示样式：加重红、减轻绿、消失与存在灰，都加粗，扫一眼就能看出变化 */
+const symptomStatusTags: Record<CaseSymptomStatus, { label: string; level: "worse" | "better" | "gone" | "same" }> = {
+  present: { label: "存在", level: "same" },
+  worse: { label: "加重", level: "worse" },
+  improved: { label: "减轻", level: "better" },
+  resolved: { label: "消失", level: "gone" },
+  unknown: { label: "不确定", level: "same" },
+};
+
+/** 状态取值可能来自旧数据或后续版本，查不到时回退，避免整页渲染失败。 */
+function symptomStatusTag(status: CaseSymptomStatus) {
+  return symptomStatusTags[status] ?? symptomStatusTags.unknown;
+}
+
 function episodeStatusOf(status: CaseEpisode["status"]) {
   return episodeStatusMeta[status] ?? episodeStatusMeta.unknown;
 }
 
 function symptomStatusOf(status: CaseSymptomStatus) {
-  return symptomStatusLabel[status] ?? symptomStatusLabel.unknown;
+  return symptomStatusTag(status).label;
 }
 
 function formatDay(value: string | null) {
@@ -752,12 +845,6 @@ function formatMoment(value: string | null) {
   return timePart ? `${label} ${timePart}` : label;
 }
 
-function factDetail(fact: EpisodeLinkedFact) {
-  if (fact.missing) return "内容已不存在，可移除这条归集";
-  const parts = [fact.detail, fact.reportTitle, fact.hospitalName, formatDay(fact.occurredAt)];
-  return parts.filter(Boolean).join(" · ");
-}
-
 function episodeMeta(item: CaseEpisode) {
   const parts = [episodeStatusOf(item.status).label];
   const onset = formatDay(item.onsetAt);
@@ -766,9 +853,9 @@ function episodeMeta(item: CaseEpisode) {
   return parts.join(" · ");
 }
 
-/** 时间轴节点的文案：时间由节点头部统一显示，这里不重复 */
+/** 时间轴节点的文案：状态与时间分别单独渲染，这里只放其余信息 */
 function symptomMeta(item: CaseSymptom, all: CaseSymptom[]) {
-  const parts = [symptomStatusOf(item.status)];
+  const parts: string[] = [];
   const value = temperatureLevel(item.measuredValue, item.measuredUnit);
   if (item.measuredValue && !value) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
   if (item.durationText) parts.push(`持续${item.durationText}`);
@@ -881,12 +968,9 @@ const resolvedSummary = computed(() => {
 async function copyDoctorSummary() {
   const text = doctorSummary.value;
   if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.show("摘要已复制，可直接发给医生");
-  } catch {
-    toast.show("复制失败，请长按下面的文字选择复制");
-  }
+  /* http 访问下浏览器禁用剪贴板 API，工具会退回 execCommand（见 utils/clipboard） */
+  const copied = await copyTextToClipboard(text);
+  toast.show(copied ? "摘要已复制，可直接发给医生" : "复制失败，请长按下面的文字选择复制");
 }
 
 function editSymptom(item: CaseSymptom) {
@@ -1305,7 +1389,7 @@ onActivated(() => {
               v-for="chip in symptomChips"
               :key="chip.name"
               type="button"
-              :class="{ 'is-new': !chip.existing }"
+              :class="{ 'is-recorded': chip.existing }"
               @click="logSymptom(chip)"
             >
               {{ chip.name }}
@@ -1322,6 +1406,7 @@ onActivated(() => {
                 v-for="chip in medicationChips"
                 :key="chip.name"
                 type="button"
+                class="is-medication"
                 @click="logMedication(chip)"
               >
                 <Package :size="13" />{{ chip.name }}
@@ -1362,6 +1447,17 @@ onActivated(() => {
           <p>{{ episodeDurationText ? `${episodeDurationText} · 按时间排成一条线` : "按时间排成一条线" }}</p>
         </div>
         <div class="episode-intro-actions">
+          <div class="episode-filter" role="group" aria-label="按类型筛选时间轴">
+            <button
+              v-for="option in TIMELINE_FILTERS"
+              :key="option.value"
+              type="button"
+              :class="{ active: timelineFilter === option.value }"
+              @click="timelineFilter = option.value"
+            >
+              {{ option.label }}<span>{{ timelineCounts[option.value] }}</span>
+            </button>
+          </div>
           <button
             class="icon-action-button"
             type="button"
@@ -1437,8 +1533,17 @@ onActivated(() => {
                   <span v-for="item in block.symptoms" :key="item.key" class="episode-visit-line">
                     <span class="episode-visit-line-text">
                       {{ item.title }}
-                      <template v-if="item.value"> <em :class="`episode-temp-${item.value.level}`" class="episode-temp">{{ item.value.text }}</em></template>
-                      <template v-else-if="item.detail"> · {{ item.detail }}</template>
+                      <em
+                        v-if="item.value"
+                        class="episode-temp"
+                        :class="`episode-temp-${item.value.level}`"
+                      >{{ item.value.text }}</em>
+                      <em
+                        v-if="item.status"
+                        class="episode-status"
+                        :class="`episode-status-${item.status.level}`"
+                      >{{ item.status.label }}</em>
+                      <template v-if="item.detail"> · {{ item.detail }}</template>
                     </span>
                     <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
                     <button
@@ -1553,7 +1658,16 @@ onActivated(() => {
                     :class="`episode-temp-${item.value.level}`"
                   >{{ item.value.text }}</em>
                 </strong>
-                <small v-if="item.detail">{{ item.detail }}</small>
+                <small v-if="item.status || item.detail" class="episode-item-meta">
+                  <em
+                    v-if="item.status"
+                    class="episode-status"
+                    :class="`episode-status-${item.status.level}`"
+                  >{{ item.status.label }}</em>
+                  <template v-if="item.detail">
+                    <span v-if="item.status"> · </span>{{ item.detail }}
+                  </template>
+                </small>
                 <div v-if="item.edit || item.remove || item.derived" class="row-actions">
                   <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
                   <button v-if="item.remove" class="danger-action" type="button" :disabled="saving" @click="item.remove()">

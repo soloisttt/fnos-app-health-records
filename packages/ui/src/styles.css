@@ -547,7 +547,8 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-timeline .episode-event--procedure .episode-dot {
   background: var(--brand-strong); box-shadow: 0 0 0 3px var(--brand-soft);
 }
-.episode-timeline .episode-event--symptom .episode-dot {
+.episode-timeline .episode-event--symptom .episode-dot,
+.episode-timeline .episode-event--temperature .episode-dot {
   background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft);
 }
 .episode-timeline .episode-event--medication .episode-dot {
@@ -569,7 +570,8 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-timeline .episode-event--report .status-label { background: var(--brand-soft); color: var(--brand); }
 .episode-timeline .episode-event--diagnosis .status-label,
 .episode-timeline .episode-event--procedure .status-label { background: var(--brand-soft); color: var(--brand-strong); }
-.episode-timeline .episode-event--symptom .status-label { background: var(--amber-soft); color: var(--amber); }
+.episode-timeline .episode-event--symptom .status-label,
+.episode-timeline .episode-event--temperature .status-label { background: var(--amber-soft); color: var(--amber); }
 .episode-timeline .episode-event--medication .status-label { background: var(--info-soft); color: var(--info); }
 .episode-timeline .episode-event--vaccination .status-label,
 .episode-timeline .episode-event--resolved .status-label { background: var(--green-ok-soft); color: var(--green-ok); }
@@ -598,17 +600,23 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-fever-grid strong { font-size: 18px; color: var(--info); line-height: 1.25; }
 .episode-fever-grid small { font-size: 11px; color: var(--muted); }
 
-/* 快速记录：常用症状快捷键 + 一句话记 */
+/* 快速记录按钮：用底色区分「这次记过的症状 / 还没记过的 / 医生开的药 / 补充新的」 */
 .episode-quick-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .episode-quick-chips button {
-  min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px;
-  background: var(--surface); color: var(--ink); font-size: 13px;
+  min-height: 32px; padding: 0 12px; border: 0; border-radius: 999px;
+  background: var(--fill-2); color: var(--muted); font-size: 13px;
   display: inline-flex; align-items: center; gap: 4px;
 }
-.episode-quick-chips button:active { background: var(--brand-soft); border-color: var(--brand); }
-/* 本病程还没记录过的常用症状：虚线边框，一眼区分「已有」与「可新增」 */
-.episode-quick-chips button.is-new { border-style: dashed; color: var(--muted); }
-.episode-quick-add { border-color: var(--brand); color: var(--brand-strong); background: var(--brand-softer); }
+/* 这次已经记过的症状：绿底 —— 点一下就是"再记一次" */
+.episode-quick-chips button.is-recorded { background: var(--brand-softer); color: var(--brand-strong); font-weight: 600; }
+/* 医生开的药：蓝底，与「用药/服药」的时间轴配色一致 */
+.episode-quick-chips button.is-medication { background: var(--info-soft); color: var(--info); font-weight: 600; }
+.episode-quick-chips button:active { transform: scale(.97); }
+/* 补充入口：白底 + 品牌色虚线，一眼看出"这是新建，不是已有" */
+.episode-quick-chips button.episode-quick-add {
+  background: var(--surface); color: var(--brand-strong); font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--brand);
+}
 .episode-quick-title { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
 .episode-quick-title + .episode-quick-chips + .episode-quick-title { margin-top: 12px; }
 .episode-quick-chips--tail { margin-top: 8px; }
@@ -759,6 +767,25 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-temp-normal { color: var(--green-ok); }
 .episode-temp-mid { color: var(--amber); }
 .episode-temp-high { color: var(--danger); }
+
+/* 症状状态加粗上色：加重红、减轻绿、消失与存在灰 —— 扫一眼就知道在变好还是变坏 */
+.episode-status { font-style: normal; font-weight: 700; }
+.episode-status-worse { color: var(--danger); }
+.episode-status-better { color: var(--green-ok); }
+.episode-status-gone,
+.episode-status-same { color: var(--muted); }
+.episode-visit-line-text .episode-status { margin-left: 4px; }
+
+/* 时间轴分类筛选：全部 / 症状 / 体温 / 服药 */
+.episode-filter { display: flex; flex-wrap: wrap; gap: 6px; }
+.episode-filter button {
+  min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--muted); font-size: 12px;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.episode-filter button span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.episode-filter button.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-strong); font-weight: 600; }
+.episode-filter button.active span { color: var(--brand-strong); }
 
 /* 服药记录与用药同族（蓝色），靠徽标文字区分「用药 / 服药」 */
 .episode-timeline .episode-event--intake .episode-dot {
