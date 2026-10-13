@@ -601,15 +601,26 @@ button.entry-row-open:disabled { cursor: default; }
 .icon-action-button.active { background: var(--brand); color: #fff; }
 .compact-soft { min-height: 30px; padding-inline: 10px; flex: 0 0 auto; }
 
-/* 描边小按钮：一眼看出「能点」（病程标题区的填病因 / 标记痊愈） */
+/* 描边小按钮：一眼看出「能点」 */
 .outline-action-button {
   min-height: 30px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 999px;
   background: var(--surface); color: var(--brand-strong); font-size: 12px; font-weight: 600;
 }
 .outline-action-button:disabled { opacity: .62; cursor: not-allowed; }
 
+/* 详情页标题行：标题 + 「改病因 / 标记痊愈」（有底色有描边）+ 状态药丸 */
+.episode-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.episode-title-text { min-width: 0; overflow-wrap: anywhere; }
+.episode-title-action {
+  padding: 3px 11px; border: 1px solid var(--brand); border-radius: 999px;
+  background: var(--brand-softer); color: var(--brand-strong);
+  font-size: 12px; font-weight: 600; line-height: 1.6; white-space: nowrap;
+}
+.episode-title-action:hover:not(:disabled) { background: var(--brand-soft); }
+.episode-title-action:disabled { opacity: .62; cursor: not-allowed; }
+
 /* 详情页标题旁的状态药丸（从已删除的「病程信息」卡移上来） */
-.episode-title-chip { margin-left: 8px; vertical-align: middle; }
+.episode-title-chip { margin-left: 0; }
 /* 病因表单：点了标题区的「改病因 / 填病因」才展开 */
 .episode-cause-form { margin: 0 0 12px; }
 
@@ -675,6 +686,27 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-resolved-summary {
   margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-m);
   background: var(--green-ok-soft); color: var(--green-ok); font-size: 13px; line-height: 1.6;
+}
+
+/* 摘要 / 小结里的体温：按高低上色（TemperatureText 渲染），且不带时间轴那点左间距 */
+.temperature-text .episode-temp { margin-left: 0; }
+
+/* 痊愈总结：症状怎么变、体温怎么变、吃了几次药 */
+.episode-recap-card .entry-list-body { display: grid; gap: 12px; }
+.episode-recap-line {
+  margin: 0; padding: 10px 12px; border-radius: var(--radius-m);
+  background: var(--green-ok-soft); color: var(--green-ok); font-size: 13px; line-height: 1.6;
+}
+.episode-recap-block { display: grid; gap: 6px; }
+.episode-recap-block h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.episode-recap-block h4 em { margin-left: 6px; font-style: normal; font-weight: 400; font-size: 12px; color: var(--muted); }
+.episode-recap-block ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+.episode-recap-block li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; line-height: 1.6; }
+.episode-recap-block li strong { flex: 0 0 auto; font-weight: 600; }
+.episode-recap-block li span { color: var(--muted); overflow-wrap: anywhere; }
+.episode-recap-chain {
+  margin: 0; padding: 10px 12px; border-radius: var(--radius-m);
+  background: var(--fill-2); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere;
 }
 
 /* 一次就诊 = 一张卡片：报告头 + 症状/诊断/用药分区，不再各占一行各重复一遍来源 */
@@ -3317,13 +3349,14 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 
   .mobile-nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-    height: calc(66px + var(--safe-bottom)); padding: 6px 8px var(--safe-bottom);
+    height: calc(66px + var(--safe-bottom)); padding: 6px 4px var(--safe-bottom);
     background: var(--glass-nav);
     backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
     box-shadow: inset 0 1px 0 var(--hairline);
-    display: grid; grid-template-columns: repeat(5, 1fr);
+    /* 用 flex 均分而不是固定列数：入口增减时不会再换到第二行、被屏幕下缘裁掉 */
+    display: flex; align-items: stretch;
   }
-  .mobile-nav a { min-width: 0; color: var(--muted); display: grid; justify-items: center; align-content: center; gap: 3px; font-size: 11px; font-weight: 600; }
+  .mobile-nav a { flex: 1 1 0; min-width: 0; color: var(--muted); display: grid; justify-items: center; align-content: center; gap: 3px; font-size: 11px; font-weight: 600; }
   .back-to-top { right: 14px; bottom: calc(66px + var(--safe-bottom) + 58px); }
   .mobile-nav a.router-link-active { color: var(--brand-strong); }
   .mobile-nav-icon { position: relative; width: 40px; height: 28px; display: grid; place-items: center; border-radius: 999px; transition: background .15s; }
@@ -4871,4 +4904,10 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 
 @media (max-width: 760px), (pointer: coarse) {
   .preview-stack--floating > .preview-card > .report-card-title { display: none; }
+}
+
+/* 窄屏手机：底部导航入口多（7 个），字号与相机按钮再收一点，保证一行放得下 */
+@media (max-width: 400px) {
+  .mobile-nav a { font-size: 10px; gap: 2px; }
+  .mobile-nav a.primary .mobile-nav-icon { width: 44px; height: 44px; }
 }

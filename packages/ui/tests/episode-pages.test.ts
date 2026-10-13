@@ -1004,6 +1004,12 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(bySymptom).toContain("症状（2 个）");
     expect(bySymptom).toContain("体温：共 2 次 ｜ 最高 38.2℃");
     expect(bySymptom).toContain("最近 38.2℃");
+    /* 体温变化链里时间加括号（原来「37℃ 2026-10-12 12:00」挤在一起看不清） */
+    expect(bySymptom).toMatch(/37℃（[^）]*12:00）/);
+    expect(bySymptom).toMatch(/38\.2℃（[^）]*15:50）/);
+    expect(bySymptom).not.toContain("37℃ 2026-10-12");
+    /* 摘要里的体温数值要按高低上色 */
+    expect(wrapper.findAll(".temperature-text .episode-temp").length).toBeGreaterThanOrEqual(2);
     expect(bySymptom).toContain("咳嗽：");
     expect(bySymptom).toContain("出现");
     expect(bySymptom).toContain("已消失");
@@ -1031,6 +1037,112 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(byDay).toContain("38.2℃");
     /* 时间轴与摘要都是「同一天里按时间」排，不会把昨天的记录混进今天 */
     expect(byDay.indexOf("10-09（第 1 天）")).toBeLessThan(byDay.indexOf("（第 5 天）"));
+  });
+
+  it("标题区按钮在状态药丸左边；痊愈后出现「痊愈总结」（吃药次数 / 症状变化 / 体温变化）", async () => {
+    const row = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "resolved",
+      onsetAt: "2026-10-09",
+      resolvedAt: "2026-10-13",
+      causeText: "受凉",
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-13T00:00:00.000Z",
+      symptomCount: 3,
+      linkCount: 0,
+    };
+    const symptom = (over: Record<string, unknown>) => ({
+      id: "sym-x",
+      episodeId: "ep-1",
+      memberId: member.id,
+      name: "咳嗽",
+      onsetAt: "2026-10-09 08:00",
+      durationText: null,
+      severity: null,
+      bodyPart: null,
+      description: null,
+      status: "present",
+      source: "manual",
+      reportId: null,
+      evidence: [],
+      manualFields: [],
+      ...over,
+    });
+    const intake = (id: string, takenAt: string) => ({
+      id,
+      episodeId: "ep-1",
+      memberId: member.id,
+      medicationName: "布洛芬混悬液",
+      dose: "4",
+      doseUnit: "ml",
+      route: null,
+      takenAt,
+      note: null,
+      sourceReportId: null,
+      source: "manual",
+      createdAt: "",
+      updatedAt: "",
+    });
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [row];
+      if (path.startsWith("episodes/"))
+        return {
+          episode: row,
+          symptoms: [
+            symptom({ id: "s1", name: "咳嗽", onsetAt: "2026-10-09 08:00" }),
+            symptom({ id: "s2", name: "体温", onsetAt: "2026-10-12 12:00", measuredValue: "37", measuredUnit: "℃" }),
+            symptom({ id: "s3", name: "体温", onsetAt: "2026-10-13 15:50", measuredValue: "38.5", measuredUnit: "℃" }),
+            symptom({ id: "s4", name: "咳嗽", onsetAt: "2026-10-13 19:32", status: "resolved" }),
+          ],
+          medications: [],
+          intakes: [intake("i1", "2026-10-13 15:50"), intake("i2", "2026-10-13 21:00")],
+          links: [],
+          linkedFacts: [],
+        };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 「改病因 / 标记痊愈」进了标题行，排在状态药丸前面，不再挂在右上角那组里 */
+    const title = wrapper.find(".episode-title");
+    expect(title.exists()).toBe(true);
+    const titleHtml = title.html();
+    expect(titleHtml).toContain("改病因");
+    expect(titleHtml).toContain("恢复进行中");
+    expect(titleHtml.indexOf("改病因")).toBeLessThan(titleHtml.indexOf("episode-title-chip"));
+    expect(titleHtml.indexOf("恢复进行中")).toBeLessThan(titleHtml.indexOf("episode-title-chip"));
+    expect(wrapper.find(".episode-detail-actions").html()).not.toContain("改病因");
+    expect(wrapper.find(".episode-title-chip").text()).toBe("已痊愈");
+
+    /* 痊愈总结：吃了几次药、症状怎么变、体温怎么变 */
+    const recap = wrapper.find(".episode-recap-card");
+    expect(recap.exists()).toBe(true);
+    expect(recap.text()).toContain("痊愈总结");
+    expect(recap.text()).toContain("症状变化");
+    expect(recap.text()).toContain("已消失");
+    expect(recap.text()).toContain("体温变化");
+    expect(recap.text()).toMatch(/38\.5℃（[^）]*15:50）/);
+    expect(recap.text()).toContain("吃药");
+    expect(recap.text()).toContain("共 2 次");
+    expect(recap.text()).toContain("布洛芬混悬液");
+    /* 体温数值按高低上色 */
+    expect(recap.findAll(".episode-temp-high").length).toBeGreaterThan(0);
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

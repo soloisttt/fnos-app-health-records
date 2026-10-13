@@ -3,6 +3,7 @@ import { computed, ref, watch, onActivated, onDeactivated } from "vue";
 import {
   ArrowLeft,
   ArrowUpDown,
+  ClipboardCheck,
   ClipboardList,
   Copy,
   Package,
@@ -19,6 +20,7 @@ import EpisodeEntrySheet, {
   type EpisodeSheetMode,
 } from "../components/EpisodeEntrySheet.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
+import TemperatureText from "../components/TemperatureText.vue";
 import { request } from "../utils/api";
 import type {
   CaseEpisode,
@@ -34,6 +36,7 @@ import { withFrequencyNote } from "../utils/medication-frequency";
 import { copyTextToClipboard } from "../utils/clipboard";
 import { isFutureMoment } from "../utils/time";
 import { parseQuickEntry, type QuickEntryDraft } from "../utils/quick-entry";
+import { temperatureLevel } from "../utils/temperature";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
@@ -501,16 +504,6 @@ type VisitBlock = {
 };
 
 type TimelineBlock = EventBlock | VisitBlock;
-
-/** 体温分档：38.5 是常见「要不要吃退烧药」的门槛，所以低热单独一档 */
-function temperatureLevel(value: string | null, unit: string | null) {
-  if (!value) return null;
-  const number = Number(value);
-  const looksLikeTemperature = unit === "℃" || (number >= 30 && number <= 45);
-  if (!looksLikeTemperature || !Number.isFinite(number)) return null;
-  const level = number >= 38.5 ? "high" : number >= 37.5 ? "mid" : "normal";
-  return { text: `${value}${unit ?? ""}`, level } as const;
-}
 
 /** 同一条症状「距上次多久」，用来一眼看出变化节奏 */
 function gapText(item: CaseSymptom, all: CaseSymptom[]) {
@@ -1088,15 +1081,14 @@ const summaryBySymptom = computed(() => {
         } else {
           lines.push(`${group.name}：共 ${group.items.length} 次`);
         }
+        /* 数值和时间挨在一起会看不清，所以时间加括号，如「38.2℃（15:50）」 */
         const chain = group.items
-          .map((item) =>
-            [
-              item.measuredValue ? `${item.measuredValue}${item.measuredUnit ?? ""}` : "",
-              chainMoment(group.items, item.onsetAt),
-            ]
-              .filter(Boolean)
-              .join(" "),
-          )
+          .map((item) => {
+            const value = item.measuredValue ? `${item.measuredValue}${item.measuredUnit ?? ""}` : "";
+            const time = chainMoment(group.items, item.onsetAt);
+            if (value && time) return `${value}（${time}）`;
+            return value || time;
+          })
           .filter(Boolean)
           .join(" → ");
         if (chain) lines.push(`  ${chain}`);
@@ -1231,6 +1223,63 @@ const resolvedSummary = computed(() => {
   if ((current.intakes ?? []).length) bits.push(`服药 ${(current.intakes ?? []).length} 次`);
   bits.push(`${formatDay(episode.resolvedAt) || "已痊愈"} 痊愈`);
   return `本次病程${episodeDurationText.value ? `（${episodeDurationText.value}）` : ""}：${bits.join(" → ")}`;
+});
+
+/**
+ * 痊愈总结：病好了以后回看这一张卡就够 ——
+ * 症状怎么变化、体温怎么变化、一共吃了几次药。
+ * 只有已痊愈（状态为 resolved 或填了痊愈日期）才出现。
+ */
+const recap = computed(() => {
+  const current = detail.value;
+  const episode = current?.episode;
+  if (!current || !episode) return null;
+  if (!(episode.status === "resolved" || episode.resolvedAt)) return null;
+
+  const symptoms = summarySymptomGroups.value
+    .filter((group) => !group.temperature)
+    .map((group) => ({
+      name: group.name,
+      chain: group.items
+        .map((item, index) =>
+          [
+            chainMoment(group.items, item.onsetAt),
+            index === 0 && item.status === "present" ? "出现" : symptomChainLabel[item.status],
+          ]
+            .filter(Boolean)
+            .join(" "),
+        )
+        .join(" → "),
+    }))
+    .filter((row) => row.chain);
+
+  const temperatureGroup = summarySymptomGroups.value.find((group) => group.temperature);
+  let temperature: { name: string; count: number; chain: string } | null = null;
+  if (temperatureGroup) {
+    const fallbackUnit = temperatureGroup.items.find((item) => item.measuredUnit)?.measuredUnit ?? "℃";
+    const chain = temperatureGroup.items
+      .map((item) => {
+        const value = item.measuredValue ? `${item.measuredValue}${item.measuredUnit ?? fallbackUnit}` : "";
+        const time = chainMoment(temperatureGroup.items, item.onsetAt);
+        if (value && time) return `${value}（${time}）`;
+        return value || time;
+      })
+      .filter(Boolean)
+      .join(" → ");
+    if (chain) {
+      temperature = { name: temperatureGroup.name, count: temperatureGroup.items.length, chain };
+    }
+  }
+
+  const intakes = summaryIntakeGroups.value.map((group) => ({
+    name: group.name,
+    when: group.items.map((item) => formatMoment(item.takenAt)).filter(Boolean).join("、"),
+    count: group.items.length,
+  }));
+  const intakeTotal = (current.intakes ?? []).length;
+
+  if (!symptoms.length && !temperature && !intakeTotal) return null;
+  return { symptoms, temperature, intakes, intakeTotal };
 });
 
 async function copyDoctorSummary() {
@@ -1545,8 +1594,35 @@ onActivated(() => {
     <template v-if="detail">
       <div class="page-intro page-intro--keep episode-detail-intro">
         <div>
-          <h2>
-            {{ detail.episode.title }}
+          <h2 class="episode-title">
+            <span class="episode-title-text">{{ detail.episode.title }}</span>
+            <button
+              class="episode-title-action"
+              type="button"
+              :disabled="saving"
+              title="病因只有你自己知道，系统不做推断"
+              @click="causeOpen = !causeOpen"
+            >
+              {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
+            </button>
+            <button
+              v-if="detail.episode.status !== 'resolved'"
+              class="episode-title-action"
+              type="button"
+              :disabled="saving"
+              @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
+            >
+              标记痊愈
+            </button>
+            <button
+              v-else
+              class="episode-title-action"
+              type="button"
+              :disabled="saving"
+              @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
+            >
+              恢复进行中
+            </button>
             <span class="chip status-label episode-title-chip" :class="episodeStatusOf(detail.episode.status).chip">
               {{ episodeStatusOf(detail.episode.status).label }}
             </span>
@@ -1565,33 +1641,6 @@ onActivated(() => {
           >
             <Trash2 :size="16" />删除病程
           </button>
-          <button
-            class="outline-action-button"
-            type="button"
-            :disabled="saving"
-            title="病因只有你自己知道，系统不做推断"
-            @click="causeOpen = !causeOpen"
-          >
-            {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
-          </button>
-          <button
-            v-if="detail.episode.status !== 'resolved'"
-            class="outline-action-button"
-            type="button"
-            :disabled="saving"
-            @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
-          >
-            标记痊愈
-          </button>
-          <button
-            v-else
-            class="outline-action-button"
-            type="button"
-            :disabled="saving"
-            @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
-          >
-            恢复进行中
-          </button>
         </div>
       </div>
 
@@ -1608,6 +1657,42 @@ onActivated(() => {
       </form>
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
+
+      <!-- 痊愈总结：病好了以后回看这一张卡就够 —— 症状怎么变、体温怎么变、吃了几次药 -->
+      <section v-if="recap" class="settings-band entry-list-card episode-recap-card">
+        <header>
+          <div><ClipboardCheck :size="18" /><h3>痊愈总结</h3></div>
+          <span class="count-label">{{ episodeDurationText || "已痊愈" }}</span>
+        </header>
+        <div class="entry-list-body">
+          <p v-if="resolvedSummary" class="episode-recap-line">{{ resolvedSummary }}</p>
+
+          <div v-if="recap.symptoms.length" class="episode-recap-block">
+            <h4>症状变化</h4>
+            <ul>
+              <li v-for="row in recap.symptoms" :key="row.name">
+                <strong>{{ row.name }}</strong>
+                <span>{{ row.chain }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="recap.temperature" class="episode-recap-block">
+            <h4>体温变化 <em>共 {{ recap.temperature.count }} 次</em></h4>
+            <p class="episode-recap-chain"><TemperatureText :text="recap.temperature.chain" /></p>
+          </div>
+
+          <div v-if="recap.intakes.length" class="episode-recap-block">
+            <h4>吃药 <em>共 {{ recap.intakeTotal }} 次</em></h4>
+            <ul>
+              <li v-for="row in recap.intakes" :key="row.name">
+                <strong>{{ row.name }}</strong>
+                <span>{{ row.when }}（{{ row.count }} 次）</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
 
       <section v-if="feverSummary" class="settings-band entry-list-card episode-fever-card">
         <header>
@@ -1771,7 +1856,7 @@ onActivated(() => {
               按天
             </button>
           </div>
-          <pre class="episode-summary-text">{{ doctorSummary }}</pre>
+          <pre class="episode-summary-text"><TemperatureText :text="doctorSummary" /></pre>
           <p v-if="resolvedSummary" class="episode-resolved-summary">{{ resolvedSummary }}</p>
         </div>
       </section>
