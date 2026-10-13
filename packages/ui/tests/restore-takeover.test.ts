@@ -14,8 +14,8 @@ vi.mock('../src/utils/download', () => ({ downloadFile: vi.fn(), downloadStreame
 const backup = { id: 'backup_synthetic', filename: 'synthetic.tar.gz', sizeBytes: 10, createdAt: '2026-01-01', appVersion: '0.2.10', schemaVersion: 17, memberCount: 2, reportCount: 3, includes: [], reason: 'manual' };
 let mounted: ReturnType<typeof mount>[] = [];
 const confirm = useConfirm();
-function render(admin = true) {
-  mocks.context.mockReturnValue({ session: ref({ isAdmin: admin, provider: 'local' }), selectedMemberId: ref(''), load: vi.fn(async () => {}) });
+function render(admin = true, provider = 'local') {
+  mocks.context.mockReturnValue({ session: ref({ isAdmin: admin, provider }), selectedMemberId: ref(''), load: vi.fn(async () => {}) });
   const page = mount(DataAuditSettingsPage, { global: { stubs: { SubPageHeader: true, MarqueeText: true } } });
   const dialog = mount(ConfirmDialog, { attachTo: document.body }); mounted.push(page, dialog);
   return page;
@@ -50,6 +50,21 @@ describe('restore authorization UX', () => {
     expect(page.text()).not.toContain('运行受控身份映射工具');
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
     expect(mocks.toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('Docker to fnOS restore uses the shared confirmation and guides existing archive association', async () => {
+    mocks.upload.mockImplementation(async (_path, body: FormData) => body.get('token')
+      ? { restored: true, identityRebind: { strategy: 'cross', accessPolicy: 'admin_takeover', memberPermissionCount: 2 } }
+      : { token: 'local-plan', warning: '检测到本地账号备份。2 个成员档案将由当前管理员管理。', canChooseTakeover: false });
+    const page = render(true, 'fnos_gateway'); await flushPromises();
+    await chooseFile(page, '选择外部备份文件');
+    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(1);
+    expect(document.querySelector('[role="alertdialog"]')!.textContent).toContain('替换当前数据');
+    expect(document.querySelector('[role="alertdialog"] input')).toBeNull();
+    await confirm.confirm(); await flushPromises();
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining('请重新进入应用后，可将已有档案设为本人或分配共享权限，无须新建成员'), 6000);
+    expect(mocks.upload).toHaveBeenCalledTimes(2);
+    expect(page.text()).not.toContain('管理账号');
   });
 
   it('legacy choice defaults off, blocks submission during fresh preflight and uses only the refreshed token', async () => {

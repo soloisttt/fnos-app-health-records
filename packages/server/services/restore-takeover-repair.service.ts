@@ -19,9 +19,13 @@ type RepairPlan = { actor: string; deployment: string; digest: string; fingerpri
 const plans = new Map<string, RepairPlan>();
 const conflict = () => createError({ statusCode: 409, statusMessage: '恢复档案状态已变化或无法核实，请重新检查原始备份' });
 
+function sourceProvider() {
+  return getAppConfig().authMode === 'local' ? 'fnos_gateway' : getAppConfig().authMode === 'fnos' ? 'local' : null;
+}
+
 function latestRepairableRestore(user: RequestUser): RestoreEvent | null {
   const db = getDatabase();
-  if (getAppConfig().authMode !== 'local' || user.provider !== 'local') return null;
+  if (!sourceProvider()) return null;
   const event = db.prepare("SELECT rowid,id,target_id,actor_user_id FROM audit_logs WHERE action='backup.restore' ORDER BY rowid DESC LIMIT 1").get() as RestoreEvent | undefined;
   if (!event || event.actor_user_id !== user.id) return null;
   const identity = db.prepare("SELECT actor_user_id,detail_json FROM audit_logs WHERE action='backup.identity_restore' AND rowid<? ORDER BY rowid DESC LIMIT 1").get(event.rowid) as { actor_user_id: string; detail_json: string } | undefined;
@@ -37,15 +41,15 @@ function latestRepairableRestore(user: RequestUser): RestoreEvent | null {
 function candidates() {
   const db = getDatabase();
   const pending = db.prepare('SELECT user_id,source_json,mapped_at FROM identity_recovery_pending ORDER BY user_id').all() as Array<{ user_id: string; source_json: string; mapped_at: string | null }>;
-  const fnos = new Set(pending.filter(row => {
+  const sourceUsers = new Set(pending.filter(row => {
     if (row.mapped_at) return false;
-    try { const source = JSON.parse(row.source_json); return source.identities?.some((i: { provider: string }) => i.provider === 'fnos_gateway'); } catch { return false; }
+    try { const source = JSON.parse(row.source_json); return source.identities?.some((i: { provider: string }) => i.provider === sourceProvider()); } catch { return false; }
   }).map(row => row.user_id));
   const result: string[] = [];
   for (const member of db.prepare('SELECT id,created_by FROM health_members ORDER BY id').all() as Array<{ id: string; created_by: string }>) {
     const grants = db.prepare('SELECT user_id,permission,can_manage_sharing FROM member_permissions WHERE member_id=? ORDER BY user_id').all(member.id) as Array<{ user_id: string; permission: string; can_manage_sharing: number }>;
     const related = new Set([member.created_by, ...grants.map(p => p.user_id)]);
-    if (!grants.some(p => fnos.has(p.user_id))) continue;
+    if (!grants.some(p => sourceUsers.has(p.user_id))) continue;
     if (pending.some(p => related.has(p.user_id) && p.mapped_at)) continue;
     if (grants.some(p => p.permission === 'manager' && p.can_manage_sharing === 1 && isUsableMemberAccount(p.user_id))) continue;
     result.push(member.id);
@@ -86,7 +90,7 @@ function verifySourceMembers(source: DatabaseSync, ids: string[]) {
       const identities = source.prepare('SELECT provider,subject FROM user_identities WHERE user_id=? ORDER BY provider,subject').all(grant.user_id);
       try {
         const original = JSON.parse(String(pending.source_json)).identities;
-        return identities.some(i => i.provider === 'fnos_gateway') && Array.isArray(original)
+        return identities.some(i => i.provider === sourceProvider()) && Array.isArray(original)
           && JSON.stringify(identities) === JSON.stringify(original.map((i: { provider: string; subject: string }) => ({ provider: i.provider, subject: i.subject })).sort((a: { provider: string; subject: string }, b: { provider: string; subject: string }) => a.provider.localeCompare(b.provider) || a.subject.localeCompare(b.subject)));
       } catch { return false; }
     });
@@ -98,7 +102,7 @@ export function preflightRestoreTakeoverRepair(user: RequestUser, archivePath: s
   const event = latestRepairableRestore(user);
   if (!event) throw conflict();
   return inspectBackupForTakeover(archivePath, (manifest, source, digest) => {
-    if (manifest.id !== event.target_id || (manifest.identity && manifest.identity.authMode !== 'fnos')) throw conflict();
+    if (manifest.id !== event.target_id || (manifest.identity && manifest.identity.authMode !== (sourceProvider() === 'local' ? 'local' : 'fnos'))) throw conflict();
     const memberIds = verifySourceMembers(source, candidates());
     if (!memberIds.length) throw conflict();
     for (const [key, plan] of plans) if (plan.expires < Date.now()) plans.delete(key);

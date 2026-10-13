@@ -29,7 +29,7 @@ export function rebindRestoredAdministrator(user:RequestUser,credential:Restored
  if(!user.authenticated||!isAdministrator(user)) throw new Error('恢复需要已验证的管理员');
  if(user.provider==='local'&&!credential) throw new Error('缺少管理员凭据');
  const db=database || getDatabase();
- if(takeover && (strategy!=='cross' || user.provider!=='local')) throw new Error('无效的恢复接管策略');
+ if(takeover && (strategy!=='cross' || !['local','fnos_gateway'].includes(user.provider) || (user.provider==='fnos_gateway' && !identitySubject))) throw new Error('无效的恢复接管策略');
  let targetId=user.id;
  let memberPermissionCount=0;
  runInTransaction(db,()=>{
@@ -41,6 +41,7 @@ export function rebindRestoredAdministrator(user:RequestUser,credential:Restored
    }
    // Retain source credentials and status as source metadata; prevent them authenticating here.
    db.exec("UPDATE local_accounts SET disabled_at=COALESCE(disabled_at,CURRENT_TIMESTAMP),username='pending-'||id; UPDATE user_identities SET subject='pending:'||id");
+   // Re-establish only the verified target administrator, never a login for source users.
    targetId=createId('user');
   } else if(credential) {
    const restored=db.prepare('SELECT id FROM local_accounts WHERE user_id=?').get(user.id) as {id:string}|undefined;
