@@ -41,12 +41,39 @@ const DAY_WORDS: Array<[RegExp, number]> = [
 const PERIOD_WORD = "(凌晨|早上|上午|中午|下午|傍晚|晚上|夜里|夜晚)";
 const PERIOD_WORD_ALL = new RegExp(PERIOD_WORD, "g");
 
-/* 冒号形式 `14:20`；点钟形式 `5点半` / `14点20` / `早上8点`。
-   点钟后的分钟必须**紧邻**数字（中文里「14点20」是连写的），
+/** 中文数字：口语里常写「三点五十」而不是「3:50」。 */
+const CN_DIGITS: Record<string, number> = {
+  零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4,
+  五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+};
+const CN_NUMBER_CHARS = "零〇一二两三四五六七八九十";
+
+/** 把「十」「十五」「二十」「五十」「十二」这类中文数字转成阿拉伯数字，认不出返回 null。 */
+function chineseNumber(value: string): number | null {
+  if (!value) return null;
+  if (value === "十") return 10;
+  const tenAt = value.indexOf("十");
+  if (tenAt === 0) {
+    const unit = CN_DIGITS[value.slice(1)] ?? null;
+    return unit === null ? null : 10 + unit;
+  }
+  if (tenAt > 0) {
+    const high = CN_DIGITS[value[0]!] ?? null;
+    if (high === null) return null;
+    const rest = value.slice(tenAt + 1);
+    if (!rest) return high * 10;
+    const low = CN_DIGITS[rest] ?? null;
+    return low === null ? null : high * 10 + low;
+  }
+  return value.length === 1 ? CN_DIGITS[value] ?? null : null;
+}
+
+/* 冒号形式 `14:20`；点钟形式 `5点半` / `14点20` / `早上8点` / `三点五十`。
+   点钟后的分钟必须**紧邻**数字或中文数字（中文里「14点20」是连写的），
    这样「8点 36.8度」「下午3点 38」里的数字就不会被误当成分钟。
    时段词本身可选：它也可能离钟点很远（「下午体温3点」），由下面回退查找。 */
 const TIME_PATTERN = new RegExp(
-  `${PERIOD_WORD}?\\s*(\\d{1,2})\\s*(?:[:：]\\s*(\\d{1,2})|[点时](?:(\\d{1,2})\\s*分?|\\s*(半))?)`,
+  `${PERIOD_WORD}?\\s*(\\d{1,2}|[${CN_NUMBER_CHARS}]{1,3})\\s*(?:[:：]\\s*(\\d{1,2})|[点时](?:(\\d{1,2})\\s*分?|\\s*([${CN_NUMBER_CHARS}]{1,3})\\s*分?|\\s*(半))?)`,
 );
 
 /** 体温常用范围：30–45 视为摄氏度。 */
@@ -81,6 +108,12 @@ function pad(value: number) {
   return String(value).padStart(2, "0");
 }
 
+/** 解析出来的数字可能是阿拉伯数字，也可能是中文数字（「三点五十」）。 */
+function toNumber(text: string) {
+  if (/^\d+$/.test(text)) return Number(text);
+  return chineseNumber(text) ?? 0;
+}
+
 function formatLocal(date: Date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
@@ -97,7 +130,8 @@ function resolveHour(hour: number, period: string | undefined, now: Date) {
     if (/下午|傍晚|晚上|夜里|夜晚/.test(periodValue)) return hour <= 12 ? hour + 12 : hour;
     return hour;
   }
-  if (hour > 12) return hour;
+  /* 12 点不能靠"离现在更近"再 +12（会变成 24 点、滚到第二天） */
+  if (hour >= 12) return hour;
   const nowHours = now.getHours() + now.getMinutes() / 60;
   const sameDay = hour;
   const plusTwelve = hour + 12;
@@ -151,9 +185,8 @@ export function parseQuickEntry(rawInput: string, now: Date = new Date()): Quick
     if (found?.length) periodWord = found[found.length - 1]!;
   }
   if (timeMatch) {
-    const hour = resolveHour(Number(timeMatch[2]), periodWord, now);
-    const minuteText = timeMatch[3] ?? timeMatch[4];
-    const minute = timeMatch[5] ? 30 : Number(minuteText ?? 0);
+    const hour = resolveHour(toNumber(timeMatch[2]), periodWord, now);
+    const minute = timeMatch[6] ? 30 : toNumber(timeMatch[3] ?? timeMatch[4] ?? timeMatch[5] ?? "0");
     const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, hour, minute);
     draft.onsetAt = formatLocal(date);
     draft.matched = true;

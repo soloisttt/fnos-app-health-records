@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, ref, watch, onActivated } from "vue";
 import {
-  Activity,
   ArrowLeft,
   ArrowUpDown,
   CheckCircle2,
   ClipboardList,
   Copy,
   FileText,
+  Package,
   Plus,
   Thermometer,
   Trash2,
 } from "@lucide/vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
+import EpisodeEntrySheet, {
+  type EpisodeSheetForm,
+  type EpisodeSheetIntent,
+  type EpisodeSheetMode,
+} from "../components/EpisodeEntrySheet.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
 import { request } from "../utils/api";
 import type {
@@ -21,11 +26,13 @@ import type {
   CaseEpisodeDetail,
   CaseEpisodeLinkFactType,
   CaseMedication,
+  CaseMedicationIntake,
   CaseSymptom,
+  CaseSymptomStatus,
   EpisodeLinkedFact,
 } from "../types/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
-import { parseQuickEntry } from "../utils/quick-entry";
+import { parseQuickEntry, type QuickEntryDraft } from "../utils/quick-entry";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
@@ -40,19 +47,17 @@ const error = ref("");
 const episodes = ref<CaseEpisode[]>([]);
 const detail = ref<CaseEpisodeDetail | null>(null);
 const formOpen = ref(false);
-const symptomFormOpen = ref(false);
-const medicationFormOpen = ref(false);
 const previewReportId = ref<string | null>(null);
-/* 病因默认收起：只在点「填病因」时展开，腾出位置给「快速记录」 */
 const causeOpen = ref(false);
 const causeDraft = ref("");
-/* 「给医生看」的摘要面板 */
 const summaryOpen = ref(false);
-/* 「记一笔」时表单标题写成「记一笔：咳嗽」，与编辑区分 */
-const logSourceName = ref<string | null>(null);
-/* 快速记录 */
 const quickInput = ref("");
+
+/** 常用症状：第一次记录某个症状时不用打字 */
 const COMMON_SYMPTOMS = ["发热", "咳嗽", "流鼻涕", "鼻塞", "腹泻", "呕吐", "皮疹"];
+
+/** 刚快速记完的那一条：给一行可点的提示，识别错了也有地方改 */
+const lastHint = ref<{ text: string; mode: EpisodeSheetMode; id: string } | null>(null);
 
 const factTypeLabels: Record<CaseEpisodeLinkFactType, string> = {
   report: "报告",
@@ -64,41 +69,371 @@ const factTypeLabels: Record<CaseEpisodeLinkFactType, string> = {
   section: "章节",
 };
 
-function factDetail(fact: EpisodeLinkedFact) {
-  if (fact.missing) return "内容已不存在，可移除这条归集";
-  const parts = [fact.detail, fact.reportTitle, fact.hospitalName, formatDay(fact.occurredAt)];
-  return parts.filter(Boolean).join(" · ");
+function nowLocal() {
+  const current = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${current.getFullYear()}-${pad(current.getMonth() + 1)}-${pad(current.getDate())} ${pad(current.getHours())}:${pad(current.getMinutes())}`;
 }
 
-async function unlinkFact(factType: CaseEpisodeLinkFactType, factId: string) {
+function emptySheetForm(): EpisodeSheetForm {
+  return {
+    name: "",
+    at: nowLocal(),
+    status: "present",
+    value: "",
+    unit: "",
+    severity: "",
+    bodyPart: "",
+    dose: "",
+    frequency: "",
+    route: "",
+  };
+}
+
+/* ------------------------------------------------ 小面板（记一次 / 编辑） */
+
+const sheet = ref({
+  open: false,
+  mode: "symptom" as EpisodeSheetMode,
+  intent: "log" as EpisodeSheetIntent,
+  subject: "",
+  showValue: false,
+  id: "" as string,
+  reportId: null as string | null,
+  form: emptySheetForm(),
+});
+
+const sheetForm = computed(() => sheet.value.form);
+
+function openSheet(options: {
+  mode: EpisodeSheetMode;
+  intent: EpisodeSheetIntent;
+  subject?: string;
+  showValue?: boolean;
+  id?: string;
+  reportId?: string | null;
+  form: Partial<EpisodeSheetForm>;
+}) {
+  sheet.value = {
+    open: true,
+    mode: options.mode,
+    intent: options.intent,
+    subject: options.subject ?? "",
+    showValue: options.showValue ?? false,
+    id: options.id ?? "",
+    reportId: options.reportId ?? null,
+    form: { ...emptySheetForm(), ...options.form },
+  };
+}
+
+function closeSheet() {
+  sheet.value = { ...sheet.value, open: false };
+}
+
+/** 症状名值得显示数值的：体温/发热这类，或本来就有单位 */
+function nameHasValue(name: string, unit?: string | null) {
+  return /发热|体温|温度|发烧|血压/.test(name) || unit === "℃";
+}
+
+async function submitSheet(values: EpisodeSheetForm, repeat: boolean) {
   const episodeId = detail.value?.episode.id;
+  const entry = sheet.value;
   if (!episodeId || saving.value) return;
+  if (!values.name.trim()) {
+    error.value = entry.mode === "medication" ? "药品名称不能为空" : "症状名称不能为空";
+    return;
+  }
   saving.value = true;
+  error.value = "";
   try {
-    detail.value = await request<CaseEpisodeDetail>(
-      `episodes/${episodeId}/links?factType=${encodeURIComponent(factType)}&factId=${encodeURIComponent(factId)}`,
-      { method: "DELETE" },
-    );
-    toast.show("已从病程移除");
+    if (entry.mode === "symptom") {
+      const body = JSON.stringify({
+        name: values.name,
+        onsetAt: values.at || null,
+        status: values.status,
+        measuredValue: values.value || null,
+        measuredUnit: values.unit || null,
+        severity: values.severity || null,
+        bodyPart: values.bodyPart || null,
+      });
+      const before = new Set((detail.value?.symptoms ?? []).map((item) => item.id));
+      detail.value =
+        entry.intent === "edit" && entry.id
+          ? await request<CaseEpisodeDetail>(`symptoms/${entry.id}`, { method: "PUT", body })
+          : await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms`, { method: "POST", body });
+      const created = entry.intent === "edit" ? null : detail.value.symptoms.find((item) => !before.has(item.id));
+      const target = created ?? detail.value.symptoms.find((item) => item.id === entry.id);
+      lastHint.value = target
+        ? {
+            text: `${entry.intent === "edit" ? "已更新" : "已记入"}「${target.name}${values.value ? ` ${values.value}${values.unit ?? ""}` : ""}」`,
+            mode: "symptom",
+            id: target.id,
+          }
+        : null;
+      toast.show(entry.intent === "edit" ? "症状已更新" : "已记入症状");
+    } else if (entry.intent === "log") {
+      const before = new Set((detail.value?.intakes ?? []).map((item) => item.id));
+      detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/intakes`, {
+        method: "POST",
+        body: JSON.stringify({
+          medicationName: values.name,
+          dose: values.dose || null,
+          route: values.route || null,
+          takenAt: values.at || null,
+          sourceReportId: entry.reportId,
+        }),
+      });
+      const created = detail.value.intakes.find((item) => !before.has(item.id));
+      lastHint.value = {
+        text: `已记入服药「${values.name}${values.dose ? ` ${values.dose}` : ""}」`,
+        mode: "medication",
+        id: created?.id ?? "",
+      };
+      toast.show("已记入服药");
+    } else {
+      const body = JSON.stringify({
+        name: values.name,
+        dose: values.dose || null,
+        frequency: values.frequency || null,
+        route: values.route || null,
+        startAt: values.at ? values.at.slice(0, 10) : null,
+      });
+      const before = new Set((detail.value?.medications ?? []).map((item) => item.id));
+      detail.value =
+        entry.intent === "edit" && entry.id
+          ? await request<CaseEpisodeDetail>(`medications/${entry.id}`, { method: "PUT", body })
+          : await request<CaseEpisodeDetail>(`episodes/${episodeId}/medications`, { method: "POST", body });
+      const created = entry.intent === "edit" ? null : detail.value.medications.find((item) => !before.has(item.id));
+      const target = created ?? detail.value.medications.find((item) => item.id === entry.id);
+      lastHint.value = target ? { text: `已记入用药「${target.name}」`, mode: "medication", id: target.id } : null;
+      toast.show(entry.intent === "edit" ? "用药已更新" : "用药已添加");
+    }
+
+    if (repeat) {
+      /* 「保存并再记一条」：时间挪到此刻、清掉数值，面板留着继续记 */
+      sheet.value = {
+        ...sheet.value,
+        form: { ...values, at: nowLocal(), value: "", dose: "" },
+      };
+    } else {
+      closeSheet();
+    }
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "移除失败";
+    error.value = cause instanceof Error ? cause.message : "保存失败";
   } finally {
     saving.value = false;
   }
 }
 
+/** 点提示条 → 打开该条的编辑面板 */
+function editHint() {
+  const hint = lastHint.value;
+  if (!hint) return;
+  if (hint.mode === "symptom") {
+    const target = detail.value?.symptoms.find((item) => item.id === hint.id);
+    if (target) editSymptom(target);
+    return;
+  }
+  const intake = detail.value?.intakes.find((item) => item.id === hint.id);
+  if (intake) {
+    openSheet({
+      mode: "medication",
+      intent: "log",
+      subject: intake.medicationName,
+      reportId: intake.sourceReportId,
+      form: {
+        name: intake.medicationName,
+        at: intake.takenAt ?? nowLocal(),
+        dose: intake.dose ?? "",
+        route: intake.route ?? "",
+      },
+    });
+    return;
+  }
+  const medication = detail.value?.medications.find((item) => item.id === hint.id);
+  if (medication) editMedication(medication);
+}
+
+/* ------------------------------------------------ 快速记录区 */
+
+/** 可点一下就记的症状：本病程已有的症状 + 还没出现过的常用症状 */
+const symptomChips = computed(() => {
+  const existing = new Map<string, CaseSymptom>();
+  for (const item of detail.value?.symptoms ?? []) existing.set(item.name, item);
+  const chips: Array<{ name: string; unit: string; showValue: boolean; existing: boolean }> = [];
+  for (const [name, item] of existing) {
+    chips.push({
+      name,
+      unit: item.measuredUnit ?? (nameHasValue(name) ? "℃" : ""),
+      showValue: nameHasValue(name, item.measuredUnit),
+      existing: true,
+    });
+  }
+  for (const name of COMMON_SYMPTOMS) {
+    if (existing.has(name)) continue;
+    chips.push({ name, unit: nameHasValue(name) ? "℃" : "", showValue: nameHasValue(name), existing: false });
+  }
+  return chips;
+});
+
+/** 可点一下就记的药：医生开的药 + 自己补录的药；用量优先用「上次记的」 */
+const medicationChips = computed(() => {
+  const chips = new Map<string, { name: string; dose: string; route: string; reportId: string | null }>();
+  for (const fact of detail.value?.linkedFacts ?? []) {
+    if (fact.factType !== "medication") continue;
+    if (chips.has(fact.label)) continue;
+    chips.set(fact.label, { name: fact.label, dose: "", route: "", reportId: fact.reportId });
+  }
+  for (const item of detail.value?.medications ?? []) {
+    const existing = chips.get(item.name);
+    if (existing) {
+      if (!existing.dose && item.dose) existing.dose = [item.dose, item.doseUnit].filter(Boolean).join("");
+      if (!existing.route && item.route) existing.route = item.route;
+      continue;
+    }
+    chips.set(item.name, {
+      name: item.name,
+      dose: [item.dose, item.doseUnit].filter(Boolean).join(""),
+      route: item.route ?? "",
+      reportId: item.reportId,
+    });
+  }
+  /* 上次喂过的量直接预填，点开就能存 */
+  for (const intake of [...(detail.value?.intakes ?? [])].reverse()) {
+    const chip = chips.get(intake.medicationName);
+    if (chip && !chip.dose && intake.dose) chip.dose = [intake.dose, intake.doseUnit].filter(Boolean).join("");
+  }
+  return [...chips.values()];
+});
+
+function logSymptom(chip: { name: string; unit: string; showValue: boolean; existing: boolean }) {
+  const history = (detail.value?.symptoms ?? []).filter((item) => item.name === chip.name);
+  const latest = history[history.length - 1];
+  openSheet({
+    mode: "symptom",
+    intent: "log",
+    subject: chip.name,
+    showValue: chip.showValue,
+    form: {
+      name: chip.name,
+      at: nowLocal(),
+      status: latest ? latest.status : "present",
+      unit: latest?.measuredUnit ?? chip.unit,
+      severity: latest?.severity ?? "",
+      bodyPart: latest?.bodyPart ?? "",
+    },
+  });
+}
+
+function logMedication(chip: { name: string; dose: string; route: string; reportId: string | null }) {
+  openSheet({
+    mode: "medication",
+    intent: "log",
+    subject: chip.name,
+    reportId: chip.reportId,
+    form: { name: chip.name, at: nowLocal(), dose: chip.dose, route: chip.route },
+  });
+}
+
+function supplementSymptom() {
+  openSheet({ mode: "symptom", intent: "create", form: { at: nowLocal() } });
+}
+
+function supplementMedication() {
+  openSheet({ mode: "medication", intent: "create", form: { at: nowLocal() } });
+}
+
+/* 「一句话记」：解析出来直接入库，不再弹表单（识别不准时用提示条上的「修改」兜底） */
+const quickDraft = computed(() => {
+  const text = quickInput.value.trim();
+  if (!text) return null;
+  const parsed = parseQuickEntry(text);
+  if (!parsed.matched && !parsed.name) return null;
+  return parsed;
+});
+
+function quickDraftText(parsed: QuickEntryDraft) {
+  const bits = [parsed.kind === "medication" ? "服药" : "症状", `「${parsed.name || "未提名称"}」`];
+  if (parsed.measuredValue) bits.push(`${parsed.measuredValue}${parsed.measuredUnit ?? ""}`);
+  if (parsed.dose) bits.push(parsed.dose);
+  if (parsed.frequency) bits.push(parsed.frequency);
+  if (parsed.onsetAt) bits.push(parsed.onsetAt);
+  return bits.join(" · ");
+}
+
+async function applyQuickDraft() {
+  const parsed = quickDraft.value;
+  const episodeId = detail.value?.episode.id;
+  if (!parsed || !episodeId || saving.value) return;
+  /* 什么都没识别出来（例如只打了时间）→ 交给表单补 */
+  if (!parsed.name) {
+    if (parsed.kind === "medication") supplementMedication();
+    else supplementSymptom();
+    return;
+  }
+  const isMedication = parsed.kind === "medication";
+  saving.value = true;
+  error.value = "";
+  try {
+    if (isMedication) {
+      const before = new Set((detail.value?.intakes ?? []).map((item) => item.id));
+      detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/intakes`, {
+        method: "POST",
+        body: JSON.stringify({
+          medicationName: parsed.name,
+          dose: parsed.dose || null,
+          route: parsed.route || null,
+          takenAt: parsed.onsetAt || nowLocal(),
+        }),
+      });
+      const created = detail.value.intakes.find((item) => !before.has(item.id));
+      lastHint.value = {
+        text: `已记入服药「${parsed.name}${parsed.dose ? ` ${parsed.dose}` : ""}」`,
+        mode: "medication",
+        id: created?.id ?? "",
+      };
+    } else {
+      const before = new Set((detail.value?.symptoms ?? []).map((item) => item.id));
+      detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: parsed.name,
+          onsetAt: parsed.onsetAt || nowLocal(),
+          status: "present",
+          measuredValue: parsed.measuredValue || null,
+          measuredUnit: parsed.measuredUnit || null,
+        }),
+      });
+      const created = detail.value.symptoms.find((item) => !before.has(item.id));
+      lastHint.value = created
+        ? {
+            text: `已记入「${created.name}${parsed.measuredValue ? ` ${parsed.measuredValue}${parsed.measuredUnit ?? ""}` : ""}」`,
+            mode: "symptom",
+            id: created.id,
+          }
+        : null;
+    }
+    toast.show(isMedication ? "已记入服药" : "已记入症状");
+    quickInput.value = "";
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "记录失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
+/* ------------------------------------------------ 时间轴 */
+
 type TimelineItem = {
   key: string;
   title: string;
   detail: string | null;
+  /** 体温数值（按高低上色），没有则 null */
+  value: { text: string; level: "normal" | "mid" | "high" } | null;
   reportId: string | null;
   derived: boolean;
-  /** 信息不全（例如用药没抽到剂量），卡片上会提示核对原报告 */
   warn: boolean;
-  /** 可编辑时给出入口（手动录入的症状与用药）；随报告记入的条目不可改。 */
   edit: (() => void) | null;
-  /** 症状专有：点一下记一条同名症状，用来跟踪「好转 / 加重」 */
-  logAgain: (() => void) | null;
   remove: (() => void) | null;
 };
 
@@ -130,16 +465,42 @@ type VisitBlock = {
 
 type TimelineBlock = EventBlock | VisitBlock;
 
-function symptomItem(item: CaseSymptom): TimelineItem {
+/** 体温分档：38.5 是常见「要不要吃退烧药」的门槛，所以低热单独一档 */
+function temperatureLevel(value: string | null, unit: string | null) {
+  if (!value) return null;
+  const number = Number(value);
+  const looksLikeTemperature = unit === "℃" || (number >= 30 && number <= 45);
+  if (!looksLikeTemperature || !Number.isFinite(number)) return null;
+  const level = number >= 38.5 ? "high" : number >= 37.5 ? "mid" : "normal";
+  return { text: `${value}${unit ?? ""}`, level } as const;
+}
+
+/** 同一条症状「距上次多久」，用来一眼看出变化节奏 */
+function gapText(item: CaseSymptom, all: CaseSymptom[]) {
+  if (!item.onsetAt) return "";
+  const previous = all
+    .filter((other) => other.name === item.name && other.id !== item.id && (other.onsetAt ?? "") < item.onsetAt!)
+    .sort((left, right) => (left.onsetAt ?? "").localeCompare(right.onsetAt ?? ""))
+    .at(-1);
+  if (!previous?.onsetAt) return "";
+  const diff = new Date(item.onsetAt.replace(" ", "T")).getTime() - new Date(previous.onsetAt.replace(" ", "T")).getTime();
+  if (!Number.isFinite(diff) || diff <= 0) return "";
+  const hours = diff / 3_600_000;
+  if (hours < 1) return `距上次 ${Math.max(1, Math.round(diff / 60_000))} 分钟`;
+  if (hours < 48) return `距上次 ${Math.round(hours)} 小时`;
+  return `距上次 ${Math.round(hours / 24)} 天`;
+}
+
+function symptomItem(item: CaseSymptom, all: CaseSymptom[]): TimelineItem {
   return {
     key: `symptom:${item.id}`,
     title: item.name,
-    detail: symptomMeta(item),
+    detail: symptomMeta(item, all),
+    value: temperatureLevel(item.measuredValue, item.measuredUnit),
     reportId: null,
     derived: false,
     warn: false,
     edit: () => editSymptom(item),
-    logAgain: () => logSymptomAgain(item),
     remove: () => void removeSymptom(item.id),
   };
 }
@@ -149,22 +510,20 @@ function factItem(fact: EpisodeLinkedFact): TimelineItem {
     key: `fact:${fact.linkId}`,
     title: fact.label,
     detail: factDetail(fact),
+    value: null,
     reportId: fact.reportId,
     derived: fact.derived,
     warn: fact.factType === "medication" && (fact.detail ?? "").trim() === "用药",
     /* 由报告展开出的条目跟随报告，不单独编辑或移除；要改就改报告本身 */
     edit: null,
-    logAgain: null,
     remove: fact.derived ? null : () => void unlinkFact(fact.factType, fact.factId),
   };
 }
 
-/** A5 病程时间轴：一次就诊合成一张卡片，自行录入的症状与用药按时间排成节点。 */
 const timeline = computed<TimelineBlock[]>(() => {
   const current = detail.value;
   if (!current) return [];
   const blocks: TimelineBlock[] = [];
-
   const visits = new Map<string, VisitBlock>();
   const looseEvents = new Map<string, EventBlock>();
 
@@ -179,7 +538,7 @@ const timeline = computed<TimelineBlock[]>(() => {
   };
 
   for (const fact of current.linkedFacts) {
-    /* 报告本身不单独成条：它已经变成上面那张就诊卡片 */
+    /* 报告本身不单独成条：它已经变成下面那张就诊卡片 */
     if (fact.factType === "report") continue;
     const item = factItem(fact);
     if (!fact.reportId) {
@@ -216,35 +575,41 @@ const timeline = computed<TimelineBlock[]>(() => {
   /* 症状：来自报告主诉的归到那次就诊里，自己录的单独成节点 */
   for (const symptom of current.symptoms) {
     const visit = symptom.reportId ? visits.get(symptom.reportId) : undefined;
+    const item = symptomItem(symptom, current.symptoms);
     if (visit) {
-      visit.symptoms.push({
-        key: `visit-symptom:${symptom.id}`,
-        title: symptom.name,
-        detail: symptomVisitMeta(symptom),
-        reportId: null,
-        derived: true,
-        warn: false,
-        edit: () => editSymptom(symptom),
-        logAgain: () => logSymptomAgain(symptom),
-        remove: () => void removeSymptom(symptom.id),
-      });
+      visit.symptoms.push({ ...item, key: `visit-symptom:${symptom.id}` });
       continue;
     }
-    pushLoose("symptom", "症状", symptom.onsetAt, symptomItem(symptom));
+    pushLoose("symptom", "症状", symptom.onsetAt, item);
   }
 
-  /* 手动补录的用药：没有来源报告，按开始时间成节点 */
+  /* 自己补录的药（医生没开、或报告没抽到） */
   for (const medication of current.medications) {
     pushLoose("medication", factTypeLabels.medication, medication.startAt, {
       key: `medication:${medication.id}`,
       title: medication.name,
       detail: manualMedicationDetail(medication),
+      value: null,
       reportId: null,
       derived: false,
       warn: false,
       edit: () => editMedication(medication),
-      logAgain: null,
       remove: () => void removeMedication(medication.id),
+    });
+  }
+
+  /* 服药记录：每次实际服用一条 */
+  for (const intake of current.intakes ?? []) {
+    pushLoose("intake", "服药", intake.takenAt, {
+      key: `intake:${intake.id}`,
+      title: intake.medicationName,
+      detail: intakeDetail(intake),
+      value: null,
+      reportId: null,
+      derived: false,
+      warn: false,
+      edit: () => editIntake(intake),
+      remove: () => void removeIntake(intake.id),
     });
   }
 
@@ -270,11 +635,11 @@ const timeline = computed<TimelineBlock[]>(() => {
           key: "resolved:main",
           title: "已痊愈",
           detail: null,
+          value: null,
           reportId: null,
           derived: false,
           warn: false,
           edit: null,
-          logAgain: null,
           remove: null,
         },
       ],
@@ -307,9 +672,7 @@ const episodeDurationText = computed(() => {
 /** 发热小结：发烧时最常被问的三件事——最高多少、最近多少、烧了几天。 */
 const feverSummary = computed(() => {
   const items = (detail.value?.symptoms ?? []).filter(
-    (item) =>
-      item.measuredValue &&
-      (item.measuredUnit === "℃" || /发热|体温|发烧|温度/.test(item.name)),
+    (item) => item.measuredValue && nameHasValue(item.name, item.measuredUnit),
   );
   const scored = items
     .map((item) => ({ item, value: Number(item.measuredValue) }))
@@ -331,17 +694,6 @@ const feverSummary = computed(() => {
 });
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
-const symptomForm = ref(emptySymptomForm());
-const medicationForm = ref({ name: "", dose: "", frequency: "", route: "", startAt: "" });
-const editingSymptomId = ref<string | null>(null);
-const editingMedicationId = ref<string | null>(null);
-
-/** 当前本地时间 `YYYY-MM-DD HH:mm`；补录症状默认填"现在"，对应"刚量了体温"这种场景。 */
-function nowLocal() {
-  const current = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${current.getFullYear()}-${pad(current.getMonth() + 1)}-${pad(current.getDate())} ${pad(current.getHours())}:${pad(current.getMinutes())}`;
-}
 
 function emptySymptomForm() {
   return {
@@ -352,144 +704,7 @@ function emptySymptomForm() {
     bodyPart: "",
     measuredValue: "",
     measuredUnit: "",
-    status: "present" as CaseSymptom["status"],
-  };
-}
-
-/** 打开空白症状表单（强制展开，供快捷键 / 快速记录调用） */
-function openSymptomForm() {
-  closeMedicationForm();
-  editingSymptomId.value = null;
-  logSourceName.value = null;
-  symptomForm.value = emptySymptomForm();
-  symptomFormOpen.value = true;
-}
-
-/** 头部「添加症状」按钮：开着就收起，避免占屏 */
-function toggleSymptomForm() {
-  if (symptomFormOpen.value) closeSymptomForm();
-  else openSymptomForm();
-}
-
-/** 编辑已有症状 */
-function editSymptom(target: CaseSymptom) {
-  closeMedicationForm();
-  logSourceName.value = null;
-  editingSymptomId.value = target.id;
-  symptomForm.value = {
-    name: target.name,
-    /* 老数据可能没有时间，或时间格式不同，统一按当前时间回退显示 */
-    onsetAt: target.onsetAt ?? nowLocal(),
-    durationText: target.durationText ?? "",
-    severity: target.severity ?? "",
-    bodyPart: target.bodyPart ?? "",
-    measuredValue: target.measuredValue ?? "",
-    measuredUnit: target.measuredUnit ?? "",
-    status: target.status,
-  };
-  symptomFormOpen.value = true;
-}
-
-/**
- * 「记一笔」：拿已有症状当模板新记一条。
- * 同一天里「咳嗽 · 存在 → 咳嗽 · 好转」就这样自然排成一条线，不用重打症状名。
- */
-function logSymptomAgain(target: CaseSymptom) {
-  closeMedicationForm();
-  editingSymptomId.value = null;
-  logSourceName.value = target.name;
-  symptomForm.value = {
-    ...emptySymptomForm(),
-    name: target.name,
-    measuredUnit: target.measuredUnit ?? (target.name === "发热" || target.name === "体温" ? "℃" : ""),
-    bodyPart: target.bodyPart ?? "",
-  };
-  symptomFormOpen.value = true;
-}
-
-function closeSymptomForm() {
-  symptomFormOpen.value = false;
-  editingSymptomId.value = null;
-  logSourceName.value = null;
-  quickInput.value = "";
-}
-
-/** 打开空白用药表单（强制展开） */
-function openMedicationForm() {
-  closeSymptomForm();
-  editingMedicationId.value = null;
-  medicationForm.value = { name: "", dose: "", frequency: "", route: "", startAt: nowLocal().slice(0, 10) };
-  medicationFormOpen.value = true;
-}
-
-function toggleMedicationForm() {
-  if (medicationFormOpen.value) closeMedicationForm();
-  else openMedicationForm();
-}
-
-function editMedication(target: CaseMedication) {
-  closeSymptomForm();
-  editingMedicationId.value = target.id;
-  medicationForm.value = {
-    name: target.name,
-    dose: target.dose ?? "",
-    frequency: target.frequency ?? "",
-    route: target.route ?? "",
-    startAt: target.startAt ?? nowLocal().slice(0, 10),
-  };
-  medicationFormOpen.value = true;
-}
-
-function closeMedicationForm() {
-  medicationFormOpen.value = false;
-  editingMedicationId.value = null;
-}
-
-/* 「一句话记」：把「5点半 37.5」这类口语拆成症状或用药，回车直接填进表单 */
-const quickDraft = computed(() => {
-  const text = quickInput.value.trim();
-  if (!text) return null;
-  const parsed = parseQuickEntry(text);
-  if (!parsed.matched && !parsed.name) return null;
-  return parsed;
-});
-
-function applyQuickDraft() {
-  const parsed = quickDraft.value;
-  if (!parsed) return;
-  if (parsed.kind === "medication") {
-    openMedicationForm();
-    medicationForm.value = {
-      ...medicationForm.value,
-      name: parsed.name ?? "",
-      dose: parsed.dose ?? "",
-      frequency: parsed.frequency ?? "",
-      route: parsed.route ?? "",
-      startAt: parsed.onsetAt ? parsed.onsetAt.slice(0, 10) : medicationForm.value.startAt,
-    };
-    toast.show("已按用药填入，确认后保存");
-  } else {
-    openSymptomForm();
-    symptomForm.value = {
-      ...symptomForm.value,
-      name: parsed.name ?? "",
-      onsetAt: parsed.onsetAt ?? nowLocal(),
-      measuredValue: parsed.measuredValue ?? "",
-      measuredUnit: parsed.measuredUnit ?? "",
-      status: "present",
-    };
-    toast.show(parsed.autoName ? "已按体温填入，确认后保存" : "已填入，确认后保存");
-  }
-  quickInput.value = "";
-}
-
-/** 常用症状快捷键：点一下就用当前时间开一条，最常用的三个字也省了 */
-function quickSymptom(name: string) {
-  openSymptomForm();
-  symptomForm.value = {
-    ...symptomForm.value,
-    name,
-    measuredUnit: name === "发热" || name === "体温" ? "℃" : "",
+    status: "present" as CaseSymptomStatus,
   };
 }
 
@@ -500,19 +715,19 @@ const episodeStatusMeta: Record<CaseEpisode["status"], { label: string; chip: st
   unknown: { label: "未记录", chip: "" },
 };
 
-const symptomStatusLabel: Record<CaseSymptom["status"], string> = {
+const symptomStatusLabel: Record<CaseSymptomStatus, string> = {
   present: "存在",
-  improved: "好转",
-  resolved: "已消失",
+  improved: "减轻",
+  worse: "加重",
+  resolved: "消失",
   unknown: "不确定",
 };
 
-/** 状态取值可能来自旧数据或后续版本，查不到时回退，避免整页渲染失败。 */
 function episodeStatusOf(status: CaseEpisode["status"]) {
   return episodeStatusMeta[status] ?? episodeStatusMeta.unknown;
 }
 
-function symptomStatusOf(status: CaseSymptom["status"]) {
+function symptomStatusOf(status: CaseSymptomStatus) {
   return symptomStatusLabel[status] ?? symptomStatusLabel.unknown;
 }
 
@@ -537,6 +752,12 @@ function formatMoment(value: string | null) {
   return timePart ? `${label} ${timePart}` : label;
 }
 
+function factDetail(fact: EpisodeLinkedFact) {
+  if (fact.missing) return "内容已不存在，可移除这条归集";
+  const parts = [fact.detail, fact.reportTitle, fact.hospitalName, formatDay(fact.occurredAt)];
+  return parts.filter(Boolean).join(" · ");
+}
+
 function episodeMeta(item: CaseEpisode) {
   const parts = [episodeStatusOf(item.status).label];
   const onset = formatDay(item.onsetAt);
@@ -546,23 +767,19 @@ function episodeMeta(item: CaseEpisode) {
 }
 
 /** 时间轴节点的文案：时间由节点头部统一显示，这里不重复 */
-function symptomMeta(item: CaseSymptom) {
+function symptomMeta(item: CaseSymptom, all: CaseSymptom[]) {
   const parts = [symptomStatusOf(item.status)];
-  if (item.measuredValue) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
+  const value = temperatureLevel(item.measuredValue, item.measuredUnit);
+  if (item.measuredValue && !value) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
   if (item.durationText) parts.push(`持续${item.durationText}`);
   if (item.severity) parts.push(item.severity);
   if (item.bodyPart) parts.push(item.bodyPart);
-  /* 挂报告时从主诉自动带出来的症状，标明来源，方便用户判断要不要留 */
+  const gap = gapText(item, all);
+  if (gap) parts.push(gap);
   if (item.source === "ai") parts.push("来自报告主诉");
   return parts.join(" · ");
 }
 
-/** 就诊卡片里的症状文案：日期由卡片头显示，不重复 */
-function symptomVisitMeta(item: CaseSymptom) {
-  return symptomMeta(item);
-}
-
-/** 手动补录用药的展示文案：剂量 · 用法 · 频次（保留 tid/bid 原标签并补中文说明）。 */
 function manualMedicationDetail(item: CaseMedication) {
   const dose = [item.dose, item.doseUnit].filter(Boolean).join("");
   return [dose || null, item.route, withFrequencyNote(item.frequency), "手动补录"]
@@ -570,7 +787,11 @@ function manualMedicationDetail(item: CaseMedication) {
     .join(" · ");
 }
 
-/** 由出生日期算年龄，写进给医生看的摘要里 */
+function intakeDetail(item: CaseMedicationIntake) {
+  const dose = [item.dose, item.doseUnit].filter(Boolean).join("");
+  return [dose || null, item.route].filter(Boolean).join(" · ") || null;
+}
+
 function ageText(birthDate: string | null) {
   if (!birthDate) return "";
   const birth = new Date(`${birthDate.slice(0, 10)}T00:00:00`);
@@ -627,6 +848,13 @@ const doctorSummary = computed(() => {
         .join("、")}`,
     );
   }
+  if ((current.intakes ?? []).length) {
+    lines.push(
+      `服药记录：${(current.intakes ?? [])
+        .map((item) => `${item.medicationName}${item.dose ? ` ${item.dose}${item.doseUnit ?? ""}` : ""} ${formatMoment(item.takenAt)}`)
+        .join("；")}`,
+    );
+  }
   return lines.join("\n");
 });
 
@@ -645,6 +873,7 @@ const resolvedSummary = computed(() => {
   if (diagnoses.length) bits.push(`诊断 ${diagnoses.join("、")}`);
   const medicationCount = visitBlocks.value.reduce((sum, visit) => sum + visit.medications.length, 0);
   if (medicationCount) bits.push(`用药 ${medicationCount} 种`);
+  if ((current.intakes ?? []).length) bits.push(`服药 ${(current.intakes ?? []).length} 次`);
   bits.push(`${formatDay(episode.resolvedAt) || "已痊愈"} 痊愈`);
   return `本次病程${episodeDurationText.value ? `（${episodeDurationText.value}）` : ""}：${bits.join(" → ")}`;
 });
@@ -660,6 +889,94 @@ async function copyDoctorSummary() {
   }
 }
 
+function editSymptom(item: CaseSymptom) {
+  openSheet({
+    mode: "symptom",
+    intent: "edit",
+    subject: item.name,
+    showValue: nameHasValue(item.name, item.measuredUnit),
+    id: item.id,
+    form: {
+      name: item.name,
+      at: item.onsetAt ?? nowLocal(),
+      status: item.status,
+      value: item.measuredValue ?? "",
+      unit: item.measuredUnit ?? "",
+      severity: item.severity ?? "",
+      bodyPart: item.bodyPart ?? "",
+    },
+  });
+}
+
+function editMedication(item: CaseMedication) {
+  openSheet({
+    mode: "medication",
+    intent: "edit",
+    subject: item.name,
+    id: item.id,
+    form: {
+      name: item.name,
+      at: item.startAt ?? nowLocal(),
+      dose: [item.dose, item.doseUnit].filter(Boolean).join(""),
+      frequency: item.frequency ?? "",
+      route: item.route ?? "",
+    },
+  });
+}
+
+function editIntake(item: CaseMedicationIntake) {
+  openSheet({
+    mode: "medication",
+    intent: "log",
+    subject: item.medicationName,
+    reportId: item.sourceReportId,
+    form: {
+      name: item.medicationName,
+      at: item.takenAt ?? nowLocal(),
+      dose: [item.dose, item.doseUnit].filter(Boolean).join(""),
+      route: item.route ?? "",
+    },
+  });
+}
+
+async function unlinkFact(factType: CaseEpisodeLinkFactType, factId: string) {
+  const episodeId = detail.value?.episode.id;
+  if (!episodeId || saving.value) return;
+  saving.value = true;
+  try {
+    detail.value = await request<CaseEpisodeDetail>(
+      `episodes/${episodeId}/links?factType=${encodeURIComponent(factType)}&factId=${encodeURIComponent(factId)}`,
+      { method: "DELETE" },
+    );
+    toast.show("已从病程移除");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "移除失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
+function removeIntake(intakeId: string) {
+  if (saving.value) return;
+  confirmDialog.ask({
+    title: "删除服药记录",
+    message: "确定删除这条服药记录？删掉后需要重新记录。",
+    confirmText: "删除",
+    danger: true,
+    run: async () => {
+      saving.value = true;
+      try {
+        detail.value = await request<CaseEpisodeDetail>(`intakes/${intakeId}`, { method: "DELETE" });
+        toast.show("服药记录已删除");
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : "删除服药记录失败";
+      } finally {
+        saving.value = false;
+      }
+    },
+  });
+}
+
 async function load(memberId: string, keepDetailId?: string) {
   if (!memberId) {
     detail.value = null;
@@ -672,7 +989,6 @@ async function load(memberId: string, keepDetailId?: string) {
   try {
     const list = await request<CaseEpisode[]>(`episodes?memberId=${encodeURIComponent(memberId)}`);
     episodes.value = list;
-    /* 详情仍在列表里就顺手刷新它，否则回到列表视图（切换成员、病程被删等） */
     if (keepDetailId && list.some((item) => item.id === keepDetailId)) {
       await openEpisode(keepDetailId, true);
     } else {
@@ -694,6 +1010,7 @@ async function openEpisode(episodeId: string, silent = false) {
     causeOpen.value = false;
     summaryOpen.value = false;
     quickInput.value = "";
+    lastHint.value = null;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载病程详情失败";
   } finally {
@@ -704,9 +1021,9 @@ async function openEpisode(episodeId: string, silent = false) {
 function back() {
   detail.value = null;
   formOpen.value = false;
-  symptomFormOpen.value = false;
-  medicationFormOpen.value = false;
   summaryOpen.value = false;
+  lastHint.value = null;
+  closeSheet();
 }
 
 async function createEpisode() {
@@ -759,45 +1076,9 @@ async function patchEpisode(patch: Record<string, unknown>, message: string) {
 }
 
 async function saveCause() {
-  const current = detail.value;
-  if (!current) return;
   await patchEpisode({ causeText: causeDraft.value }, "病因已保存");
   if (detail.value) causeDraft.value = detail.value.episode.causeText ?? "";
   causeOpen.value = false;
-}
-
-async function saveSymptom() {
-  const episodeId = detail.value?.episode.id;
-  if (!episodeId || saving.value) return;
-  if (!symptomForm.value.name.trim()) {
-    error.value = "症状名称不能为空";
-    return;
-  }
-  const editing = editingSymptomId.value;
-  saving.value = true;
-  error.value = "";
-  try {
-    const body = JSON.stringify({
-      name: symptomForm.value.name,
-      onsetAt: symptomForm.value.onsetAt || null,
-      durationText: symptomForm.value.durationText || null,
-      severity: symptomForm.value.severity || null,
-      bodyPart: symptomForm.value.bodyPart || null,
-      measuredValue: symptomForm.value.measuredValue || null,
-      measuredUnit: symptomForm.value.measuredUnit || null,
-      status: symptomForm.value.status,
-    });
-    detail.value = editing
-      ? await request<CaseEpisodeDetail>(`symptoms/${editing}`, { method: "PUT", body })
-      : await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms`, { method: "POST", body });
-    const logged = logSourceName.value;
-    closeSymptomForm();
-    toast.show(editing ? "症状已更新" : logged ? `已记一笔「${logged}」` : "症状已添加");
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "保存症状失败";
-  } finally {
-    saving.value = false;
-  }
 }
 
 /** 把已挂报告的主诉症状补录进来（给"自动补录功能上线前就挂好的报告"用）。 */
@@ -813,36 +1094,6 @@ async function importSymptomsFromReports() {
     toast.show(added > 0 ? `已从报告补录 ${added} 条症状` : "没有可补录的症状（报告无主诉，或已补过）");
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "补录症状失败";
-  } finally {
-    saving.value = false;
-  }
-}
-
-async function saveMedication() {
-  const episodeId = detail.value?.episode.id;
-  if (!episodeId || saving.value) return;
-  if (!medicationForm.value.name.trim()) {
-    error.value = "药品名称不能为空";
-    return;
-  }
-  const editing = editingMedicationId.value;
-  saving.value = true;
-  error.value = "";
-  try {
-    const body = JSON.stringify({
-      name: medicationForm.value.name,
-      dose: medicationForm.value.dose || null,
-      frequency: medicationForm.value.frequency || null,
-      route: medicationForm.value.route || null,
-      startAt: medicationForm.value.startAt || null,
-    });
-    detail.value = editing
-      ? await request<CaseEpisodeDetail>(`medications/${editing}`, { method: "PUT", body })
-      : await request<CaseEpisodeDetail>(`episodes/${episodeId}/medications`, { method: "POST", body });
-    closeMedicationForm();
-    toast.show(editing ? "用药已更新" : "用药已添加");
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "保存用药失败";
   } finally {
     saving.value = false;
   }
@@ -869,7 +1120,6 @@ function removeMedication(medicationId: string) {
   });
 }
 
-/** 删除病程（软删除）：报告与用药不动，只是不再归集到这段病程。 */
 function removeEpisode(item: CaseEpisode) {
   if (saving.value) return;
   confirmDialog.ask({
@@ -885,7 +1135,6 @@ function removeEpisode(item: CaseEpisode) {
         if (detail.value?.episode.id === item.id) {
           detail.value = null;
           formOpen.value = false;
-          symptomFormOpen.value = false;
         }
         const memberId = app.selectedMemberId.value;
         if (memberId) await load(memberId);
@@ -978,7 +1227,6 @@ onActivated(() => {
             <span v-if="detail.episode.causeText">病因 {{ detail.episode.causeText }}</span>
           </p>
 
-          <!-- 病因收起：点一下才展开，腾出位置给下面的「快速记录」 -->
           <div v-if="!causeOpen" class="episode-cause-row">
             <button class="soft-action-button" type="button" @click="causeOpen = true">
               {{ detail.episode.causeText ? "改病因" : "填病因" }}
@@ -1019,7 +1267,6 @@ onActivated(() => {
         </div>
       </section>
 
-      <!-- 发热小结：发烧时医生一定会问的三件事 -->
       <section v-if="feverSummary" class="settings-band entry-list-card episode-fever-card">
         <header>
           <div><Thermometer :size="18" /><h3>发热小结</h3></div>
@@ -1046,35 +1293,65 @@ onActivated(() => {
         </div>
       </section>
 
-      <!-- 快速记录：常用症状点一下就用当前时间开一条，「一句话记」回车填进表单 -->
+      <!-- 快速记录：点一下弹小面板、填个数就存；这里列出本次的症状与医生开的药 -->
       <section class="settings-band entry-list-card episode-quick-card">
         <header>
           <div><Plus :size="18" /><h3>快速记录</h3></div>
         </header>
         <div class="entry-list-body">
+          <p class="episode-quick-title">症状 · 点一下记一次</p>
           <div class="episode-quick-chips">
-            <button v-for="name in COMMON_SYMPTOMS" :key="name" type="button" @click="quickSymptom(name)">
-              {{ name }}
+            <button
+              v-for="chip in symptomChips"
+              :key="chip.name"
+              type="button"
+              :class="{ 'is-new': !chip.existing }"
+              @click="logSymptom(chip)"
+            >
+              {{ chip.name }}
+            </button>
+            <button class="episode-quick-add" type="button" @click="supplementSymptom">
+              <Plus :size="13" />补充症状
             </button>
           </div>
+
+          <template v-if="medicationChips.length">
+            <p class="episode-quick-title">医生开的药 · 点一下记服药量</p>
+            <div class="episode-quick-chips">
+              <button
+                v-for="chip in medicationChips"
+                :key="chip.name"
+                type="button"
+                @click="logMedication(chip)"
+              >
+                <Package :size="13" />{{ chip.name }}
+              </button>
+            </div>
+          </template>
+          <div class="episode-quick-chips episode-quick-chips--tail">
+            <button class="episode-quick-add" type="button" @click="supplementMedication">
+              <Plus :size="13" />补充用药
+            </button>
+          </div>
+
           <label class="episode-quick-input">
-            <span>一句话记（回车填入表单）</span>
+            <span>一句话记（回车直接记入）</span>
             <input
               v-model="quickInput"
-              placeholder="例如 5点半 37.5 ／ 下午吃氨溴特罗口服溶液5ml"
+              placeholder="例如 5点半 37.5 ／ 三点五十吃氨溴特罗口服溶液5ml"
               @keydown.enter.prevent="applyQuickDraft"
             />
           </label>
           <p v-if="quickDraft" class="quick-entry-preview">
             <span>识别为</span>
-            <strong>
-              {{ quickDraft.kind === "medication" ? "用药" : "症状" }}「{{ quickDraft.name || "未提名称" }}」
-            </strong>
-            <template v-if="quickDraft.onsetAt"> · {{ quickDraft.onsetAt }}</template>
-            <template v-if="quickDraft.measuredValue"> · {{ quickDraft.measuredValue }}{{ quickDraft.measuredUnit }}</template>
-            <template v-if="quickDraft.dose"> · {{ quickDraft.dose }}</template>
-            <template v-if="quickDraft.frequency"> · {{ quickDraft.frequency }}</template>
-            <button type="button" @click="applyQuickDraft">填入</button>
+            <strong>{{ quickDraftText(quickDraft) }}</strong>
+            <button type="button" @click="applyQuickDraft">记入</button>
+          </p>
+
+          <p v-if="lastHint" class="episode-last-hint">
+            <span>{{ lastHint.text }}</span>
+            <button type="button" @click="editHint">修改</button>
+            <button type="button" class="episode-last-hint-close" @click="lastHint = null">知道了</button>
           </p>
         </div>
       </section>
@@ -1113,16 +1390,9 @@ onActivated(() => {
           >
             <ClipboardList :size="17" />
           </button>
-          <button class="soft-action-button" type="button" @click="toggleMedicationForm">
-            <Plus :size="16" />添加用药
-          </button>
-          <button class="soft-action-button" type="button" @click="toggleSymptomForm">
-            <Plus :size="16" />添加症状
-          </button>
         </div>
       </div>
 
-      <!-- 给医生看：赶去医院时说不清的那几句 -->
       <section v-if="summaryOpen" class="settings-band entry-list-card">
         <header>
           <div><FileText :size="18" /><h3>给医生看</h3></div>
@@ -1136,75 +1406,11 @@ onActivated(() => {
         </div>
       </section>
 
-      <section v-if="symptomFormOpen" class="settings-band entry-list-card">
-        <header>
-          <div>
-            <Plus :size="18" />
-            <h3 v-if="editingSymptomId">编辑症状</h3>
-            <h3 v-else-if="logSourceName">记一笔：{{ logSourceName }}</h3>
-            <h3 v-else>添加症状</h3>
-          </div>
-        </header>
-        <div class="entry-list-body">
-          <form class="entry-form" @submit.prevent="saveSymptom">
-            <div class="form-grid">
-              <label><span>症状名称</span><input v-model="symptomForm.name" placeholder="例如 咳嗽" /></label>
-              <label>
-                <span>出现时间（点一下才改）</span>
-                <DateTimePicker v-model="symptomForm.onsetAt" aria-label="症状出现时间" show-time variant="plain" />
-              </label>
-              <label>
-                <span>当前状态</span>
-                <select v-model="symptomForm.status">
-                  <option value="present">存在</option>
-                  <option value="improved">好转</option>
-                  <option value="resolved">已消失</option>
-                  <option value="unknown">不确定</option>
-                </select>
-              </label>
-              <label><span>数值</span><input v-model="symptomForm.measuredValue" placeholder="例如 37.5" /></label>
-              <label><span>单位</span><input v-model="symptomForm.measuredUnit" placeholder="例如 ℃" /></label>
-              <label><span>持续时长</span><input v-model="symptomForm.durationText" placeholder="例如 半天、3天" /></label>
-              <label><span>程度</span><input v-model="symptomForm.severity" placeholder="例如 轻、中、重" /></label>
-              <label><span>部位</span><input v-model="symptomForm.bodyPart" placeholder="例如 咽喉" /></label>
-            </div>
-            <div class="form-actions">
-              <button type="button" @click="closeSymptomForm()">取消</button>
-              <button class="primary-button" :disabled="saving">保存</button>
-            </div>
-          </form>
-        </div>
-      </section>
-
-      <section v-if="medicationFormOpen" class="settings-band entry-list-card">
-        <header>
-          <div><Plus :size="18" /><h3>{{ editingMedicationId ? "编辑用药" : "添加用药" }}</h3></div>
-        </header>
-        <div class="entry-list-body">
-          <form class="entry-form" @submit.prevent="saveMedication">
-            <div class="form-grid">
-              <label><span>药品名称</span><input v-model="medicationForm.name" placeholder="例如 氨溴特罗口服溶液" /></label>
-              <label>
-                <span>开始日期（点一下才改）</span>
-                <DateTimePicker v-model="medicationForm.startAt" aria-label="用药开始日期" variant="plain" />
-              </label>
-              <label><span>单次剂量</span><input v-model="medicationForm.dose" placeholder="例如 5ml、半片" /></label>
-              <label><span>服药频次</span><input v-model="medicationForm.frequency" placeholder="例如 tid（每日三次）" /></label>
-              <label><span>用法</span><input v-model="medicationForm.route" placeholder="例如 口服、外用" /></label>
-            </div>
-            <div class="form-actions">
-              <button type="button" @click="closeMedicationForm()">取消</button>
-              <button class="primary-button" :disabled="saving">保存</button>
-            </div>
-          </form>
-        </div>
-      </section>
-
       <p
-        v-if="!detail.symptoms.length && !detail.medications.length && !detail.linkedFacts.length"
+        v-if="!detail.symptoms.length && !detail.medications.length && !(detail.intakes ?? []).length && !detail.linkedFacts.length"
         class="preview-hint"
       >
-        还没有内容。到报告详情页点「加入病程」挂上报告，或用上方的快捷按钮补录症状与用药。
+        还没有内容。到报告详情页点「加入病程」挂上报告，或用上方的快捷按钮记录症状与服药。
       </p>
       <ol v-else class="episode-timeline">
         <li
@@ -1218,7 +1424,6 @@ onActivated(() => {
         >
           <span class="episode-dot" aria-hidden="true"></span>
 
-          <!-- 一次就诊 = 一张卡片：报告、诊断、用药、症状合在一起，不再各占一行各说一遍 -->
           <div v-if="block.type === 'visit'" class="episode-event-body episode-visit">
             <div class="episode-visit-head">
               <time v-if="block.at">{{ formatMoment(block.at) }}</time>
@@ -1231,9 +1436,10 @@ onActivated(() => {
                 <dd>
                   <span v-for="item in block.symptoms" :key="item.key" class="episode-visit-line">
                     <span class="episode-visit-line-text">
-                      {{ item.title }}<template v-if="item.detail"> · {{ item.detail }}</template>
+                      {{ item.title }}
+                      <template v-if="item.value"> <em :class="`episode-temp-${item.value.level}`" class="episode-temp">{{ item.value.text }}</em></template>
+                      <template v-else-if="item.detail"> · {{ item.detail }}</template>
                     </span>
-                    <button v-if="item.logAgain" type="button" :disabled="saving" @click="item.logAgain()">记一笔</button>
                     <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
                     <button
                       v-if="item.remove"
@@ -1339,12 +1545,16 @@ onActivated(() => {
             </div>
             <div class="episode-event-items">
               <div v-for="item in block.items" :key="item.key" class="episode-event-item">
-                <strong>{{ item.title }}</strong>
+                <strong>
+                  {{ item.title }}
+                  <em
+                    v-if="item.value"
+                    class="episode-temp"
+                    :class="`episode-temp-${item.value.level}`"
+                  >{{ item.value.text }}</em>
+                </strong>
                 <small v-if="item.detail">{{ item.detail }}</small>
-                <div v-if="item.edit || item.logAgain || item.remove || item.derived" class="row-actions">
-                  <button v-if="item.logAgain" type="button" :disabled="saving" @click="item.logAgain()">
-                    <Activity :size="15" />记一笔
-                  </button>
+                <div v-if="item.edit || item.remove || item.derived" class="row-actions">
                   <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
                   <button v-if="item.remove" class="danger-action" type="button" :disabled="saving" @click="item.remove()">
                     <Trash2 :size="15" />移除
@@ -1425,6 +1635,18 @@ onActivated(() => {
         </div>
       </section>
     </template>
+
+    <EpisodeEntrySheet
+      :open="sheet.open"
+      :mode="sheet.mode"
+      :intent="sheet.intent"
+      :subject="sheet.subject"
+      :show-value="sheet.showValue"
+      :busy="saving"
+      :form="sheetForm"
+      @close="closeSheet"
+      @save="submitSheet"
+    />
 
     <ReportDetailModal
       :open="Boolean(previewReportId)"

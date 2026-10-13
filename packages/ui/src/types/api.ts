@@ -1266,7 +1266,7 @@ export type DiseaseVisit = {
 };
 
 export type CaseEpisodeStatus = "active" | "resolved" | "chronic" | "unknown";
-export type CaseSymptomStatus = "present" | "improved" | "resolved" | "unknown";
+export type CaseSymptomStatus = "present" | "improved" | "worse" | "resolved" | "unknown";
 export type CaseEpisodeLinkFactType =
   | "report" | "diagnosis" | "medication" | "procedure" | "vaccination" | "observation" | "section";
 
@@ -1334,6 +1334,21 @@ export type CaseEpisodeLink = {
   createdAt: string;
 };
 
+/** 服药记录：每次实际服用记一条（「今天 14:00 喂了 4ml」）。 */
+export type CaseMedicationIntake = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  medicationName: string;
+  dose: string | null;
+  doseUnit: string | null;
+  route: string | null;
+  takenAt: string | null;
+  note: string | null;
+  sourceReportId: string | null;
+  source: "manual" | "ai";
+  createdAt: string;
+};
 export type EpisodeLinkedFact = {
   linkId: string;
   factType: CaseEpisodeLinkFactType;
@@ -1355,6 +1370,8 @@ export type CaseEpisodeDetail = {
   episode: CaseEpisode;
   symptoms: CaseSymptom[];
   medications: CaseMedication[];
+  /** 服药记录（每次实际服用的量与时间） */
+  intakes: CaseMedicationIntake[];
   links: CaseEpisodeLink[];
   linkedFacts: EpisodeLinkedFact[];
 };

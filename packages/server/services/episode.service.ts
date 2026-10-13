@@ -6,6 +6,7 @@ import type {
   CaseEpisodeLinkFactType,
   CaseEpisodeStatus,
   CaseMedication,
+  CaseMedicationIntake,
   CaseSymptom,
   CaseSymptomStatus,
 } from "../domain/health-record";
@@ -16,7 +17,7 @@ import { normalizeSymptomName, parseChiefComplaint } from "../utils/symptom-extr
 import { assertMemberAccess, assertMemberManage } from "./member.service";
 
 const episodeStatuses: readonly CaseEpisodeStatus[] = ["active", "resolved", "chronic", "unknown"];
-const symptomStatuses: readonly CaseSymptomStatus[] = ["present", "improved", "resolved", "unknown"];
+const symptomStatuses: readonly CaseSymptomStatus[] = ["present", "improved", "worse", "resolved", "unknown"];
 const linkFactTypes: readonly CaseEpisodeLinkFactType[] = [
   "report",
   "diagnosis",
@@ -61,7 +62,13 @@ export function normalizeDiagnosisName(value: string) {
 function appendAudit(
   user: RequestUser,
   action: "create" | "update" | "delete",
-  targetType: "case_episode" | "case_symptom" | "case_medication" | "case_episode_link" | "catalog_exclusion",
+  targetType:
+    | "case_episode"
+    | "case_symptom"
+    | "case_medication"
+    | "case_medication_intake"
+    | "case_episode_link"
+    | "catalog_exclusion",
   targetId: string,
   detail: Record<string, unknown>,
 ) {
@@ -97,8 +104,7 @@ function symptomForAccess(user: RequestUser, symptomId: string) {
   return row;
 }
 
-function medicationForAccess(user: RequestUser, medicationId: string) {
-  const row = getDatabase()
+function medicationForAccess(user: RequestUser, medicationId: string) {  const row = getDatabase()
     .prepare(
       `SELECT m.id, m.episode_id AS episodeId, e.member_id AS memberId
        FROM case_medications m JOIN case_episodes e ON e.id = m.episode_id
@@ -189,6 +195,37 @@ function readMedications(episodeId: string): CaseMedication[] {
         evidence: JSON.parse(item.evidenceJson || "[]"),
         manualFields: JSON.parse(item.manualFieldsJson || "[]"),
       } satisfies CaseMedication;
+    });
+}
+
+/** 服药记录：按服药时间排序，界面上作为「服药」节点排在时间轴里。 */
+function readIntakes(episodeId: string): CaseMedicationIntake[] {
+  return getDatabase()
+    .prepare(
+      `SELECT id, episode_id AS episodeId, member_id AS memberId, medication_name AS medicationName,
+              dose, dose_unit AS doseUnit, route, taken_at AS takenAt, note,
+              source_report_id AS sourceReportId, source, created_at AS createdAt
+       FROM case_medication_intakes
+       WHERE episode_id = ? AND is_deleted = 0
+       ORDER BY COALESCE(taken_at, created_at), id`,
+    )
+    .all(episodeId)
+    .map((row) => {
+      const item = row as Record<string, string | null>;
+      return {
+        id: item.id as string,
+        episodeId: item.episodeId as string,
+        memberId: item.memberId as string,
+        medicationName: item.medicationName as string,
+        dose: item.dose,
+        doseUnit: item.doseUnit,
+        route: item.route,
+        takenAt: item.takenAt,
+        note: item.note,
+        sourceReportId: item.sourceReportId,
+        source: item.source as CaseMedicationIntake["source"],
+        createdAt: item.createdAt as string,
+      } satisfies CaseMedicationIntake;
     });
 }
 
@@ -568,6 +605,7 @@ export function getEpisode(user: RequestUser, episodeId: string) {
     episode: readEpisode(episodeId),
     symptoms: readSymptoms(episodeId),
     medications: readMedications(episodeId),
+    intakes: readIntakes(episodeId),
     links: readLinks(episodeId),
     linkedFacts,
   };
@@ -900,6 +938,76 @@ export function deleteMedication(user: RequestUser, medicationId: string) {
     throw error;
   }
   return getEpisode(user, medication.episodeId);
+}
+
+// ------------------------------------------------------------ 服药记录
+
+function intakeForAccess(user: RequestUser, intakeId: string) {
+  const row = getDatabase()
+    .prepare(
+      `SELECT i.id, i.episode_id AS episodeId, e.member_id AS memberId
+       FROM case_medication_intakes i JOIN case_episodes e ON e.id = i.episode_id
+       WHERE i.id = ? AND i.is_deleted = 0 AND e.deleted_at IS NULL`,
+    )
+    .get(intakeId) as { id: string; episodeId: string; memberId: string } | undefined;
+  if (!row) throw createError({ statusCode: 404, statusMessage: "服药记录不存在" });
+  assertMemberManage(user, row.memberId);
+  return row;
+}
+
+/**
+ * 记一次服药：药名必填，量可选（医生开的药多数已经有剂量）。
+ * `takenAt` 缺省按服务端当前时间，避免"点了保存却是空时间"。
+ */
+export function createIntake(user: RequestUser, episodeId: string, input: Record<string, unknown>) {
+  const episode = episodeForAccess(user, episodeId, true);
+  const id = createId("intake");
+  const db = getDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `INSERT INTO case_medication_intakes
+        (id, episode_id, member_id, medication_name, dose, dose_unit, route, taken_at, note,
+         source_report_id, source, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?)`,
+    ).run(
+      id,
+      episodeId,
+      episode.memberId,
+      requiredText(input.medicationName ?? input.name, "药品名称", 200),
+      text(input.dose, 100),
+      text(input.doseUnit, 50),
+      text(input.route, 100),
+      momentText(input.takenAt),
+      text(input.note, 500),
+      text(input.sourceReportId, 200),
+      user.id,
+    );
+    db.prepare("UPDATE case_episodes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(episodeId);
+    appendAudit(user, "create", "case_medication_intake", id, { episodeId });
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, episodeId);
+}
+
+export function deleteIntake(user: RequestUser, intakeId: string) {
+  const intake = intakeForAccess(user, intakeId);
+  const db = getDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      "UPDATE case_medication_intakes SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(intakeId);
+    appendAudit(user, "delete", "case_medication_intake", intakeId, { episodeId: intake.episodeId });
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, intake.episodeId);
 }
 
 // ---------------------------------------------------------------- 归集

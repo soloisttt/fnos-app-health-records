@@ -603,8 +603,23 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-quick-chips button {
   min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px;
   background: var(--surface); color: var(--ink); font-size: 13px;
+  display: inline-flex; align-items: center; gap: 4px;
 }
 .episode-quick-chips button:active { background: var(--brand-soft); border-color: var(--brand); }
+/* 本病程还没记录过的常用症状：虚线边框，一眼区分「已有」与「可新增」 */
+.episode-quick-chips button.is-new { border-style: dashed; color: var(--muted); }
+.episode-quick-add { border-color: var(--brand); color: var(--brand-strong); background: var(--brand-softer); }
+.episode-quick-title { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.episode-quick-title + .episode-quick-chips + .episode-quick-title { margin-top: 12px; }
+.episode-quick-chips--tail { margin-top: 8px; }
+/* 记完之后的可点提示：识别错了从这里改 */
+.episode-last-hint {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 10px 0 0; padding: 8px 10px; border-radius: var(--radius-m);
+  background: var(--brand-softer); color: var(--brand-strong); font-size: 12px;
+}
+.episode-last-hint button { border: 0; background: transparent; color: var(--brand-strong); font-size: 12px; text-decoration: underline; padding: 0; }
+.episode-last-hint-close { margin-left: auto; color: var(--muted) !important; }
 .episode-quick-input { display: grid; gap: 6px; margin-top: 10px; }
 .episode-quick-input > span { font-size: 12px; color: var(--muted); }
 .episode-quick-input input {
@@ -653,6 +668,103 @@ button.entry-row-open:disabled { cursor: default; }
 
 /* 页面底部留白：按钮换行时不被底部导航压住 */
 .episode-bottom-spacer { height: 24px; }
+
+/* ---------------- 病程条目小面板（记一次 / 编辑） ---------------- */
+.episode-sheet-layer {
+  position: fixed; inset: 0; z-index: 150;
+  background: rgba(0, 0, 0, .4);
+  display: flex; align-items: flex-end; justify-content: center;
+  animation: episode-fade-in .16s ease;
+}
+.episode-sheet {
+  width: min(560px, 100%);
+  max-height: min(86dvh, 720px);
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--surface); color: var(--ink);
+  border-radius: 18px 18px 0 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  animation: episode-slide-up .2s ease;
+}
+.episode-sheet-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--line);
+}
+.episode-sheet-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.episode-sheet-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+.episode-sheet-close {
+  flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+}
+.episode-sheet-body { padding: 14px 16px; display: grid; gap: 12px; overflow-y: auto; overscroll-behavior: contain; }
+.episode-sheet-field { display: grid; gap: 6px; }
+.episode-sheet-field > span { font-size: 12px; color: var(--muted); }
+.episode-sheet-field input {
+  width: 100%; min-height: 40px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 14px;
+}
+.episode-sheet-field input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); outline: none; }
+.episode-sheet-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.episode-sheet-status { display: flex; flex-wrap: wrap; gap: 8px; }
+.episode-sheet-status-item {
+  min-height: 34px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--ink); font-size: 13px;
+}
+.episode-sheet-status-item.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-strong); font-weight: 600; }
+.episode-sheet-status-item.is-worse.active { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.episode-sheet-status-item.is-improved.active,
+.episode-sheet-status-item.is-resolved.active { border-color: var(--green-ok); background: var(--green-ok-soft); color: var(--green-ok); }
+.episode-sheet-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.episode-sheet-chips button {
+  min-height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--muted); font-size: 12px;
+}
+.episode-sheet-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding: 12px 16px; border-top: 1px solid var(--line);
+}
+.episode-sheet-cancel {
+  min-height: 38px; padding: 0 16px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface); color: var(--ink); font-size: 13px;
+}
+.episode-sheet-secondary {
+  min-height: 38px; padding: 0 14px; border: 0; border-radius: 999px;
+  background: var(--brand-softer); color: var(--brand-strong); font-size: 13px; font-weight: 600;
+}
+.episode-sheet-save {
+  min-height: 38px; padding: 0 20px; border: 0; border-radius: 999px;
+  background: var(--brand); color: #fff; font-size: 13px; font-weight: 600;
+}
+.episode-sheet-save:disabled,
+.episode-sheet-secondary:disabled { opacity: .6; }
+
+@keyframes episode-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes episode-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+@media (min-width: 761px) and (pointer: fine) {
+  .episode-sheet-layer { align-items: center; }
+  .episode-sheet {
+    border-radius: 18px; max-height: min(78dvh, 620px);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .2);
+    animation: episode-fade-in .16s ease;
+  }
+}
+@media (max-width: 480px) {
+  .episode-sheet-actions { flex-wrap: wrap; }
+  .episode-sheet-secondary { order: 3; width: 100%; }
+  .episode-sheet-save { flex: 1 1 auto; }
+}
+
+/* 体温按数值上色：正常绿、低热橙、发热红（38.5 是常见用药门槛） */
+.episode-temp { font-style: normal; font-weight: 700; margin-left: 4px; }
+.episode-temp-normal { color: var(--green-ok); }
+.episode-temp-mid { color: var(--amber); }
+.episode-temp-high { color: var(--danger); }
+
+/* 服药记录与用药同族（蓝色），靠徽标文字区分「用药 / 服药」 */
+.episode-timeline .episode-event--intake .episode-dot {
+  background: var(--info); box-shadow: 0 0 0 3px var(--info-soft);
+}
+.episode-timeline .episode-event--intake .status-label { background: var(--info-soft); color: var(--info); }
 
 @media (max-width: 760px) {
   .episode-intro-actions { gap: 6px; }

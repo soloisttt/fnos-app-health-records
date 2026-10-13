@@ -86,6 +86,25 @@ describe("快速记录解析 · 症状", () => {
     expect(parseQuickEntry("20点30", NOW).onsetAt).toBe("2026-10-13 20:30");
   });
 
+  it("中文数字时间也要认（三点五十 / 十点半 / 两点二十 / 十二点）", () => {
+    /* 现在 14:50：三点五十 → 15:50（离现在更近的那个） */
+    expect(parseQuickEntry("三点五十 37.8", NOW).onsetAt).toBe("2026-10-13 15:50");
+    expect(parseQuickEntry("十点半 37.5", NOW).onsetAt).toBe("2026-10-13 10:30");
+    expect(parseQuickEntry("两点二十 38", NOW).onsetAt).toBe("2026-10-13 14:20");
+    /* 12 点不能因为"再加 12 小时"滚到第二天 */
+    expect(parseQuickEntry("十二点 37", NOW).onsetAt).toBe("2026-10-13 12:00");
+    expect(parseQuickEntry("上午九点 37.2", NOW).onsetAt).toBe("2026-10-13 09:00");
+  });
+
+  it("用户实测那句：三点五十吃氨溴特罗口服溶液5ml", () => {
+    const result = parseQuickEntry("三点五十吃氨溴特罗口服溶液5ml", NOW);
+    expect(result.kind).toBe("medication");
+    /* 名称不能带时间与服药动词 */
+    expect(result.name).toBe("氨溴特罗口服溶液");
+    expect(result.dose).toBe("5ml");
+    expect(result.onsetAt).toBe("2026-10-13 15:50");
+  });
+
   it("不在体温区间的裸数字不当作测量值", () => {
     const result = parseQuickEntry("喝水120", NOW);
     expect(result.measuredValue).toBeNull();

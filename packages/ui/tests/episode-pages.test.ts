@@ -557,10 +557,13 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     await wrapper.find(".entry-row-open").trigger("click");
     await settle();
 
-    /* 时间轴上方同时提供「添加用药」与「添加症状」两个补录入口 */
-    const intro = wrapper.find(".episode-timeline-intro");
-    expect(intro.text()).toContain("添加用药");
-    expect(intro.text()).toContain("添加症状");
+    /* 快速记录区提供「补充症状 / 补充用药」入口（日常记录不再跳大表单） */
+    const quick = wrapper.find(".episode-quick-card");
+    expect(quick.text()).toContain("补充症状");
+    expect(quick.text()).toContain("补充用药");
+    /* 已有的症状直接列出来，点一下就能记一次；时间轴头部只留图标按钮 */
+    expect(quick.findAll(".episode-quick-chips button").some((button) => button.text() === "咳嗽")).toBe(true);
+    expect(wrapper.find(".episode-timeline-intro").text()).not.toContain("添加用药");
 
     /* 用药与症状各成一种事件类型，样式里分别用蓝 / 橙强调色 */
     const medicationEvent = wrapper.find(".episode-event--medication");
@@ -670,26 +673,34 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(fever.text()).toContain("38.5");
     expect(fever.text()).toContain("最高");
 
-    /* 快速记录：常用症状点一下就把名称与单位填好（发热自带 ℃） */
-    const symptomNameInput = () =>
-      wrapper.findAll("label").find((label) => label.text().includes("症状名称"))!.find("input");
+    /* 体温在时间轴上直接显示数值并按高低上色：38.5 是「要不要吃退烧药」的门槛 → 红 */
+    const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
+    expect(feverEvent.find(".episode-temp").text()).toBe("38.5℃");
+    expect(feverEvent.find(".episode-temp-high").exists()).toBe(true);
+
+    /* 快速记录：点一下症状弹出小面板（时间已填当前时间、状态可点），不再跳大表单 */
     const chipOf = (name: string) =>
       wrapper.findAll(".episode-quick-chips button").find((button) => button.text() === name)!;
+    /* 面板 Teleport 到 body，取最后一个（同一测试里会连开两次） */
+    const latestSheet = () => [...document.body.querySelectorAll(".episode-sheet")].at(-1)!;
     expect(chipOf("发热").exists()).toBe(true);
     await chipOf("咳嗽").trigger("click");
     await settle();
-    expect(symptomNameInput().element.value).toBe("咳嗽");
+    expect(latestSheet()).toBeTruthy();
+    expect(latestSheet().textContent).toContain("记一次 · 咳嗽");
+    /* 状态四个选项：存在 / 加重 / 减轻 / 消失 */
+    const statusLabels = [...latestSheet().querySelectorAll(".episode-sheet-status-item")].map(
+      (item) => item.textContent,
+    );
+    expect(statusLabels).toEqual(["存在", "加重", "减轻", "消失"]);
+    /* 体温这类才有数值格 */
+    expect(latestSheet().textContent).not.toContain("数值");
 
-    /* 「记一笔」：拿已有症状当模板新记一条，名称与单位带过来 */
+    /* 发热这类带数值的症状：面板里多一格「数值」 */
     await chipOf("发热").trigger("click");
     await settle();
-    expect(symptomNameInput().element.value).toBe("发热");
-    const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
-    await feverEvent.find("button").trigger("click");
-    await settle();
-    expect(symptomNameInput().element.value).toBe("发热");
-    const formCard = wrapper.findAll(".entry-list-card").find((card) => card.text().includes("症状名称"))!;
-    expect(formCard.find("header h3").text()).toBe("记一笔：发热");
+    expect(latestSheet().textContent).toContain("记一次 · 发热");
+    expect(latestSheet().textContent).toContain("数值");
 
     /* 给医生看的摘要：一键生成可复制的文字 */
     await wrapper.find('button[aria-label="给医生看的摘要"]').trigger("click");
@@ -700,6 +711,134 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(summary.text()).toContain("张铭浩");
     expect(summary.text()).toContain("呼吸道感染");
     expect(summary.text()).toContain("受凉");
+  });
+
+  it("医生开的药点一下就记服药量，一句话记也直接入库（都不弹表单）", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: null,
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 0,
+      linkCount: 1,
+    };
+    const symptoms: Array<Record<string, unknown>> = [];
+    const intakes: Array<Record<string, unknown>> = [];
+    let seq = 0;
+    const posted: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const reportFact = {
+      reportId: "report-1",
+      reportTitle: "急诊儿科门诊记录",
+      hospitalName: "郑州市中心医院",
+      departmentName: "急诊儿科",
+      occurredAt: "2026-10-09",
+      missing: false,
+    };
+    const payload = () => ({
+      episode: episodeRow,
+      symptoms,
+      medications: [],
+      intakes,
+      links: [],
+      linkedFacts: [
+        { ...reportFact, linkId: "lnk-report", factType: "report", factId: "report-1", label: "急诊儿科门诊记录", detail: "报告", derived: false },
+        {
+          ...reportFact,
+          linkId: "derived:medication:m1",
+          factType: "medication",
+          factId: "m1",
+          label: "氨溴特罗口服溶液",
+          detail: "5ml 口服 bid（每日两次）",
+          derived: true,
+        },
+      ],
+    });
+    mocked.request.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        posted.push({ path, body });
+        seq += 1;
+        if (path.endsWith("/intakes")) {
+          intakes.push({
+            id: `intake-${seq}`,
+            episodeId: "ep-1",
+            memberId: member.id,
+            medicationName: body.medicationName,
+            dose: body.dose ?? null,
+            doseUnit: null,
+            route: null,
+            takenAt: body.takenAt ?? null,
+            note: null,
+            sourceReportId: body.sourceReportId ?? null,
+            source: "manual",
+            createdAt: "2026-10-13T00:00:00.000Z",
+          });
+        }
+        return payload();
+      }
+      if (path.startsWith("episodes/")) return payload();
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 医生开的药出现在快速记录里，点开是「记一次服药」，只要填个用量 */
+    const chipOf = (name: string) =>
+      wrapper.findAll(".episode-quick-chips button").find((button) => button.text().includes(name))!;
+    expect(chipOf("氨溴特罗口服溶液").exists()).toBe(true);
+    await chipOf("氨溴特罗口服溶液").trigger("click");
+    await settle();
+    const latestSheet = () => [...document.body.querySelectorAll(".episode-sheet")].at(-1)!;
+    expect(latestSheet().textContent).toContain("记一次服药 · 氨溴特罗口服溶液");
+
+    const doseInput = latestSheet().querySelectorAll<HTMLInputElement>("input")[0]!;
+    doseInput.value = "4ml";
+    doseInput.dispatchEvent(new Event("input"));
+    await settle();
+    latestSheet().querySelector<HTMLButtonElement>(".episode-sheet-save")!.click();
+    await settle();
+
+    expect(posted.at(-1)!.path).toContain("/intakes");
+    expect(posted.at(-1)!.body.medicationName).toBe("氨溴特罗口服溶液");
+    expect(posted.at(-1)!.body.dose).toBe("4ml");
+    /* 时间轴出现「服药」节点，并留一条可点的提示 */
+    const intakeEvent = wrapper.find(".episode-event--intake");
+    expect(intakeEvent.exists()).toBe(true);
+    expect(intakeEvent.text()).toContain("氨溴特罗口服溶液");
+    expect(intakeEvent.text()).toContain("4ml");
+    expect(wrapper.find(".episode-last-hint").text()).toContain("已记入服药");
+
+    /* 一句话记：回车直接入库，不弹表单 */
+    const sheetsBefore = document.body.querySelectorAll(".episode-sheet").length;
+    await wrapper.find(".episode-quick-input input").setValue("三点五十吃氨溴特罗口服溶液5ml");
+    await wrapper.find(".episode-quick-input input").trigger("keydown.enter");
+    await settle();
+    const last = posted.at(-1)!;
+    expect(last.path).toContain("/intakes");
+    expect(last.body.medicationName).toBe("氨溴特罗口服溶液");
+    expect(last.body.dose).toBe("5ml");
+    expect(last.body.takenAt).toBe("2026-10-13 15:50");
+    expect(document.body.querySelectorAll(".episode-sheet").length).toBe(sheetsBefore);
+    expect(wrapper.find(".episode-quick-input input").element.value).toBe("");
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

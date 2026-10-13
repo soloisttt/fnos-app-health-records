@@ -11,8 +11,10 @@ import {
   listCatalogHiddenEntries,
   restoreCatalogEntry,
   createMedication,
+  createIntake,
   createSymptom,
   deleteEpisode,
+  deleteIntake,
   deleteMedication,
   deleteSymptom,
   getEpisode,
@@ -801,6 +803,83 @@ test("就诊卡片字段：归集带出医院与科室，报告列表能看出�
     deleteEpisode(owner, episode.episode.id);
     const afterDelete = listReports(owner, 10, { memberId: "member" }).items.find((row) => row.id === "r1");
     assert.equal(afterDelete?.episodeLinkCount, 0);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("服药记录：点一下药名就能记一次用量，可删；只读账号不能改", () => {
+  const { storageDir, owner, viewer, db } = setup("medication-intakes");
+  try {
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status)
+        VALUES ('report1', 'member', 'owner', 'outpatient', '门诊病历', 'ready');
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月发烧" });
+    const created = createIntake(owner, episode.episode.id, {
+      medicationName: "布洛芬混悬液",
+      dose: "4",
+      doseUnit: "ml",
+      takenAt: "2026-10-13T14:00",
+      sourceReportId: "report1",
+    });
+    assert.equal(created.intakes.length, 1);
+    const intake = created.intakes[0]!;
+    assert.equal(intake.medicationName, "布洛芬混悬液");
+    assert.equal(intake.dose, "4");
+    assert.equal(intake.doseUnit, "ml");
+    /* 时间同症状一样统一成空格分隔 */
+    assert.equal(intake.takenAt, "2026-10-13 14:00");
+    assert.equal(intake.sourceReportId, "report1");
+    assert.equal(intake.source, "manual");
+
+    /* 同一天再喂一次：这里记的是流水，不去重 */
+    const second = createIntake(owner, episode.episode.id, {
+      medicationName: "布洛芬混悬液",
+      dose: "4",
+      doseUnit: "ml",
+      takenAt: "2026-10-13 20:00",
+    });
+    assert.equal(second.intakes.length, 2);
+    assert.deepEqual(
+      second.intakes.map((item) => item.takenAt).sort(),
+      ["2026-10-13 14:00", "2026-10-13 20:00"],
+    );
+
+    assert.throws(
+      () => createIntake(viewer, episode.episode.id, { medicationName: "布洛芬混悬液" }),
+      /管理权限|仅有管理/,
+    );
+    assert.throws(() => deleteIntake(viewer, intake.id));
+
+    const afterDelete = deleteIntake(owner, intake.id);
+    assert.equal(afterDelete.intakes.length, 1);
+    assert.equal(afterDelete.intakes[0]!.takenAt, "2026-10-13 20:00");
+
+    /* 药名必填 */
+    assert.throws(() => createIntake(owner, episode.episode.id, { dose: "4" }), /不能为空/);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("症状状态支持「加重」，且能改回其他状态", () => {
+  const { storageDir, owner } = setup("symptom-worse");
+  try {
+    const episode = createEpisode(owner, "member", { title: "咳嗽" });
+    const created = createSymptom(owner, episode.episode.id, {
+      name: "咳嗽",
+      onsetAt: "2026-10-13 08:00",
+      status: "present",
+    });
+    const symptomId = created.symptoms[0]!.id;
+
+    const worse = updateSymptom(owner, symptomId, { status: "worse" });
+    assert.equal(worse.symptoms[0]!.status, "worse");
+
+    /* 非法状态回落到默认值，而不是抛错（沿用 enumValue 的既有语义） */
+    const fallback = updateSymptom(owner, symptomId, { status: "bogus" });
+    assert.equal(fallback.symptoms[0]!.status, "present");
   } finally {
     teardown(storageDir);
   }

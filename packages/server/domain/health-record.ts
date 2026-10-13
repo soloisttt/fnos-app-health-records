@@ -229,7 +229,7 @@ export type CaseEpisode = {
   updatedAt: string;
 };
 
-export const caseSymptomStatuses = ["present", "improved", "resolved", "unknown"] as const;
+export const caseSymptomStatuses = ["present", "improved", "worse", "resolved", "unknown"] as const;
 export type CaseSymptomStatus = typeof caseSymptomStatuses[number];
 
 export type CaseSymptomSource = "manual" | "ai";
@@ -272,6 +272,27 @@ export type CaseMedication = {
   reportId: string | null;
   evidence: ClinicalEvidence;
   manualFields: string[];
+};
+
+/**
+ * 服药记录：每次实际服用记一条（「今天 14:00 喂了 4ml」）。
+ * 与 `CaseMedication`（医生开的药 / 自己补录的药）区分开：
+ * 前者回答"总共在吃哪些药"，这一条回答"这一天吃了几次、每次多少"。
+ */
+export type CaseMedicationIntake = {
+  id: string;
+  episodeId: string;
+  memberId: string;
+  medicationName: string;
+  dose: string | null;
+  doseUnit: string | null;
+  route: string | null;
+  takenAt: string | null;
+  note: string | null;
+  /** 这条药来自哪份报告（医生开的药），手动补录的药为 null */
+  sourceReportId: string | null;
+  source: CaseSymptomSource;
+  createdAt: string;
 };
 
 export const caseEpisodeLinkFactTypes = [
