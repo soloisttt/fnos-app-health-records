@@ -89,25 +89,9 @@ type TimelineEvent = {
 const timeline = computed<TimelineEvent[]>(() => {
   const current = detail.value;
   if (!current) return [];
-  const events: TimelineEvent[] = [
-    {
-      key: "onset",
-      at: current.episode.onsetAt,
-      kind: "onset",
-      badge: "病程",
-      items: [
-        {
-          key: "onset:main",
-          title: current.episode.causeText ? `起病 · 病因：${current.episode.causeText}` : "起病",
-          detail: current.episode.summary,
-          reportId: null,
-          derived: false,
-          edit: null,
-          remove: null,
-        },
-      ],
-    },
-  ];
+  /* 「起病」不再单独占一行：起病日期就是病程的起点（见头部与病程信息卡片），
+     病因在病程信息卡片里填，时间轴上要看的其实是症状与就诊记录。 */
+  const events: TimelineEvent[] = [];
 
   for (const item of current.symptoms) {
     events.push({
@@ -205,6 +189,24 @@ const timeline = computed<TimelineEvent[]>(() => {
   }
 
   return events.sort((left, right) => (left.at ?? "").localeCompare(right.at ?? ""));
+});
+
+/** 时间轴显示顺序：默认从早到晚；可切成"最近的在最上面"。 */
+const timelineDesc = ref(false);
+const displayTimeline = computed(() =>
+  timelineDesc.value ? [...timeline.value].reverse() : timeline.value,
+);
+
+/** 「这次病了几天」：进行中显示已持续，已痊愈显示共几天。 */
+const episodeDurationText = computed(() => {
+  const episode = detail.value?.episode;
+  if (!episode?.onsetAt) return "";
+  const start = new Date(`${episode.onsetAt.slice(0, 10)}T00:00:00`).getTime();
+  const end = episode.resolvedAt
+    ? new Date(`${episode.resolvedAt.slice(0, 10)}T00:00:00`).getTime()
+    : Date.now();
+  const days = Math.max(1, Math.round((end - start) / 86_400_000) + 1);
+  return episode.resolvedAt ? `共 ${days} 天` : `已持续 ${days} 天`;
 });
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
@@ -706,8 +708,14 @@ onActivated(() => {
       </section>
 
       <div class="page-intro page-intro--keep page-intro--actions-only episode-timeline-intro">
-        <div><h3>病程时间轴</h3><p>起病、症状、诊断、用药与转归，按时间排成一条线</p></div>
+        <div>
+          <h3>病程时间轴</h3>
+          <p>{{ episodeDurationText ? `${episodeDurationText} · 按时间排成一条线` : "按时间排成一条线" }}</p>
+        </div>
         <div class="episode-intro-actions">
+          <button class="soft-action-button" type="button" @click="timelineDesc = !timelineDesc">
+            {{ timelineDesc ? "改为从头看" : "最近的排前面" }}
+          </button>
           <button class="soft-action-button" type="button" :disabled="saving" @click="importSymptomsFromReports()">
             <ClipboardList :size="16" />补录报告症状
           </button>
@@ -790,7 +798,7 @@ onActivated(() => {
         还没有内容。到报告详情页点「加入病程」挂上报告，或用上方按钮补录症状与用药。
       </p>
       <ol v-else class="episode-timeline">
-        <li v-for="event in timeline" :key="event.key" :class="`episode-event episode-event--${event.kind}`">
+        <li v-for="event in displayTimeline" :key="event.key" :class="`episode-event episode-event--${event.kind}`">
           <span class="episode-dot" aria-hidden="true"></span>
           <div class="episode-event-body">
             <div class="episode-event-head">
