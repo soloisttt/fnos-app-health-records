@@ -774,9 +774,10 @@ const episodeDurationText = computed(() => {
   const episode = detail.value?.episode;
   if (!episode?.onsetAt) return "";
   const start = new Date(`${episode.onsetAt.slice(0, 10)}T00:00:00`).getTime();
+  /* 按「自然日」算，不带当天时刻 —— 否则下午再看会凭空多出一天（起病 10-09、今天 10-13 应为 5 天） */
   const end = episode.resolvedAt
     ? new Date(`${episode.resolvedAt.slice(0, 10)}T00:00:00`).getTime()
-    : Date.now();
+    : new Date(new Date().toDateString()).getTime();
   const days = Math.max(1, Math.round((end - start) / 86_400_000) + 1);
   return episode.resolvedAt ? `共 ${days} 天` : `已持续 ${days} 天`;
 });
@@ -886,6 +887,18 @@ function episodeMeta(item: CaseEpisode) {
   return parts.join(" · ");
 }
 
+/** 详情页标题下的副标题：起病、病因、症状数（状态做成药丸挂在标题旁，这里不重复） */
+const detailMetaText = computed(() => {
+  const current = detail.value;
+  if (!current) return "";
+  const parts: string[] = [];
+  const onset = formatDay(current.episode.onsetAt);
+  if (onset) parts.push(`${onset} 起`);
+  parts.push(current.episode.causeText ? `病因 ${current.episode.causeText}` : "病因 未填写");
+  parts.push(`${current.symptoms.length} 个症状`);
+  return parts.join(" · ");
+});
+
 /** 时间轴节点的文案：状态与时间分别单独渲染，这里只放其余信息 */
 function symptomMeta(item: CaseSymptom, all: CaseSymptom[]) {
   const parts: string[] = [];
@@ -927,57 +940,278 @@ function ageText(birthDate: string | null) {
   return rest ? `${years} 岁 ${rest} 个月` : `${years} 岁`;
 }
 
-/** 就医前摘要：去医院时说不清的那几句，让程序先写好 */
-const doctorSummary = computed(() => {
+/** 摘要里时间的短写法：今天只写时刻（同一天连着好几条时不重复「今天」），更早写 月-日 */
+function quietMoment(value: string | null) {
+  if (!value) return "";
+  const day = value.slice(0, 10);
+  const time = value.length > 10 ? value.slice(11, 16) : "";
+  const now = new Date();
+  const pad = (input: number) => String(input).padStart(2, "0");
+  const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  if (day === todayKey) return time || "今天";
+  return [day.slice(5), time].filter(Boolean).join(" ");
+}
+
+/** 变化链里状态的读法：第一条是「出现」，之后按每条记录的状态 */
+const symptomChainLabel: Record<CaseSymptomStatus, string> = {
+  present: "仍存在",
+  worse: "加重",
+  improved: "减轻",
+  resolved: "已消失",
+  unknown: "不确定",
+};
+
+/** 变化链里时间的写法：同一个症状都发生在同一天就只写时刻；跨天则带上日期，避免"19:32"看不出是哪天 */
+function chainMoment(items: CaseSymptom[], value: string | null) {
+  if (!value) return "";
+  const days = new Set(items.map((item) => (item.onsetAt ?? "").slice(0, 10)).filter(Boolean));
+  if (days.size <= 1) return value.slice(11, 16);
+  return formatMoment(value);
+}
+
+type SummarySymptomGroup = { name: string; items: CaseSymptom[]; temperature: boolean };
+
+/** 症状按名称归并：同一症状的多次记录排成一条变化链，一眼看出在变好还是变坏 */
+const summarySymptomGroups = computed<SummarySymptomGroup[]>(() => {
+  const map = new Map<string, CaseSymptom[]>();
+  for (const item of detail.value?.symptoms ?? []) {
+    const list = map.get(item.name) ?? [];
+    list.push(item);
+    map.set(item.name, list);
+  }
+  return [...map.entries()]
+    .map(([name, list]) => {
+      const items = [...list].sort((left, right) =>
+        (left.onsetAt ?? "").localeCompare(right.onsetAt ?? ""),
+      );
+      return {
+        name,
+        items,
+        temperature: items.some((item) => Boolean(temperatureLevel(item.measuredValue, item.measuredUnit))),
+      };
+    })
+    /* 体温排最前（儿科最关心「烧了几天、最高多少」），其余按最后一次记录倒序 */
+    .sort((left, right) => {
+      if (left.temperature !== right.temperature) return left.temperature ? -1 : 1;
+      return (right.items.at(-1)?.onsetAt ?? "").localeCompare(left.items.at(-1)?.onsetAt ?? "");
+    });
+});
+
+/** 服药记录按药名归并：同一种药一天喂几次只占一行 */
+const summaryIntakeGroups = computed(() => {
+  const map = new Map<string, CaseMedicationIntake[]>();
+  for (const item of detail.value?.intakes ?? []) {
+    const list = map.get(item.medicationName) ?? [];
+    list.push(item);
+    map.set(item.medicationName, list);
+  }
+  return [...map.entries()].map(([name, list]) => ({
+    name,
+    items: [...list].sort((left, right) => (left.takenAt ?? "").localeCompare(right.takenAt ?? "")),
+  }));
+});
+
+function intakeDoseText(item: CaseMedicationIntake) {
+  return [item.dose, item.doseUnit].filter(Boolean).join("");
+}
+
+/** 摘要抬头：孩子年龄、起病、病程天数、病因 —— 医生最先看的几件事 */
+function summaryHeader() {
   const current = detail.value;
   if (!current) return "";
   const member = app.selectedMember.value;
-  const lines: string[] = [];
   const head = [member?.displayName ?? "", ageText(member?.birthDate ?? null)].filter(Boolean).join("，");
-  lines.push(`【就诊摘要】${head || "（未选成员）"}`);
   const bits = [`起病 ${formatDay(current.episode.onsetAt) || "未记录"}`];
   if (episodeDurationText.value) bits.push(episodeDurationText.value);
   if (current.episode.causeText) bits.push(`病因 ${current.episode.causeText}`);
-  lines.push(bits.join(" ｜ "));
-  if (current.symptoms.length) {
+  return `【就诊摘要】${head || "（未选成员）"}\n${bits.join(" ｜ ")}`;
+}
+
+/** 一次就诊写成两三行：医院与诊断一行、开药一行（全挤一行会看不出重点） */
+function summaryVisitLines(visit: VisitBlock, options: { indent?: string; withDate?: boolean } = {}) {
+  const indent = options.indent ?? "";
+  const head = [visit.place, visit.title].filter(Boolean).join(" ｜ ");
+  const lines = [options.withDate === false ? `${indent}${head}` : `${indent}${formatDay(visit.at)} ${head}`.trim()];
+  if (visit.diagnoses.length) {
+    lines.push(`${indent}  诊断：${visit.diagnoses.map((item) => item.title).join("、")}`);
+  }
+  if (visit.medications.length) {
     lines.push(
-      `症状：${current.symptoms
-        .map((item) => {
-          const parts = [item.name];
-          if (item.measuredValue) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
-          if (item.onsetAt) parts.push(formatMoment(item.onsetAt));
-          parts.push(symptomStatusOf(item.status));
-          return parts.join(" ");
-        })
+      `${indent}  开药：${visit.medications
+        .map((item) => [item.title, item.detail].filter(Boolean).join(" "))
         .join("；")}`,
     );
+  }
+  return lines;
+}
+
+/** 服药：同一种药归成一行（剂量 + 每次时间 + 共几次） */
+function summaryIntakeLines() {
+  return summaryIntakeGroups.value.map((group) => {
+    const dose = [...group.items].reverse().map(intakeDoseText).find(Boolean) ?? "";
+    const when = group.items.map((item) => formatMoment(item.takenAt)).filter(Boolean).join("、");
+    return `${group.name}${dose ? ` ${dose}` : ""}：${when}（共 ${group.items.length} 次）`;
+  });
+}
+
+/** 自行用药：已经有服药记录的同名药不再单列，免得同一种药出现两遍 */
+function summaryManualMedications() {
+  const taken = new Set(summaryIntakeGroups.value.map((group) => group.name.trim()));
+  return (detail.value?.medications ?? [])
+    .filter((item) => !taken.has(item.name.trim()))
+    .map((item) => `${item.name}${item.dose ? ` ${item.dose}${item.doseUnit ?? ""}` : ""}`);
+}
+
+/** 摘要排法：默认按症状归并（医生读病史的习惯），可切成按天归组（回看「哪天怎么了」） */
+const summaryMode = ref<"symptom" | "day">("symptom");
+
+const summaryBySymptom = computed(() => {
+  const current = detail.value;
+  if (!current) return "";
+  const lines: string[] = [summaryHeader(), ""];
+
+  const groups = summarySymptomGroups.value;
+  if (groups.length) {
+    lines.push(`症状（${groups.length} 个）`);
+    for (const group of groups) {
+      if (group.temperature) {
+        const scored = group.items
+          .map((item) => ({ item, value: Number(item.measuredValue) }))
+          .filter((entry) => Number.isFinite(entry.value));
+        const unit = group.items.find((item) => item.measuredUnit)?.measuredUnit ?? "℃";
+        if (scored.length) {
+          const highest = scored.reduce((best, entry) => (entry.value > best.value ? entry : best));
+          const latest = scored.at(-1)!;
+          lines.push(
+            `${group.name}：共 ${scored.length} 次 ｜ 最高 ${highest.value}${unit}（${formatMoment(highest.item.onsetAt)}）｜ 最近 ${latest.value}${unit}（${formatMoment(latest.item.onsetAt)}）`,
+          );
+        } else {
+          lines.push(`${group.name}：共 ${group.items.length} 次`);
+        }
+        const chain = group.items
+          .map((item) =>
+            [
+              item.measuredValue ? `${item.measuredValue}${item.measuredUnit ?? ""}` : "",
+              chainMoment(group.items, item.onsetAt),
+            ]
+              .filter(Boolean)
+              .join(" "),
+          )
+          .filter(Boolean)
+          .join(" → ");
+        if (chain) lines.push(`  ${chain}`);
+        continue;
+      }
+      const chain = group.items
+        .map((item, index) =>
+          [
+            chainMoment(group.items, item.onsetAt),
+            index === 0 && item.status === "present" ? "出现" : symptomChainLabel[item.status],
+          ]
+            .filter(Boolean)
+            .join(" "),
+        )
+        .join(" → ");
+      lines.push(`${group.name}：${chain}`);
+    }
+    lines.push("");
+  }
+
+  if (visitBlocks.value.length) {
+    lines.push(`就诊（${visitBlocks.value.length} 次）`);
+    for (const visit of visitBlocks.value) lines.push(...summaryVisitLines(visit));
+    lines.push("");
+  }
+
+  const intakes = summaryIntakeLines();
+  if (intakes.length) {
+    lines.push("服药");
+    lines.push(...intakes);
+  }
+  const manual = summaryManualMedications();
+  if (manual.length) lines.push(`自行用药：${manual.join("、")}`);
+
+  return lines.join("\n").trim();
+});
+
+/** 按天归组：同一天的记录排在一个日子里，天数按起病日推算 */
+const summaryByDay = computed(() => {
+  const current = detail.value;
+  if (!current) return "";
+  const days = new Map<string, { entries: Array<{ sort: string; text: string }>; visits: VisitBlock[] }>();
+  const bucket = (day: string) => {
+    const hit = days.get(day) ?? { entries: [], visits: [] };
+    days.set(day, hit);
+    return hit;
+  };
+
+  for (const group of summarySymptomGroups.value) {
+    group.items.forEach((item, index) => {
+      const day = (item.onsetAt ?? "").slice(0, 10);
+      if (!day) return;
+      const value = [item.measuredValue, item.measuredUnit].filter(Boolean).join("");
+      const time = (item.onsetAt ?? "").slice(11, 16);
+      /* 体温只写「时间 + 名称 + 数值」，不挂状态（对体温没有意义）；其他症状照实写状态 */
+      const status = group.temperature
+        ? ""
+        : index === 0 && item.status === "present"
+          ? "出现"
+          : symptomStatusOf(item.status);
+      bucket(day).entries.push({
+        sort: item.onsetAt ?? "",
+        text: [time, `${group.name}${value ? ` ${value}` : ""}`, status].filter(Boolean).join(" "),
+      });
+    });
+  }
+  for (const group of summaryIntakeGroups.value) {
+    for (const item of group.items) {
+      const day = (item.takenAt ?? "").slice(0, 10);
+      if (!day) continue;
+      const dose = intakeDoseText(item);
+      bucket(day).entries.push({
+        sort: item.takenAt ?? "",
+        text: [(item.takenAt ?? "").slice(11, 16), `服药 ${group.name}${dose ? ` ${dose}` : ""}`]
+          .filter(Boolean)
+          .join(" "),
+      });
+    }
   }
   for (const visit of visitBlocks.value) {
-    const visitBits = [`${formatDay(visit.at)} ${[visit.place, visit.title].filter(Boolean).join(" ")}`.trim()];
-    if (visit.diagnoses.length) visitBits.push(`诊断 ${visit.diagnoses.map((item) => item.title).join("、")}`);
-    if (visit.medications.length) {
-      visitBits.push(
-        `用药 ${visit.medications.map((item) => [item.title, item.detail].filter(Boolean).join(" ")).join("、")}`,
-      );
+    const day = formatDay(visit.at);
+    if (day) bucket(day).visits.push(visit);
+  }
+
+  const onset = formatDay(current.episode.onsetAt);
+  const dayIndex = (day: string) => {
+    if (!onset) return null;
+    const diff = Math.round(
+      (new Date(`${day}T00:00:00`).getTime() - new Date(`${onset}T00:00:00`).getTime()) / 86_400_000,
+    );
+    return diff >= 0 ? diff + 1 : null;
+  };
+  const ordered = [...days.keys()].sort((left, right) => left.localeCompare(right));
+  if (!ordered.length) return `${summaryHeader()}\n\n还没有可汇总的记录。`;
+
+  const now = new Date();
+  const pad = (input: number) => String(input).padStart(2, "0");
+  const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const lines: string[] = [summaryHeader(), ""];
+  for (const day of ordered) {
+    const hit = days.get(day)!;
+    const index = dayIndex(day);
+    lines.push(`${day === todayKey ? "今天" : day.slice(5)}${index ? `（第 ${index} 天）` : ""}`);
+    for (const visit of hit.visits) {
+      lines.push(...summaryVisitLines(visit, { indent: "  ", withDate: false }));
     }
-    lines.push(`就诊：${visitBits.join("；")}`);
+    for (const entry of hit.entries.sort((left, right) => left.sort.localeCompare(right.sort))) {
+      lines.push(`  ${entry.text}`);
+    }
   }
-  if (current.medications.length) {
-    lines.push(
-      `自行用药：${current.medications
-        .map((item) => `${item.name}${item.dose ? ` ${item.dose}${item.doseUnit ?? ""}` : ""}`)
-        .join("、")}`,
-    );
-  }
-  if ((current.intakes ?? []).length) {
-    lines.push(
-      `服药记录：${(current.intakes ?? [])
-        .map((item) => `${item.medicationName}${item.dose ? ` ${item.dose}${item.doseUnit ?? ""}` : ""} ${formatMoment(item.takenAt)}`)
-        .join("；")}`,
-    );
-  }
-  return lines.join("\n");
+  return lines.join("\n").trim();
 });
+
+/** 就医前摘要：去医院时说不清的那几句，让程序先写好 */
+const doctorSummary = computed(() => (summaryMode.value === "day" ? summaryByDay.value : summaryBySymptom.value));
 
 /** 痊愈小结：这段病程一句话说完，以后回看不用重新读时间轴 */
 const resolvedSummary = computed(() => {
@@ -1309,10 +1543,15 @@ onActivated(() => {
 <template>
   <section class="plain-page">
     <template v-if="detail">
-      <div class="page-intro page-intro--keep">
+      <div class="page-intro page-intro--keep episode-detail-intro">
         <div>
-          <h2>{{ detail.episode.title }}</h2>
-          <p>{{ episodeMeta({ ...detail.episode, symptomCount: detail.symptoms.length }) }}</p>
+          <h2>
+            {{ detail.episode.title }}
+            <span class="chip status-label episode-title-chip" :class="episodeStatusOf(detail.episode.status).chip">
+              {{ episodeStatusOf(detail.episode.status).label }}
+            </span>
+          </h2>
+          <p>{{ detailMetaText }}</p>
         </div>
         <div class="episode-detail-actions">
           <button class="soft-action-button" type="button" @click="back">
@@ -1326,68 +1565,49 @@ onActivated(() => {
           >
             <Trash2 :size="16" />删除病程
           </button>
+          <button
+            class="outline-action-button"
+            type="button"
+            :disabled="saving"
+            title="病因只有你自己知道，系统不做推断"
+            @click="causeOpen = !causeOpen"
+          >
+            {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
+          </button>
+          <button
+            v-if="detail.episode.status !== 'resolved'"
+            class="outline-action-button"
+            type="button"
+            :disabled="saving"
+            @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
+          >
+            标记痊愈
+          </button>
+          <button
+            v-else
+            class="outline-action-button"
+            type="button"
+            :disabled="saving"
+            @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
+          >
+            恢复进行中
+          </button>
         </div>
       </div>
 
-      <p v-if="error" class="inline-panel-error">{{ error }}</p>
-
-      <section class="settings-band entry-list-card">
-        <header>
-          <div><ClipboardList :size="18" /><h3>病程信息</h3></div>
-          <span class="chip status-label" :class="episodeStatusOf(detail.episode.status).chip">
-            {{ episodeStatusOf(detail.episode.status).label }}
-          </span>
-        </header>
-        <div class="entry-list-body episode-info-body">
-          <p class="episode-info-line">
-            <span class="episode-info-cause">
-              <em>病因</em>
-              <strong v-if="detail.episode.causeText">{{ detail.episode.causeText }}</strong>
-              <strong v-else class="is-empty">未填写</strong>
-            </span>
-            <span class="episode-info-actions">
-              <button
-                class="outline-action-button"
-                type="button"
-                :disabled="saving"
-                title="病因只有你自己知道，系统不做推断"
-                @click="causeOpen = !causeOpen"
-              >
-                {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
-              </button>
-              <button
-                v-if="detail.episode.status !== 'resolved'"
-                class="outline-action-button"
-                type="button"
-                :disabled="saving"
-                @click="patchEpisode({ status: 'resolved', resolvedAt: new Date().toISOString().slice(0, 10) }, '已标记为痊愈')"
-              >
-                标记痊愈
-              </button>
-              <button
-                v-else
-                class="outline-action-button"
-                type="button"
-                :disabled="saving"
-                @click="patchEpisode({ status: 'active', resolvedAt: null }, '已恢复为进行中')"
-              >
-                恢复进行中
-              </button>
-            </span>
-          </p>
-
-          <form v-if="causeOpen" class="entry-form" @submit.prevent="saveCause">
-            <label>
-              <span>病因（自己填写，系统不做推断）</span>
-              <input v-model="causeDraft" placeholder="例如 受凉、接触感冒的家人" />
-            </label>
-            <div class="form-actions">
-              <button type="button" @click="causeOpen = false">取消</button>
-              <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
-            </div>
-          </form>
+      <!-- 病因表单：点了标题区的「改病因 / 填病因」才展开，平时不占地方 -->
+      <form v-if="causeOpen" class="entry-form episode-cause-form" @submit.prevent="saveCause">
+        <label>
+          <span>病因（自己填写，系统不做推断）</span>
+          <input v-model="causeDraft" placeholder="例如 受凉、接触感冒的家人" />
+        </label>
+        <div class="form-actions">
+          <button type="button" @click="causeOpen = false">取消</button>
+          <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
         </div>
-      </section>
+      </form>
+
+      <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
       <section v-if="feverSummary" class="settings-band entry-list-card episode-fever-card">
         <header>
@@ -1539,6 +1759,18 @@ onActivated(() => {
           </button>
         </header>
         <div class="entry-list-body">
+          <div class="summary-mode" role="group" aria-label="摘要排法">
+            <button
+              type="button"
+              :class="{ active: summaryMode === 'symptom' }"
+              @click="summaryMode = 'symptom'"
+            >
+              按症状
+            </button>
+            <button type="button" :class="{ active: summaryMode === 'day' }" @click="summaryMode = 'day'">
+              按天
+            </button>
+          </div>
           <pre class="episode-summary-text">{{ doctorSummary }}</pre>
           <p v-if="resolvedSummary" class="episode-resolved-summary">{{ resolvedSummary }}</p>
         </div>

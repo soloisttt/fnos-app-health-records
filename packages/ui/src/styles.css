@@ -475,8 +475,8 @@ button.entry-row-open:disabled { cursor: default; }
 }
 .entry-row-remove:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
 .entry-row-remove:disabled { opacity: .5; cursor: default; }
-/* 详情页右上角的操作组（返回 / 删除） */
-.episode-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 详情页右上角的操作组（返回 / 删除病程 / 改病因 / 标记痊愈，窄屏自动换行） */
+.episode-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .soft-action-button.danger-soft { color: var(--danger); }
 .soft-action-button.danger-soft:hover:not(:disabled) { background: var(--danger-soft); }
 .entry-row-main > strong { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
@@ -601,24 +601,17 @@ button.entry-row-open:disabled { cursor: default; }
 .icon-action-button.active { background: var(--brand); color: #fff; }
 .compact-soft { min-height: 30px; padding-inline: 10px; flex: 0 0 auto; }
 
-/* 描边小按钮：一眼看出「能点」（病程信息卡上的填病因 / 标记痊愈） */
+/* 描边小按钮：一眼看出「能点」（病程标题区的填病因 / 标记痊愈） */
 .outline-action-button {
   min-height: 30px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 999px;
   background: var(--surface); color: var(--brand-strong); font-size: 12px; font-weight: 600;
 }
 .outline-action-button:disabled { opacity: .62; cursor: not-allowed; }
 
-/* 病程信息：压成一行 —— 病因 + 右侧两个小按钮（起病日期与病程天数在页面顶部和时间轴头部已有） */
-.episode-info-body { display: grid; gap: 10px; }
-.episode-info-line {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-  gap: 8px 12px; margin: 0; font-size: 13px;
-}
-.episode-info-cause { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.episode-info-cause em { font-style: normal; color: var(--muted); font-size: 12px; }
-.episode-info-cause strong { font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
-.episode-info-cause strong.is-empty { color: var(--muted); font-weight: 400; }
-.episode-info-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+/* 详情页标题旁的状态药丸（从已删除的「病程信息」卡移上来） */
+.episode-title-chip { margin-left: 8px; vertical-align: middle; }
+/* 病因表单：点了标题区的「改病因 / 填病因」才展开 */
+.episode-cause-form { margin: 0 0 12px; }
 
 /* 发热小结：最高 / 最近 / 天数 */
 .episode-fever-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -669,6 +662,16 @@ button.entry-row-open:disabled { cursor: default; }
   font-family: inherit; font-size: 13px; line-height: 1.7; color: var(--ink);
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* 摘要排法切换：按症状（医生读病史的习惯，默认）/ 按天（回看「哪天怎么了」） */
+.summary-mode {
+  display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 10px;
+  border-radius: 999px; background: var(--fill-1);
+}
+.summary-mode button {
+  min-height: 28px; padding: 0 14px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--muted); font-size: 12px;
+}
+.summary-mode button.active { background: var(--surface); color: var(--brand-strong); font-weight: 600; }
 .episode-resolved-summary {
   margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-m);
   background: var(--green-ok-soft); color: var(--green-ok); font-size: 13px; line-height: 1.6;

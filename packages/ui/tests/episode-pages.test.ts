@@ -741,18 +741,41 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(summary.text()).toContain("呼吸道感染");
     expect(summary.text()).toContain("受凉");
 
+    /* 默认按症状归并：同名症状合成一条变化链，体温单独给出「最高 / 最近」 */
+    const modeButtons = wrapper.findAll(".summary-mode button");
+    expect(modeButtons.map((button) => button.text())).toEqual(["按症状", "按天"]);
+    expect(wrapper.find(".summary-mode button.active").text()).toBe("按症状");
+    expect(summary.text()).toContain("症状（4 个）");
+    expect(summary.text()).toContain("发热：共 1 次");
+    expect(summary.text()).toContain("最高 38.5℃");
+    expect(summary.text()).toContain("皮疹：");
+    expect(summary.text()).toContain("已消失");
+    /* 医院、报告名、诊断分行写，不再挤成一行 */
+    expect(summary.text()).toContain("郑州市中心医院 · 急诊儿科 ｜ 急诊儿科门诊记录");
+    expect(summary.text()).toContain("诊断：呼吸道感染");
+
+    /* 切成按天归组：天数按起病日推算，同一天的记录收在一天里 */
+    await modeButtons[1]!.trigger("click");
+    await settle();
+    expect(wrapper.find(".summary-mode button.active").text()).toBe("按天");
+    const dayText = wrapper.find(".episode-summary-text").text();
+    expect(dayText).toContain("10-09（第 1 天）");
+    expect(dayText).toMatch(/(今天|10-13)（第 5 天）/);
+
     /* 摘要面板很占位：点页面别处要自动收起来，但点面板里面不收 */
     document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     await settle();
     expect(wrapper.find(".episode-summary-text").exists()).toBe(false);
 
-    /* 病程信息压成一行：病因 + 右侧两个小按钮；起病日期不在卡片里重复（页面顶部已有） */
-    const info = wrapper.find(".episode-info-line");
-    expect(info.exists()).toBe(true);
-    expect(info.text()).toContain("病因");
-    expect(info.text()).toContain("受凉");
-    expect(info.text()).toContain("标记痊愈");
-    expect(wrapper.find(".episode-meta-line").exists()).toBe(false);
+    /* 「病程信息」卡已去掉：病因、改病因、标记痊愈都收到标题区，状态做成标题旁药丸 */
+    const intro = wrapper.find(".episode-detail-intro");
+    expect(intro.exists()).toBe(true);
+    expect(intro.text()).toContain("病因");
+    expect(intro.text()).toContain("受凉");
+    expect(intro.text()).toContain("改病因");
+    expect(intro.text()).toContain("标记痊愈");
+    expect(wrapper.find(".episode-title-chip").text()).toBe("进行中");
+    expect(wrapper.find(".episode-info-line").exists()).toBe(false);
   });
 
   it("医生开的药点一下就记服药量，一句话记也直接入库（都不弹表单）", async () => {
@@ -887,6 +910,127 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(last.body.takenAt).toBe("2026-10-13 15:50");
     expect(document.body.querySelectorAll(".episode-sheet").length).toBe(sheetsBefore);
     expect(wrapper.find(".episode-quick-input input").element.value).toBe("");
+  });
+
+  it("就医摘要两种排法：按症状归并 / 按天归组，同种药不重复出现", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: "受凉",
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 4,
+      linkCount: 2,
+    };
+    const symptom = (over: Record<string, unknown>) => ({
+      id: "sym-x",
+      episodeId: "ep-1",
+      memberId: member.id,
+      name: "咳嗽",
+      onsetAt: "2026-10-09",
+      durationText: null,
+      severity: null,
+      bodyPart: null,
+      description: null,
+      status: "present",
+      source: "manual",
+      reportId: null,
+      evidence: [],
+      manualFields: [],
+      ...over,
+    });
+    const reportFact = {
+      reportId: "report-1",
+      reportTitle: "急诊儿科门诊记录",
+      hospitalName: "郑州市中心医院",
+      departmentName: "急诊儿科",
+      occurredAt: "2026-10-09",
+      missing: false,
+    };
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (path.startsWith("episodes/"))
+        return {
+          episode: episodeRow,
+          symptoms: [
+            symptom({ id: "s1", name: "咳嗽", onsetAt: "2026-10-09 08:00" }),
+            symptom({ id: "s2", name: "体温", onsetAt: "2026-10-12 12:00", measuredValue: "37", measuredUnit: "℃" }),
+            symptom({ id: "s3", name: "体温", onsetAt: "2026-10-13 15:50", measuredValue: "38.2", measuredUnit: "℃" }),
+            symptom({ id: "s4", name: "咳嗽", onsetAt: "2026-10-13 19:32", status: "resolved" }),
+          ],
+          medications: [
+            { id: "m1", episodeId: "ep-1", memberId: member.id, name: "氨溴特罗口服溶液", dose: "5", doseUnit: "ml", frequency: "bid", route: "口服", startAt: "2026-10-13", note: null, source: "manual", reportId: null, evidence: [], manualFields: [], createdAt: "", updatedAt: "" },
+            { id: "m2", episodeId: "ep-1", memberId: member.id, name: "布洛芬混悬液", dose: "4", doseUnit: "ml", frequency: null, route: null, startAt: "2026-10-13", note: null, source: "manual", reportId: null, evidence: [], manualFields: [], createdAt: "", updatedAt: "" },
+          ],
+          intakes: [
+            { id: "i1", episodeId: "ep-1", memberId: member.id, medicationName: "氨溴特罗口服溶液", dose: "5", doseUnit: "ml", route: null, takenAt: "2026-10-13 15:50", note: null, sourceReportId: null, source: "manual", createdAt: "", updatedAt: "" },
+            { id: "i2", episodeId: "ep-1", memberId: member.id, medicationName: "氨溴特罗口服溶液", dose: "5", doseUnit: "ml", route: null, takenAt: "2026-10-13 17:27", note: null, sourceReportId: null, source: "manual", createdAt: "", updatedAt: "" },
+          ],
+          links: [],
+          linkedFacts: [
+            { ...reportFact, linkId: "lnk-report", factType: "report", factId: "report-1", label: "急诊儿科门诊记录", detail: "报告", derived: false },
+            { ...reportFact, linkId: "derived:diagnosis:d1", factType: "diagnosis", factId: "d1", label: "呼吸道感染", detail: "诊断", derived: true },
+            { ...reportFact, linkId: "derived:medication:rm1", factType: "medication", factId: "rm1", label: "氨溴特罗口服溶液", detail: "5ml 口服 bid（每日两次）", derived: true },
+          ],
+        };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+    await wrapper.find('button[aria-label="给医生看的摘要"]').trigger("click");
+    await settle();
+
+    const textOf = () => wrapper.find(".episode-summary-text").text();
+
+    /* 按症状：咳嗽两次记录合成一条变化链，体温单独给出「最高 / 最近」 */
+    const bySymptom = textOf();
+    expect(bySymptom).toContain("症状（2 个）");
+    expect(bySymptom).toContain("体温：共 2 次 ｜ 最高 38.2℃");
+    expect(bySymptom).toContain("最近 38.2℃");
+    expect(bySymptom).toContain("咳嗽：");
+    expect(bySymptom).toContain("出现");
+    expect(bySymptom).toContain("已消失");
+    expect(bySymptom).toContain("→");
+    /* 体温排在最前（儿科最关心） */
+    expect(bySymptom.indexOf("体温：共")).toBeLessThan(bySymptom.indexOf("咳嗽："));
+    /* 就诊拆两行：医院与报告名一行、诊断一行、开药一行 */
+    expect(bySymptom).toContain("郑州市中心医院 · 急诊儿科 ｜ 急诊儿科门诊记录");
+    expect(bySymptom).toContain("诊断：呼吸道感染");
+    expect(bySymptom).toContain("开药：氨溴特罗口服溶液 5ml 口服 bid（每日两次）");
+    /* 服药按药名归并成一行，共几次写在括号里 */
+    expect(bySymptom).toContain("氨溴特罗口服溶液 5ml：");
+    expect(bySymptom).toContain("（共 2 次）");
+    /* 处方里的药 + 服药记录各出现一次；已经有服药记录的同名药不再重复列进「自行用药」 */
+    expect(bySymptom.split("氨溴特罗口服溶液").length - 1).toBe(2);
+    expect(bySymptom).toContain("自行用药：布洛芬混悬液 4ml");
+
+    /* 按天：天数按起病日推算，同一天的记录收在一天里 */
+    await wrapper.findAll(".summary-mode button")[1]!.trigger("click");
+    await settle();
+    const byDay = textOf();
+    expect(byDay).toContain("10-09（第 1 天）");
+    expect(byDay).toMatch(/(今天|10-13)（第 5 天）/);
+    expect(byDay).toContain("服药 氨溴特罗口服溶液 5ml");
+    expect(byDay).toContain("38.2℃");
+    /* 时间轴与摘要都是「同一天里按时间」排，不会把昨天的记录混进今天 */
+    expect(byDay.indexOf("10-09（第 1 天）")).toBeLessThan(byDay.indexOf("（第 5 天）"));
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

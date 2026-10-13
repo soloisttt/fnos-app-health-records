@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
+import { readFileSync } from "node:fs";
 import EpisodeEntrySheet, { type EpisodeSheetForm } from "../src/components/EpisodeEntrySheet.vue";
 
 const wrapperList: Array<ReturnType<typeof mount>> = [];
@@ -75,5 +77,34 @@ describe("底部记录面板", () => {
       item.textContent?.trim(),
     );
     expect(labels).toEqual(["存在", "加重", "减轻", "消失"]);
+  });
+});
+
+describe("小面板里弹出的时间选择器", () => {
+  it("点「时间」能展开日期滚轮，且滚轮在小面板之外可交互", async () => {
+    open();
+    const trigger = document.body.querySelector<HTMLButtonElement>(".episode-sheet .datetime-picker-trigger")!;
+    trigger.click();
+    await nextTick();
+
+    /* 滚轮 Teleport 到 body：必须挂在文档末尾，不被小面板裁掉 */
+    const layer = [...document.body.querySelectorAll(".datetime-picker-layer")].at(-1);
+    expect(layer).toBeTruthy();
+    expect(layer!.querySelector(".datetime-picker-panel")).toBeTruthy();
+    expect(layer!.querySelectorAll(".wheel-scroll").length).toBe(5);
+  });
+
+  it("滚轮图层层级高于小面板遮罩，否则弹出的选择器看得见点不着", () => {
+    /* 曾经的真实 bug：小面板遮罩 z-index 150 盖住滚轮图层 140，
+       在面板里点时间，滚轮显示在下方但被遮罩挡住，点任何地方都直接关掉面板。 */
+    const pickerCss = readFileSync("packages/ui/src/components/DateTimePicker.css", "utf8");
+    const styles = readFileSync("packages/ui/src/styles.css", "utf8");
+    const layerZ = Number(
+      pickerCss.match(/\.datetime-picker-layer\s*\{[^}]*z-index:\s*(\d+)/)?.[1],
+    );
+    const sheetZ = Number(
+      styles.match(/\.episode-sheet-layer\s*\{[^}]*z-index:\s*(\d+)/)?.[1],
+    );
+    expect(layerZ).toBeGreaterThan(sheetZ);
   });
 });

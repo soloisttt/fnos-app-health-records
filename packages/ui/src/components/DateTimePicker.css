@@ -1,7 +1,9 @@
 /* Shared Apple-style date and date-time picker */
 
+/* 层级 160：必须高过「记一次」小面板的遮罩（150），
+   否则在面板里点时间弹出的滚轮会被遮罩盖住，看得见点不着。 */
 .datetime-picker-layer {
-  position: fixed; inset: 0; z-index: 140;
+  position: fixed; inset: 0; z-index: 160;
   background: rgba(0, 0, 0, 0.4);
   display: block;
   animation: fade-in .16s ease;
