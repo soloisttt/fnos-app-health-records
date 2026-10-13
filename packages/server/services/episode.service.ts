@@ -43,6 +43,16 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
   return (allowed as readonly string[]).includes(normalized) ? (normalized as T) : fallback;
 }
 
+/**
+ * 时刻统一存成 `YYYY-MM-DD HH:mm`。
+ * 日期选择器写出来的是 `T` 分隔（`2026-10-13T17:30`），快速记录与默认值写的是空格分隔，
+ * 两套混着存会让时间轴排序和「今天 / 昨天」的显示对不上，所以在入口处统一。
+ */
+function momentText(value: unknown, maxLength = 32) {
+  const parsed = text(value, maxLength);
+  return parsed ? parsed.replace("T", " ").trim() : parsed;
+}
+
 /** 统一的诊断名归一化规则；写入别名表与查询匹配时都必须用它。 */
 export function normalizeDiagnosisName(value: string) {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
@@ -201,6 +211,8 @@ export type EpisodeLinkedFact = {
   reportId: string | null;
   reportTitle: string | null;
   hospitalName: string | null;
+  /** 就诊科室（报告里的就诊/送检/开单科室，取得到的那个），用于「一次就诊」卡片 */
+  departmentName: string | null;
   occurredAt: string | null;
   /** 事实已不存在（如报告被彻底删除），界面据此提示并允许清理挂链。 */
   missing: boolean;
@@ -426,17 +438,27 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
     }
   }
 
-  const reportInfo = new Map<string, { title: string; hospitalName: string | null; issuedAt: string | null }>();
+  const reportInfo = new Map<
+    string,
+    { title: string; hospitalName: string | null; departmentName: string | null; issuedAt: string | null }
+  >();
   if (reportIds.size) {
     const ids = [...reportIds];
     const placeholders = ids.map(() => "?").join(", ");
     const rows = db
       .prepare(
         `SELECT id, title, hospital_name_raw AS hospitalName,
+                COALESCE(reporting_department, visit_department, ordering_department) AS departmentName,
                 COALESCE(report_issued_at, created_at) AS issuedAt
          FROM reports WHERE id IN (${placeholders})`,
       )
-      .all(...ids) as Array<{ id: string; title: string; hospitalName: string | null; issuedAt: string | null }>;
+      .all(...ids) as Array<{
+      id: string;
+      title: string;
+      hospitalName: string | null;
+      departmentName: string | null;
+      issuedAt: string | null;
+    }>;
     for (const row of rows) reportInfo.set(row.id, row);
   }
 
@@ -452,6 +474,7 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
       reportId: hit?.reportId ?? null,
       reportTitle: info?.title ?? null,
       hospitalName: info?.hospitalName ?? null,
+      departmentName: info?.departmentName ?? null,
       occurredAt: hit?.occurredAt ?? info?.issuedAt ?? null,
       missing: !hit,
       derived: false,
@@ -469,6 +492,7 @@ function resolveLinkedFacts(episodeId: string): EpisodeLinkedFact[] {
       reportId: fact.hit.reportId,
       reportTitle: info?.title ?? null,
       hospitalName: info?.hospitalName ?? null,
+      departmentName: info?.departmentName ?? null,
       occurredAt: fact.hit.occurredAt ?? info?.issuedAt ?? null,
       missing: false,
       derived: true,
@@ -712,7 +736,7 @@ export function createSymptom(
       episodeId,
       episode.memberId,
       requiredText(input.name, "症状名称", 200),
-      text(input.onsetAt, 32),
+      momentText(input.onsetAt),
       text(input.durationText, 100),
       text(input.severity, 100),
       text(input.bodyPart, 200),
@@ -739,7 +763,7 @@ export function updateSymptom(
   const symptom = symptomForAccess(user, symptomId);
   const fields = new Map<string, string | null>();
   if ("name" in input) fields.set("name", requiredText(input.name, "症状名称", 200));
-  if ("onsetAt" in input) fields.set("onset_at", text(input.onsetAt, 32));
+  if ("onsetAt" in input) fields.set("onset_at", momentText(input.onsetAt));
   if ("durationText" in input) fields.set("duration_text", text(input.durationText, 100));
   if ("severity" in input) fields.set("severity", text(input.severity, 100));
   if ("bodyPart" in input) fields.set("body_part", text(input.bodyPart, 200));

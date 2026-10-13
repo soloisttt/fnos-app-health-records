@@ -12,6 +12,11 @@ const props = defineProps<{
   ariaLabel?: string;
   minYear?: number;
   maxYear?: number;
+  /**
+   * `field`（默认）是带边框的输入框外观；`plain` 只显示一行可点的文字，
+   * 用于「默认就填好当前时间、点一下才改」的场景，避免表单里到处是输入框。
+   */
+  variant?: "field" | "plain";
 }>();
 const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 
@@ -38,10 +43,11 @@ const wheelRefs: Record<string, { value: HTMLElement | null }> = {
   minute: wheelMinute,
 };
 
-// 解析当前值
+// 解析当前值。分隔符同时接受 `T`（本组件写出的格式）与空格（快速记录/默认值写出的格式），
+// 否则已有的「2026-10-13 17:30」会被当成空值，显示回「请选择」并丢掉时刻。
 const parsedDate = computed(() => {
   if (!props.modelValue) return null;
-  const match = props.modelValue.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  const match = props.modelValue.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!match) return null;
   return {
     year: parseInt(match[1]),
@@ -377,7 +383,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="datetime-picker" :class="{ disabled }">
+  <div ref="root" class="datetime-picker" :class="[{ disabled }, variant === 'plain' ? 'plain' : '']">
     <button
       type="button"
       class="datetime-picker-trigger"
@@ -385,7 +391,7 @@ onBeforeUnmount(() => {
       :aria-label="ariaLabel"
       @click="open = true"
     >
-      <CalendarDays class="datetime-picker-trigger-icon" :size="17" aria-hidden="true" />
+      <CalendarDays class="datetime-picker-trigger-icon" :size="variant === 'plain' ? 15 : 17" aria-hidden="true" />
       <span :class="{ placeholder: !modelValue }">{{ displayValue() }}</span>
     </button>
     <Teleport to="body">
@@ -482,8 +488,19 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+/* plain：只显示一行可点的文字（默认已填好当前时间，点一下才展开选择器） */
+.datetime-picker.plain .datetime-picker-trigger {
+  min-height: 32px; padding: 0; border: 0; border-radius: 8px;
+  background: transparent; color: var(--brand-strong); font-weight: 600;
+  width: auto; max-width: 100%;
+}
+.datetime-picker.plain .datetime-picker-trigger-icon { margin-right: 6px; color: var(--brand); }
+.datetime-picker.plain .datetime-picker-trigger:active { opacity: .7; }
+.datetime-picker.plain .datetime-picker-trigger .placeholder { color: var(--muted); font-weight: 500; }
+
 /* PC 上触发器同步收紧到桌面表单密度，移动端保持 44px 触控目标 */
 @media (min-width: 761px) and (pointer: fine) {
   .datetime-picker-trigger { min-height: 36px; font-size: 13px; }
+  .datetime-picker.plain .datetime-picker-trigger { min-height: 30px; font-size: 13px; }
 }
 </style>

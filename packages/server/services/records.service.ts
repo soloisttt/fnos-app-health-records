@@ -833,6 +833,9 @@ export function listReports(
       ${reportDisplayDateSql} AS reportIssuedAt,
       ${sortDateSql} AS sortDate,
       ${reportAbnormalCountSql},
+      (SELECT COUNT(*) FROM case_episode_links l
+         JOIN case_episodes e ON e.id = l.episode_id
+        WHERE l.fact_type = 'report' AND l.fact_id = r.id AND e.deleted_at IS NULL) AS episodeLinkCount,
       (SELECT COUNT(*) FROM report_pages p WHERE p.report_id = r.id) AS pageCount
     FROM reports r
     JOIN member_permissions mp ON mp.member_id = r.member_id AND mp.user_id = ?

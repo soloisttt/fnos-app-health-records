@@ -28,6 +28,7 @@ import {
   updateMedication,
   updateSymptom,
 } from "../services/episode.service.ts";
+import { listReports } from "../services/records.service.ts";
 
 function setup(label: string) {
   const storageDir = mkdtempSync(join(tmpdir(), `health-records-${label}-`));
@@ -289,6 +290,10 @@ test("症状与手动用药都能编辑：状态、数值、时间到分钟", ()
     assert.equal(after.measuredValue, "37.2");
     assert.equal(after.measuredUnit, "℃", "没传的字段保持原值");
     assert.equal(after.onsetAt, "2026-10-13 17:30");
+
+    /* 日期选择器写出来的是 T 分隔，入口统一成空格分隔，免得排序和「今天/昨天」对不上 */
+    const fromPicker = updateSymptom(owner, symptom.id, { onsetAt: "2026-10-13T18:05" });
+    assert.equal(fromPicker.symptoms[0]!.onsetAt, "2026-10-13 18:05");
 
     /* 手动补录的用药同样可编辑 */
     const withMedication = createMedication(owner, episode.episode.id, { name: "布洛芬", dose: "4ml" });
@@ -749,6 +754,53 @@ test("跨成员访问被拒绝", () => {
     assert.throws(() => getEpisode(stranger, episode.episode.id), /无权访问/);
     assert.throws(() => listEpisodes(stranger, "other"), /无权访问/);
     assert.throws(() => listDiseaseCatalog(stranger, "other"), /无权访问/);
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("就诊卡片字段：归集带出医院与科室，报告列表能看出是否已入病程", () => {
+  const { storageDir, owner, db } = setup("visit-card-fields");
+  try {
+    db.exec(`
+      INSERT INTO reports (
+        id, member_id, created_by, report_type, title, status, report_issued_at, hospital_name_raw, visit_department
+      ) VALUES ('r1', 'member', 'owner', 'outpatient', '急诊儿科门诊记录', 'ready', '2026-10-09', '郑州市中心医院', '急诊儿科');
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_text, is_primary, is_deleted)
+        VALUES ('d1', 'r1', '呼吸道感染', 1, 0);
+      INSERT INTO report_medications (id, report_id, medication_name, dose, dose_unit, route, frequency, is_deleted)
+        VALUES ('m1', 'r1', '氨溴特罗口服溶液', '5', 'ml', '口服', 'bid', 0);
+    `);
+    const episode = createEpisode(owner, "member", { title: "10月呼吸道感染" });
+    linkEpisodeFact(owner, episode.episode.id, { factType: "report", factId: "r1" });
+
+    /* 界面靠这三个字段把「一次就诊」合成一张卡片：日期 · 医院 · 科室 */
+    const detail = getEpisode(owner, episode.episode.id);
+    assert.ok(detail.linkedFacts.length >= 2);
+    for (const fact of detail.linkedFacts) {
+      assert.equal(fact.hospitalName, "郑州市中心医院");
+      assert.equal(fact.departmentName, "急诊儿科");
+      assert.equal(fact.occurredAt, "2026-10-09");
+    }
+    const medication = detail.linkedFacts.find((fact) => fact.factType === "medication");
+    assert.equal(medication?.label, "氨溴特罗口服溶液");
+    assert.equal(medication?.detail, "5ml 口服 bid（每日两次）");
+
+    /* 报告列表标出「已入病程」，没挂的报告一眼能看出来 */
+    const linked = listReports(owner, 10, { memberId: "member" }).items.find((row) => row.id === "r1");
+    assert.equal(linked?.episodeLinkCount, 1);
+
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status)
+        VALUES ('r2', 'member', 'owner', 'lab', '化验单', 'ready');
+    `);
+    const unlinked = listReports(owner, 10, { memberId: "member" }).items.find((row) => row.id === "r2");
+    assert.equal(unlinked?.episodeLinkCount, 0);
+
+    /* 病程删掉之后不再算「已入病程」 */
+    deleteEpisode(owner, episode.episode.id);
+    const afterDelete = listReports(owner, 10, { memberId: "member" }).items.find((row) => row.id === "r1");
+    assert.equal(afterDelete?.episodeLinkCount, 0);
   } finally {
     teardown(storageDir);
   }

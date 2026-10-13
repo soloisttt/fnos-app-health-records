@@ -125,6 +125,8 @@ export type ReportSummary = {
   reportIssuedAt: string | null;
   abnormalCount: number;
   pageCount: number;
+  /** 这份报告被挂进病程的次数（0 = 还没归入任何病程）。旧接口可能不返回，用可选。 */
+  episodeLinkCount?: number;
 };
 
 export type DuplicateReportCandidate = ReportSummary & {
@@ -1341,6 +1343,8 @@ export type EpisodeLinkedFact = {
   reportId: string | null;
   reportTitle: string | null;
   hospitalName: string | null;
+  /** 就诊科室（报告里的就诊/送检/开单科室），用于「一次就诊」卡片 */
+  departmentName: string | null;
   occurredAt: string | null;
   missing: boolean;
   /** 由已归集的「报告」展开而来：跟随报告变化，不能在病程里单独移除。 */

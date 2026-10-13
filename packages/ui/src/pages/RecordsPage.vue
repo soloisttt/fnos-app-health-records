@@ -380,6 +380,9 @@ useRefreshOnActivate(() => { void reloadList(); });
               <span v-if="statusMeta[report.status]" class="chip" :class="statusMeta[report.status].chip">{{ statusMeta[report.status].label }}</span>
               <span v-if="report.abnormalCount > 0" class="chip chip--amber">{{ report.abnormalCount }} 项异常</span>
               <span v-if="report.pageCount > 1" class="chip chip--plain">{{ report.pageCount }} 页</span>
+              <!-- 是否已挂进病程：没挂的标一下，免得漏 -->
+              <span v-if="report.episodeLinkCount" class="chip chip--green">已入病程</span>
+              <span v-else-if="report.status === 'ready'" class="chip chip--plain">未入病程</span>
             </span>
             <ChevronRight :size="18" class="timeline-arrow" />
           </button>

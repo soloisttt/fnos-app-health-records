@@ -457,23 +457,27 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const eventOf = (text: string) =>
       wrapper.findAll(".episode-event").find((el) => el.text().includes(text))!;
 
-    /* 同一次就诊的两条用药合并成一个「用药」节点：类型标签与日期只出现一次 */
-    const medicationEvents = wrapper.findAll(".episode-event--medication");
-    expect(medicationEvents.length).toBe(1);
-    expect(medicationEvents[0]!.findAll(".episode-event-item").length).toBe(2);
-    expect(eventOf("复方氨酚甲麻口服液").text()).toBe(eventOf("氨溴特罗口服溶液").text());
+    /* 同一次就诊合成一张卡片：报告、医院、用药都在里面，
+       不再每个类型各占一行、各重复一遍「急诊儿科门诊记录 · 郑州市中心医院 · 日期」 */
+    const visit = wrapper.find(".episode-visit");
+    expect(visit.exists()).toBe(true);
+    expect(visit.text()).toContain("急诊儿科门诊记录");
+    expect(visit.text()).toContain("郑州市中心医院");
+    /* 诊断与用药不再各自成节点，都收进卡片 */
+    expect(wrapper.findAll(".episode-event--medication").length).toBe(0);
+    expect(eventOf("急诊儿科门诊记录").text()).toBe(visit.text());
 
-    const itemOf = (text: string) =>
-      wrapper.findAll(".episode-event-item").find((el) => el.text().includes(text))!;
+    const lineOf = (text: string) =>
+      visit.findAll(".episode-visit-line").find((el) => el.text().includes(text))!;
 
     /* 由报告展开的用药：跟随报告，不提供单独移除 */
-    const derivedItem = itemOf("复方氨酚甲麻口服液");
-    expect(derivedItem.text()).toContain("随报告记入");
-    expect(derivedItem.find(".danger-action").exists()).toBe(false);
+    const derivedLine = lineOf("复方氨酚甲麻口服液");
+    expect(derivedLine.text()).toContain("4.5ml");
+    expect(derivedLine.findAll("button.danger-action").length).toBe(0);
 
     /* 单独归集的用药：照旧可以单独移除 */
-    const explicitItem = itemOf("氨溴特罗口服溶液");
-    expect(explicitItem.find(".danger-action").exists()).toBe(true);
+    const explicitLine = lineOf("氨溴特罗口服溶液");
+    expect(explicitLine.findAll("button.danger-action").length).toBe(1);
   });
 
   it("病程详情可手动补录用药，且用药与症状用不同强调色区分", async () => {
@@ -570,6 +574,132 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(medicationEvent.text()).toContain("bid（每日两次）");
     expect(medicationEvent.text()).toContain("手动补录");
     expect(medicationEvent.find(".danger-action").exists()).toBe(true);
+  });
+
+  it("就诊卡片合并同一次就诊、缺口提示、发热小结与快捷记录", async () => {
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: "受凉",
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 2,
+      linkCount: 2,
+    };
+    const reportFact = {
+      reportId: "report-1",
+      reportTitle: "急诊儿科门诊记录",
+      hospitalName: "郑州市中心医院",
+      departmentName: "急诊儿科",
+      occurredAt: "2026-10-09",
+      missing: false,
+    };
+    const symptom = (over: Record<string, unknown>) => ({
+      id: "sym-x",
+      episodeId: "ep-1",
+      memberId: member.id,
+      name: "咳嗽",
+      onsetAt: "2026-10-09",
+      durationText: null,
+      severity: null,
+      bodyPart: null,
+      description: null,
+      status: "present",
+      source: "manual",
+      reportId: null,
+      evidence: [],
+      manualFields: [],
+      ...over,
+    });
+    mocked.request.mockImplementation(async (path: string) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (path.startsWith("episodes?memberId")) return [episodeRow];
+      if (path.startsWith("episodes/"))
+        return {
+          episode: episodeRow,
+          symptoms: [
+            symptom({
+              id: "sym-fever",
+              name: "发热",
+              onsetAt: "2026-10-13 15:30",
+              measuredValue: "38.5",
+              measuredUnit: "℃",
+            }),
+            symptom({ id: "sym-cough", name: "咳嗽", source: "ai", reportId: "report-1" }),
+          ],
+          medications: [],
+          links: [],
+          linkedFacts: [
+            { ...reportFact, linkId: "lnk-report", factType: "report", factId: "report-1", label: "急诊儿科门诊记录", detail: "报告", derived: false },
+            { ...reportFact, linkId: "derived:diagnosis:d1", factType: "diagnosis", factId: "d1", label: "呼吸道感染", detail: "诊断", derived: true },
+          ],
+        };
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 一次就诊 = 一张卡片：医院 · 科室写进卡片头，诊断与症状列在卡片内 */
+    const visit = wrapper.find(".episode-visit");
+    expect(visit.exists()).toBe(true);
+    expect(visit.text()).toContain("郑州市中心医院 · 急诊儿科");
+    expect(visit.text()).toContain("呼吸道感染");
+    expect(visit.text()).toContain("咳嗽");
+    /* 有诊断却没抽到用药 → 主动提示核对，而不是默默留空 */
+    expect(visit.find(".episode-visit-gaps").text()).toContain("有诊断，但没抽到用药");
+
+    /* 发热小结：最高值一眼可见 */
+    const fever = wrapper.find(".episode-fever-card");
+    expect(fever.exists()).toBe(true);
+    expect(fever.text()).toContain("38.5");
+    expect(fever.text()).toContain("最高");
+
+    /* 快速记录：常用症状点一下就把名称与单位填好（发热自带 ℃） */
+    const symptomNameInput = () =>
+      wrapper.findAll("label").find((label) => label.text().includes("症状名称"))!.find("input");
+    const chipOf = (name: string) =>
+      wrapper.findAll(".episode-quick-chips button").find((button) => button.text() === name)!;
+    expect(chipOf("发热").exists()).toBe(true);
+    await chipOf("咳嗽").trigger("click");
+    await settle();
+    expect(symptomNameInput().element.value).toBe("咳嗽");
+
+    /* 「记一笔」：拿已有症状当模板新记一条，名称与单位带过来 */
+    await chipOf("发热").trigger("click");
+    await settle();
+    expect(symptomNameInput().element.value).toBe("发热");
+    const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
+    await feverEvent.find("button").trigger("click");
+    await settle();
+    expect(symptomNameInput().element.value).toBe("发热");
+    const formCard = wrapper.findAll(".entry-list-card").find((card) => card.text().includes("症状名称"))!;
+    expect(formCard.find("header h3").text()).toBe("记一笔：发热");
+
+    /* 给医生看的摘要：一键生成可复制的文字 */
+    await wrapper.find('button[aria-label="给医生看的摘要"]').trigger("click");
+    await settle();
+    const summary = wrapper.find(".episode-summary-text");
+    expect(summary.exists()).toBe(true);
+    expect(summary.text()).toContain("就诊摘要");
+    expect(summary.text()).toContain("张铭浩");
+    expect(summary.text()).toContain("呼吸道感染");
+    expect(summary.text()).toContain("受凉");
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

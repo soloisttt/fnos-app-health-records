@@ -576,6 +576,89 @@ button.entry-row-open:disabled { cursor: default; }
 .episode-event-body strong { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
 .episode-event-body small { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .episode-event-body .row-actions { margin-left: 0; justify-content: flex-start; margin-top: 2px; }
+
+/* 图标按钮：手机上不占宽度（长文案会把「添加症状」挤出屏幕），用途写在 title/aria-label 里 */
+.icon-action-button {
+  width: 34px; height: 34px; flex: 0 0 auto; padding: 0;
+  display: inline-grid; place-items: center; border: 0; border-radius: 999px;
+  background: var(--brand-softer); color: var(--brand-strong);
+}
+.icon-action-button:disabled { opacity: .62; cursor: not-allowed; }
+.compact-soft { min-height: 30px; padding-inline: 10px; flex: 0 0 auto; }
+
+/* 病程信息：一行摘要 + 默认收起的病因（腾出位置给「快速记录」） */
+.episode-meta-line { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+.episode-cause-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.episode-cause-hint { font-size: 12px; color: var(--muted); }
+
+/* 发热小结：最高 / 最近 / 天数 */
+.episode-fever-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.episode-fever-grid > div { display: grid; gap: 2px; padding: 10px 12px; border-radius: var(--radius-m); background: var(--info-soft); }
+.episode-fever-grid span { font-size: 12px; color: var(--muted); }
+.episode-fever-grid strong { font-size: 18px; color: var(--info); line-height: 1.25; }
+.episode-fever-grid small { font-size: 11px; color: var(--muted); }
+
+/* 快速记录：常用症状快捷键 + 一句话记 */
+.episode-quick-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.episode-quick-chips button {
+  min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--ink); font-size: 13px;
+}
+.episode-quick-chips button:active { background: var(--brand-soft); border-color: var(--brand); }
+.episode-quick-input { display: grid; gap: 6px; margin-top: 10px; }
+.episode-quick-input > span { font-size: 12px; color: var(--muted); }
+.episode-quick-input input {
+  width: 100%; min-height: 40px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 14px;
+}
+.episode-quick-input input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); outline: none; }
+
+/* 给医生看的摘要 */
+.episode-summary-text {
+  margin: 0; padding: 12px; border-radius: var(--radius-m); background: var(--fill-2);
+  font-family: inherit; font-size: 13px; line-height: 1.7; color: var(--ink);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.episode-resolved-summary {
+  margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-m);
+  background: var(--green-ok-soft); color: var(--green-ok); font-size: 13px; line-height: 1.6;
+}
+
+/* 一次就诊 = 一张卡片：报告头 + 症状/诊断/用药分区，不再各占一行各重复一遍来源 */
+.episode-timeline .episode-event--visit .episode-dot { background: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.episode-visit {
+  padding: 12px; gap: 8px; border: 1px solid var(--line);
+  border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow-s);
+}
+.episode-visit-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
+.episode-visit-head time { color: var(--brand-strong); font-size: 12px; font-weight: 700; }
+.episode-visit-head strong { font-size: 15px; }
+.episode-visit-head small { color: var(--muted); font-size: 12px; }
+.episode-visit-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 0; }
+.episode-visit-fields dt { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.episode-visit-fields dd { margin: 0; display: grid; gap: 3px; min-width: 0; }
+.episode-visit-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.episode-visit-line-text { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.episode-visit-line button {
+  padding: 0; border: 0; background: transparent; color: var(--muted);
+  font-size: 11px; line-height: 1.6; text-decoration: underline;
+}
+.episode-visit-line button.danger-action { color: var(--danger); }
+.episode-visit-line button:disabled { opacity: .62; }
+.episode-visit-fields dd em {
+  margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+  background: var(--amber-soft); color: var(--amber); font-size: 11px; font-style: normal;
+}
+.episode-visit-gaps { margin: 0; font-size: 12px; color: var(--amber); line-height: 1.6; }
+
+/* 页面底部留白：按钮换行时不被底部导航压住 */
+.episode-bottom-spacer { height: 24px; }
+
+@media (max-width: 760px) {
+  .episode-intro-actions { gap: 6px; }
+  .episode-intro-actions .soft-action-button { padding-inline: 9px; }
+  .episode-fever-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .reminder-form { padding: 16px; margin-bottom: 12px; }
 .reminder-list article {
   display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 10px;

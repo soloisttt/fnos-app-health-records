@@ -390,6 +390,8 @@ export type ReportSummary = {
   reportIssuedAt: string | null;
   abnormalCount: number;
   pageCount: number;
+  /** 这份报告被挂进病程的次数（0 = 还没归入任何病程），列表据此提示别漏挂 */
+  episodeLinkCount: number;
 };
 
 export type DuplicateReportCandidate = ReportSummary & {
