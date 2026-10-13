@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS case_symptoms (
                      ),
   source             TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai')),
   report_id          TEXT REFERENCES reports(id) ON DELETE SET NULL,
+  measured_value     TEXT,
+  measured_unit      TEXT,
   evidence_json      TEXT NOT NULL DEFAULT '[]',
   manual_fields_json TEXT NOT NULL DEFAULT '[]',
   is_deleted         INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
@@ -146,10 +148,24 @@ CREATE INDEX IF NOT EXISTS catalog_exclusions_member_idx
   ON catalog_exclusions(member_id, fact_kind);
 `;
 
+/**
+ * 给已存在的表补列。
+ * SQLite 没有 `ADD COLUMN IF NOT EXISTS`，所以先查 `table_info` 再决定加不加；
+ * 这样老库启动时会自动补齐新列，不需要新增编号迁移。
+ */
+function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((item) => item.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 export function ensureCaseEpisodeDraft(db: DatabaseSync) {
   db.exec("SAVEPOINT case_episode_draft");
   try {
     db.exec(caseEpisodeSchemaSql);
+    /* 老库补列：症状的「测量值 / 单位」，给体温、血压这类带数值的症状用 */
+    ensureColumn(db, "case_symptoms", "measured_value", "TEXT");
+    ensureColumn(db, "case_symptoms", "measured_unit", "TEXT");
     db.exec("RELEASE case_episode_draft");
   } catch (error) {
     db.exec("ROLLBACK TO case_episode_draft; RELEASE case_episode_draft");

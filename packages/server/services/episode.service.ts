@@ -118,11 +118,12 @@ function readSymptoms(episodeId: string): CaseSymptom[] {
     .prepare(
       `SELECT id, episode_id AS episodeId, member_id AS memberId, name, onset_at AS onsetAt,
               duration_text AS durationText, severity, body_part AS bodyPart, description, status,
+              measured_value AS measuredValue, measured_unit AS measuredUnit,
               source, report_id AS reportId, evidence_json AS evidenceJson,
               manual_fields_json AS manualFieldsJson
        FROM case_symptoms
        WHERE episode_id = ? AND is_deleted = 0
-       ORDER BY COALESCE(onset_at, created_at), id`,
+       ORDER BY COALESCE(onset_at, created_at), created_at, id`,
     )
     .all(episodeId)
     .map((row) => {
@@ -137,6 +138,8 @@ function readSymptoms(episodeId: string): CaseSymptom[] {
         severity: item.severity,
         bodyPart: item.bodyPart,
         description: item.description,
+        measuredValue: item.measuredValue,
+        measuredUnit: item.measuredUnit,
         status: item.status as CaseSymptomStatus,
         source: item.source as "manual" | "ai",
         reportId: item.reportId,
@@ -701,8 +704,9 @@ export function createSymptom(
   try {
     db.prepare(
       `INSERT INTO case_symptoms
-        (id, episode_id, member_id, name, onset_at, duration_text, severity, body_part, description, status, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual')`,
+        (id, episode_id, member_id, name, onset_at, duration_text, severity, body_part, description,
+         measured_value, measured_unit, status, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual')`,
     ).run(
       id,
       episodeId,
@@ -713,6 +717,8 @@ export function createSymptom(
       text(input.severity, 100),
       text(input.bodyPart, 200),
       text(input.description, 2000),
+      text(input.measuredValue, 50),
+      text(input.measuredUnit, 20),
       enumValue(input.status, symptomStatuses, "present"),
     );
     db.prepare("UPDATE case_episodes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(episodeId);
@@ -738,6 +744,8 @@ export function updateSymptom(
   if ("severity" in input) fields.set("severity", text(input.severity, 100));
   if ("bodyPart" in input) fields.set("body_part", text(input.bodyPart, 200));
   if ("description" in input) fields.set("description", text(input.description, 2000));
+  if ("measuredValue" in input) fields.set("measured_value", text(input.measuredValue, 50));
+  if ("measuredUnit" in input) fields.set("measured_unit", text(input.measuredUnit, 20));
   if ("status" in input) fields.set("status", enumValue(input.status, symptomStatuses, "present"));
   if (!fields.size) throw createError({ statusCode: 400, statusMessage: "没有需要更新的字段" });
 
@@ -817,6 +825,40 @@ export function createMedication(
     throw error;
   }
   return getEpisode(user, episodeId);
+}
+
+export function updateMedication(
+  user: RequestUser,
+  medicationId: string,
+  input: Record<string, unknown>,
+) {
+  const medication = medicationForAccess(user, medicationId);
+  const fields = new Map<string, string | null>();
+  if ("name" in input) fields.set("name", requiredText(input.name, "药品名称", 200));
+  if ("dose" in input) fields.set("dose", text(input.dose, 100));
+  if ("doseUnit" in input) fields.set("dose_unit", text(input.doseUnit, 50));
+  if ("frequency" in input) fields.set("frequency", text(input.frequency, 100));
+  if ("route" in input) fields.set("route", text(input.route, 100));
+  if ("startAt" in input) fields.set("start_at", text(input.startAt, 32));
+  if ("endAt" in input) fields.set("end_at", text(input.endAt, 32));
+  if ("description" in input) fields.set("description", text(input.description, 2000));
+  if (!fields.size) throw createError({ statusCode: 400, statusMessage: "没有需要更新的字段" });
+
+  const columns = [...fields.keys()];
+  const db = getDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `UPDATE case_medications SET ${columns.map((column) => `${column} = ?`).join(", ")},
+       source = 'manual', manual_fields_json = '["*"]', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run(...fields.values(), medicationId);
+    appendAudit(user, "update", "case_medication", medicationId, { fields: columns });
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackAfterError(db);
+    throw error;
+  }
+  return getEpisode(user, medication.episodeId);
 }
 
 export function deleteMedication(user: RequestUser, medicationId: string) {

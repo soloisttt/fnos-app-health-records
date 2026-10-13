@@ -25,6 +25,7 @@ import {
   searchVisits,
   unlinkEpisodeFact,
   updateEpisode,
+  updateMedication,
   updateSymptom,
 } from "../services/episode.service.ts";
 
@@ -260,6 +261,47 @@ test("补录报告症状：给已挂好的报告补一次，重复点按不叠�
     const fresh = createEpisode(owner, "member", { title: "另一次" });
     linkEpisodeFact(owner, fresh.episode.id, { factType: "report", factId: "r1" });
     assert.equal(getEpisode(owner, fresh.episode.id).symptoms.length, 2, "首次挂载即自动补录");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("症状与手动用药都能编辑：状态、数值、时间到分钟", () => {
+  const { storageDir, owner } = setup("episode-edit");
+  try {
+    const episode = createEpisode(owner, "member", { title: "发热" });
+
+    const created = createSymptom(owner, episode.episode.id, {
+      name: "发热",
+      onsetAt: "2026-10-13 17:30",
+      measuredValue: "38.5",
+      measuredUnit: "℃",
+    });
+    const symptom = created.symptoms[0]!;
+    assert.equal(symptom.onsetAt, "2026-10-13 17:30", "症状时间应保留到分钟");
+    assert.equal(symptom.measuredValue, "38.5");
+    assert.equal(symptom.measuredUnit, "℃");
+    assert.equal(symptom.status, "present");
+
+    const updated = updateSymptom(owner, symptom.id, { status: "improved", measuredValue: "37.2" });
+    const after = updated.symptoms[0]!;
+    assert.equal(after.status, "improved", "症状状态应可改为「好转」");
+    assert.equal(after.measuredValue, "37.2");
+    assert.equal(after.measuredUnit, "℃", "没传的字段保持原值");
+    assert.equal(after.onsetAt, "2026-10-13 17:30");
+
+    /* 手动补录的用药同样可编辑 */
+    const withMedication = createMedication(owner, episode.episode.id, { name: "布洛芬", dose: "4ml" });
+    const medication = withMedication.medications[0]!;
+    const edited = updateMedication(owner, medication.id, { dose: "5ml", frequency: "prn" });
+    const editedMedication = edited.medications[0]!;
+    assert.equal(editedMedication.dose, "5ml");
+    assert.equal(editedMedication.frequency, "prn");
+    assert.equal(editedMedication.name, "布洛芬", "未传的字段保持原值");
+
+    /* 编辑只影响自己，不碰其他记录 */
+    assert.equal(edited.symptoms.length, 1);
+    assert.equal(edited.symptoms[0]!.measuredValue, "37.2");
   } finally {
     teardown(storageDir);
   }

@@ -1294,6 +1294,9 @@ export type CaseSymptom = {
   severity: string | null;
   bodyPart: string | null;
   description: string | null;
+  /** 测量值与单位：给体温、血压这类带数值的症状用。 */
+  measuredValue: string | null;
+  measuredUnit: string | null;
   status: CaseSymptomStatus;
   source: "manual" | "ai";
   reportId: string | null;

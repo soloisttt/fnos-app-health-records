@@ -14,6 +14,7 @@ import type {
   EpisodeLinkedFact,
 } from "../types/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
+import { parseQuickSymptomInput } from "../utils/quick-symptom";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
@@ -71,6 +72,8 @@ type TimelineItem = {
   detail: string | null;
   reportId: string | null;
   derived: boolean;
+  /** 可编辑时给出入口（手动录入的症状与用药）；随报告记入的条目不可改。 */
+  edit: (() => void) | null;
   remove: (() => void) | null;
 };
 
@@ -99,6 +102,7 @@ const timeline = computed<TimelineEvent[]>(() => {
           detail: current.episode.summary,
           reportId: null,
           derived: false,
+          edit: null,
           remove: null,
         },
       ],
@@ -118,6 +122,7 @@ const timeline = computed<TimelineEvent[]>(() => {
           detail: symptomMeta(item),
           reportId: null,
           derived: false,
+          edit: () => openSymptomForm(item),
           remove: () => void removeSymptom(item.id),
         },
       ],
@@ -135,7 +140,8 @@ const timeline = computed<TimelineEvent[]>(() => {
       detail: factDetail(fact),
       reportId: fact.reportId,
       derived: fact.derived,
-      /* 由报告展开出的条目跟随报告，不单独移除；要移除就移除整份报告 */
+      /* 由报告展开出的条目跟随报告，不单独编辑或移除；要改就改报告本身 */
+      edit: null,
       remove: fact.derived ? null : () => void unlinkFact(fact.factType, fact.factId),
     };
     const group = factGroups.get(groupKey);
@@ -160,6 +166,7 @@ const timeline = computed<TimelineEvent[]>(() => {
       detail: manualMedicationDetail(medication),
       reportId: null,
       derived: false,
+      edit: () => openMedicationForm(medication),
       remove: () => void removeMedication(medication.id),
     };
     const group = factGroups.get(groupKey);
@@ -190,6 +197,7 @@ const timeline = computed<TimelineEvent[]>(() => {
           detail: null,
           reportId: null,
           derived: false,
+          edit: null,
           remove: null,
         },
       ],
@@ -200,18 +208,103 @@ const timeline = computed<TimelineEvent[]>(() => {
 });
 
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
-const symptomForm = ref({ name: "", onsetAt: "", durationText: "", severity: "", bodyPart: "" });
+const symptomForm = ref(emptySymptomForm());
 const medicationForm = ref({ name: "", dose: "", frequency: "", route: "", startAt: "" });
+const editingSymptomId = ref<string | null>(null);
+const editingMedicationId = ref<string | null>(null);
+const quickInput = ref("");
 
-/** 两个补录表单互斥展开，避免同时占满屏幕。 */
-function openSymptomForm() {
+/** 当前本地时间 `YYYY-MM-DD HH:mm`；补录症状默认填"现在"，对应"刚量了体温"这种场景。 */
+function nowLocal() {
+  const current = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${current.getFullYear()}-${pad(current.getMonth() + 1)}-${pad(current.getDate())} ${pad(current.getHours())}:${pad(current.getMinutes())}`;
+}
+
+function emptySymptomForm() {
+  return {
+    name: "",
+    onsetAt: "",
+    durationText: "",
+    severity: "",
+    bodyPart: "",
+    measuredValue: "",
+    measuredUnit: "",
+    status: "present" as CaseSymptom["status"],
+  };
+}
+
+/** 两个补录表单互斥展开，避免同时占满屏幕；传 target 表示进入编辑。 */
+function openSymptomForm(target?: CaseSymptom) {
   medicationFormOpen.value = false;
+  quickInput.value = "";
+  if (target) {
+    editingSymptomId.value = target.id;
+    symptomForm.value = {
+      name: target.name,
+      onsetAt: target.onsetAt ?? "",
+      durationText: target.durationText ?? "",
+      severity: target.severity ?? "",
+      bodyPart: target.bodyPart ?? "",
+      measuredValue: target.measuredValue ?? "",
+      measuredUnit: target.measuredUnit ?? "",
+      status: target.status,
+    };
+    symptomFormOpen.value = true;
+    return;
+  }
+  editingSymptomId.value = null;
+  symptomForm.value = { ...emptySymptomForm(), onsetAt: nowLocal() };
   symptomFormOpen.value = !symptomFormOpen.value;
 }
 
-function openMedicationForm() {
+function closeSymptomForm() {
   symptomFormOpen.value = false;
+  editingSymptomId.value = null;
+  quickInput.value = "";
+}
+
+function openMedicationForm(target?: CaseMedication) {
+  symptomFormOpen.value = false;
+  if (target) {
+    editingMedicationId.value = target.id;
+    medicationForm.value = {
+      name: target.name,
+      dose: target.dose ?? "",
+      frequency: target.frequency ?? "",
+      route: target.route ?? "",
+      startAt: target.startAt ?? "",
+    };
+    medicationFormOpen.value = true;
+    return;
+  }
+  editingMedicationId.value = null;
+  medicationForm.value = { name: "", dose: "", frequency: "", route: "", startAt: "" };
   medicationFormOpen.value = !medicationFormOpen.value;
+}
+
+function closeMedicationForm() {
+  medicationFormOpen.value = false;
+  editingMedicationId.value = null;
+}
+
+/* 「快速输入」：把「5点半 37.5」这类口语拆成时间与测量值，供用户确认后填入表单。 */
+const quickDraft = computed(() => {
+  const text = quickInput.value.trim();
+  if (!text) return null;
+  const parsed = parseQuickSymptomInput(text);
+  if (!parsed.matched && !parsed.name) return null;
+  return parsed;
+});
+
+function applyQuickDraft() {
+  const parsed = quickDraft.value;
+  if (!parsed) return;
+  if (parsed.onsetAt) symptomForm.value.onsetAt = parsed.onsetAt;
+  if (parsed.name) symptomForm.value.name = parsed.name;
+  if (parsed.measuredValue) symptomForm.value.measuredValue = parsed.measuredValue;
+  if (parsed.measuredUnit) symptomForm.value.measuredUnit = parsed.measuredUnit;
+  quickInput.value = "";
 }
 
 const episodeStatusMeta: Record<CaseEpisode["status"], { label: string; chip: string }> = {
@@ -241,6 +334,23 @@ function formatDay(value: string | null) {
   return value ? value.slice(0, 10) : "";
 }
 
+/**
+ * 时间轴上的时间：带具体时刻时一并显示，今天/昨天用相对说法。
+ * 症状可以精确到分钟（体温这类），报告类只有日期，显示不变。
+ */
+function formatMoment(value: string | null) {
+  if (!value) return "";
+  const datePart = value.slice(0, 10);
+  const timePart = value.length > 10 ? value.slice(11, 16) : "";
+  const pad = (input: number) => String(input).padStart(2, "0");
+  const now = new Date();
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const yesterdayKey = `${yesterday.getFullYear()}-${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())}`;
+  const label = datePart === todayKey ? "今天" : datePart === yesterdayKey ? "昨天" : datePart;
+  return timePart ? `${label} ${timePart}` : label;
+}
+
 function episodeMeta(item: CaseEpisode) {
   const parts = [episodeStatusOf(item.status).label];
   const onset = formatDay(item.onsetAt);
@@ -251,7 +361,8 @@ function episodeMeta(item: CaseEpisode) {
 
 function symptomMeta(item: CaseSymptom) {
   const parts = [symptomStatusOf(item.status)];
-  if (item.onsetAt) parts.push(formatDay(item.onsetAt));
+  if (item.onsetAt) parts.push(formatMoment(item.onsetAt));
+  if (item.measuredValue) parts.push(`${item.measuredValue}${item.measuredUnit ?? ""}`);
   if (item.durationText) parts.push(`持续${item.durationText}`);
   if (item.severity) parts.push(item.severity);
   if (item.bodyPart) parts.push(item.bodyPart);
@@ -359,31 +470,34 @@ async function patchEpisode(patch: Record<string, unknown>, message: string) {
   }
 }
 
-async function addSymptom() {
+async function saveSymptom() {
   const episodeId = detail.value?.episode.id;
   if (!episodeId || saving.value) return;
   if (!symptomForm.value.name.trim()) {
     error.value = "症状名称不能为空";
     return;
   }
+  const editing = editingSymptomId.value;
   saving.value = true;
   error.value = "";
   try {
-    detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms`, {
-      method: "POST",
-      body: JSON.stringify({
-        name: symptomForm.value.name,
-        onsetAt: symptomForm.value.onsetAt || null,
-        durationText: symptomForm.value.durationText || null,
-        severity: symptomForm.value.severity || null,
-        bodyPart: symptomForm.value.bodyPart || null,
-      }),
+    const body = JSON.stringify({
+      name: symptomForm.value.name,
+      onsetAt: symptomForm.value.onsetAt || null,
+      durationText: symptomForm.value.durationText || null,
+      severity: symptomForm.value.severity || null,
+      bodyPart: symptomForm.value.bodyPart || null,
+      measuredValue: symptomForm.value.measuredValue || null,
+      measuredUnit: symptomForm.value.measuredUnit || null,
+      status: symptomForm.value.status,
     });
-    symptomForm.value = { name: "", onsetAt: "", durationText: "", severity: "", bodyPart: "" };
-    symptomFormOpen.value = false;
-    toast.show("症状已添加");
+    detail.value = editing
+      ? await request<CaseEpisodeDetail>(`symptoms/${editing}`, { method: "PUT", body })
+      : await request<CaseEpisodeDetail>(`episodes/${episodeId}/symptoms`, { method: "POST", body });
+    closeSymptomForm();
+    toast.show(editing ? "症状已更新" : "症状已添加");
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "添加症状失败";
+    error.value = cause instanceof Error ? cause.message : "保存症状失败";
   } finally {
     saving.value = false;
   }
@@ -407,47 +521,55 @@ async function importSymptomsFromReports() {
   }
 }
 
-async function addMedication() {
+async function saveMedication() {
   const episodeId = detail.value?.episode.id;
   if (!episodeId || saving.value) return;
   if (!medicationForm.value.name.trim()) {
     error.value = "药品名称不能为空";
     return;
   }
+  const editing = editingMedicationId.value;
   saving.value = true;
   error.value = "";
   try {
-    detail.value = await request<CaseEpisodeDetail>(`episodes/${episodeId}/medications`, {
-      method: "POST",
-      body: JSON.stringify({
-        name: medicationForm.value.name,
-        dose: medicationForm.value.dose || null,
-        frequency: medicationForm.value.frequency || null,
-        route: medicationForm.value.route || null,
-        startAt: medicationForm.value.startAt || null,
-      }),
+    const body = JSON.stringify({
+      name: medicationForm.value.name,
+      dose: medicationForm.value.dose || null,
+      frequency: medicationForm.value.frequency || null,
+      route: medicationForm.value.route || null,
+      startAt: medicationForm.value.startAt || null,
     });
-    medicationForm.value = { name: "", dose: "", frequency: "", route: "", startAt: "" };
-    medicationFormOpen.value = false;
-    toast.show("用药已添加");
+    detail.value = editing
+      ? await request<CaseEpisodeDetail>(`medications/${editing}`, { method: "PUT", body })
+      : await request<CaseEpisodeDetail>(`episodes/${episodeId}/medications`, { method: "POST", body });
+    closeMedicationForm();
+    toast.show(editing ? "用药已更新" : "用药已添加");
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "添加用药失败";
+    error.value = cause instanceof Error ? cause.message : "保存用药失败";
   } finally {
     saving.value = false;
   }
 }
 
-async function removeMedication(medicationId: string) {
+function removeMedication(medicationId: string) {
   if (saving.value) return;
-  saving.value = true;
-  try {
-    detail.value = await request<CaseEpisodeDetail>(`medications/${medicationId}`, { method: "DELETE" });
-    toast.show("用药已删除");
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "删除用药失败";
-  } finally {
-    saving.value = false;
-  }
+  confirmDialog.ask({
+    title: "删除用药",
+    message: "确定删除这条用药记录？删掉后需要重新录入。",
+    confirmText: "删除",
+    danger: true,
+    run: async () => {
+      saving.value = true;
+      try {
+        detail.value = await request<CaseEpisodeDetail>(`medications/${medicationId}`, { method: "DELETE" });
+        toast.show("用药已删除");
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : "删除用药失败";
+      } finally {
+        saving.value = false;
+      }
+    },
+  });
 }
 
 /** 删除病程（软删除）：报告与用药不动，只是不再归集到这段病程。 */
@@ -479,17 +601,25 @@ function removeEpisode(item: CaseEpisode) {
   });
 }
 
-async function removeSymptom(symptomId: string) {
+function removeSymptom(symptomId: string) {
   if (saving.value) return;
-  saving.value = true;
-  try {
-    detail.value = await request<CaseEpisodeDetail>(`symptoms/${symptomId}`, { method: "DELETE" });
-    toast.show("症状已删除");
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "删除症状失败";
-  } finally {
-    saving.value = false;
-  }
+  confirmDialog.ask({
+    title: "删除症状",
+    message: "确定删除这条症状记录？删掉后需要重新录入。",
+    confirmText: "删除",
+    danger: true,
+    run: async () => {
+      saving.value = true;
+      try {
+        detail.value = await request<CaseEpisodeDetail>(`symptoms/${symptomId}`, { method: "DELETE" });
+        toast.show("症状已删除");
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : "删除症状失败";
+      } finally {
+        saving.value = false;
+      }
+    },
+  });
 }
 
 watch(
@@ -592,19 +722,43 @@ onActivated(() => {
 
       <section v-if="symptomFormOpen" class="settings-band entry-list-card">
         <header>
-          <div><Plus :size="18" /><h3>添加症状</h3></div>
+          <div><Plus :size="18" /><h3>{{ editingSymptomId ? "编辑症状" : "添加症状" }}</h3></div>
         </header>
         <div class="entry-list-body">
-        <form class="entry-form" @submit.prevent="addSymptom">
+        <div v-if="!editingSymptomId" class="quick-entry">
+          <label>
+            <span>一句话记（回车填入）</span>
+            <input v-model="quickInput" placeholder="例如 5点半 37.5" @keydown.enter.prevent="applyQuickDraft" />
+          </label>
+          <p v-if="quickDraft" class="quick-entry-preview">
+            <span>识别为</span>
+            <strong>{{ quickDraft.name || "未提名称" }}</strong>
+            <template v-if="quickDraft.onsetAt"> · {{ quickDraft.onsetAt }}</template>
+            <template v-if="quickDraft.measuredValue"> · {{ quickDraft.measuredValue }}{{ quickDraft.measuredUnit }}</template>
+            <button type="button" @click="applyQuickDraft">填入</button>
+          </p>
+        </div>
+        <form class="entry-form" @submit.prevent="saveSymptom">
         <div class="form-grid">
           <label><span>症状名称</span><input v-model="symptomForm.name" placeholder="例如 咳嗽" /></label>
-          <label><span>出现日期</span><DateTimePicker v-model="symptomForm.onsetAt" aria-label="症状出现日期" /></label>
+          <label><span>出现时间</span><DateTimePicker v-model="symptomForm.onsetAt" aria-label="症状出现时间" show-time /></label>
+          <label>
+            <span>当前状态</span>
+            <select v-model="symptomForm.status">
+              <option value="present">存在</option>
+              <option value="improved">好转</option>
+              <option value="resolved">已消失</option>
+              <option value="unknown">不确定</option>
+            </select>
+          </label>
+          <label><span>数值</span><input v-model="symptomForm.measuredValue" placeholder="例如 37.5" /></label>
+          <label><span>单位</span><input v-model="symptomForm.measuredUnit" placeholder="例如 ℃" /></label>
           <label><span>持续时长</span><input v-model="symptomForm.durationText" placeholder="例如 半天、3天" /></label>
           <label><span>程度</span><input v-model="symptomForm.severity" placeholder="例如 轻、中、重" /></label>
           <label><span>部位</span><input v-model="symptomForm.bodyPart" placeholder="例如 咽喉" /></label>
         </div>
         <div class="form-actions">
-          <button type="button" @click="symptomFormOpen = false">取消</button>
+          <button type="button" @click="closeSymptomForm()">取消</button>
           <button class="primary-button" :disabled="saving">保存</button>
         </div>
         </form>
@@ -613,10 +767,10 @@ onActivated(() => {
 
       <section v-if="medicationFormOpen" class="settings-band entry-list-card">
         <header>
-          <div><Plus :size="18" /><h3>添加用药</h3></div>
+          <div><Plus :size="18" /><h3>{{ editingMedicationId ? "编辑用药" : "添加用药" }}</h3></div>
         </header>
         <div class="entry-list-body">
-        <form class="entry-form" @submit.prevent="addMedication">
+        <form class="entry-form" @submit.prevent="saveMedication">
         <div class="form-grid">
           <label><span>药品名称</span><input v-model="medicationForm.name" placeholder="例如 氨溴特罗口服溶液" /></label>
           <label><span>开始日期</span><DateTimePicker v-model="medicationForm.startAt" aria-label="用药开始日期" /></label>
@@ -625,7 +779,7 @@ onActivated(() => {
           <label><span>用法</span><input v-model="medicationForm.route" placeholder="例如 口服、外用" /></label>
         </div>
         <div class="form-actions">
-          <button type="button" @click="medicationFormOpen = false">取消</button>
+          <button type="button" @click="closeMedicationForm()">取消</button>
           <button class="primary-button" :disabled="saving">保存</button>
         </div>
         </form>
@@ -641,14 +795,15 @@ onActivated(() => {
           <div class="episode-event-body">
             <div class="episode-event-head">
               <span class="chip status-label">{{ event.badge }}</span>
-              <time v-if="event.at">{{ formatDay(event.at) }}</time>
+              <time v-if="event.at">{{ formatMoment(event.at) }}</time>
             </div>
             <div class="episode-event-items">
               <div v-for="item in event.items" :key="item.key" class="episode-event-item">
                 <strong>{{ item.title }}</strong>
                 <small v-if="item.detail">{{ item.detail }}</small>
-                <div v-if="item.reportId || item.remove || item.derived" class="row-actions">
+                <div v-if="item.reportId || item.edit || item.remove || item.derived" class="row-actions">
                   <button v-if="item.reportId" type="button" @click="previewReportId = item.reportId">查看报告</button>
+                  <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
                   <button v-if="item.remove" class="danger-action" type="button" :disabled="saving" @click="item.remove()">
                     <Trash2 :size="15" />移除
                   </button>
