@@ -7,10 +7,13 @@ import appIcon from "../assets/app-icon.png";
 import MemberSwitcher from "../components/MemberSwitcher.vue";
 import SetupGuideModal from "../components/SetupGuideModal.vue";
 import { useAppContext } from "../composables/useAppContext";
+import { useSoftKeyboardOpen } from "../composables/useSoftKeyboard";
 import { request } from "../utils/api";
 
 const app = useAppContext();
 const route = useRoute();
+/* 键盘弹起时收起底部导航（它会被顶到键盘上方，白占一块） */
+const keyboardOpen = useSoftKeyboardOpen();
 const memberSheetOpen = ref(false);
 const topbarSearchFocused = ref(false);
 const topbarSearchInput = ref<HTMLInputElement | null>(null);
@@ -135,7 +138,7 @@ const navItems = [
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'is-keyboard-open': keyboardOpen }">
     <aside class="sidebar">
       <div class="brand">
         <img :src="appIcon" alt="" />

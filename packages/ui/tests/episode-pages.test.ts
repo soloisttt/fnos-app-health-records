@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, type VueWrapper } from "@vue/test-utils";
 import { KeepAlive, Transition, defineComponent, h, nextTick, ref } from "vue";
 
@@ -24,6 +24,11 @@ beforeEach(() => {
   vi.resetModules();
   mocked.request.mockReset();
   localStorage.clear();
+});
+
+/* 个别用例会把系统时间钉死；失败时也要还原，免得影响后面的用例 */
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function stubApi() {
@@ -779,6 +784,11 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
   });
 
   it("医生开的药点一下就记服药量，一句话记也直接入库（都不弹表单）", async () => {
+    /* 这条用例跟「现在」有关：一句话记里的「三点五十」必须落在过去才允许入库
+       （记录时间不能填到未来），而断言里又写死了 2026-10-13。
+       把系统时间钉在那天的 15:55，否则每天 15:50 之前跑必红、日期一过更是必红。 */
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-13T15:55:00"));
     const episodeRow = {
       id: "ep-1",
       memberId: member.id,

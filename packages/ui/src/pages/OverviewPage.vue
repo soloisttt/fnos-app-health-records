@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { BellRing, ClipboardCheck, FileQuestion, FolderHeart, Inbox } from "@lucide/vue";
+import { Activity, BellRing, ClipboardCheck, ClipboardList, FileQuestion, FolderHeart, Inbox } from "@lucide/vue";
 import EmptyState from "../components/EmptyState.vue";
 import PullIndicator from "../components/PullIndicator.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
@@ -9,7 +9,14 @@ import { usePullRefresh } from "../composables/usePullRefresh";
 import { useRefreshOnActivate } from "../composables/useRefreshOnActivate";
 import { useToast } from "../composables/useToast";
 import { request } from "../utils/api";
-import type { OverviewSummary, Reminder, ReportSummary, ReportSummaryStats } from "../types/api";
+import type {
+  CaseEpisode,
+  DiseaseCatalogEntry,
+  OverviewSummary,
+  Reminder,
+  ReportSummary,
+  ReportSummaryStats,
+} from "../types/api";
 
 const app = useAppContext();
 const root = ref<HTMLElement | null>(null);
@@ -19,6 +26,8 @@ const stats = ref<ReportSummaryStats | null>(null);
 const recentReadyReports = ref<ReportSummary[]>([]);
 const unfiledReports = ref<ReportSummary[]>([]);
 const reminders = ref<Reminder[]>([]);
+const episodes = ref<CaseEpisode[]>([]);
+const catalogEntries = ref<DiseaseCatalogEntry[]>([]);
 const previewReportId = ref<string | null>(null);
 const toast = useToast();
 
@@ -27,6 +36,20 @@ const unfiledCount = computed(() => {
   if (!stats.value) return 0;
   return Math.max(0, stats.value.totalReports - stats.value.readyReports);
 });
+
+/* 概览不能只有报告：正在生病中（进行中的病程）和常犯什么病（诊断目录）同样该一眼看到 */
+const activeEpisodes = computed(() =>
+  episodes.value
+    .filter((item) => item.status === "active")
+    .sort((left, right) => (right.onsetAt ?? "").localeCompare(left.onsetAt ?? ""))
+    .slice(0, 3),
+);
+const topDiagnoses = computed(() =>
+  catalogEntries.value
+    .filter((item) => item.kind === "diagnosis")
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 4),
+);
 
 function formatDate(value: string | null) {
   if (!value) return "未识别日期";
@@ -41,6 +64,20 @@ function statusLabel(value: string) {
     queued: "排队中",
     failed: "失败"
   }[value] || value;
+}
+
+function episodeMeta(item: CaseEpisode) {
+  const parts: string[] = [];
+  if (item.onsetAt) parts.push(`${item.onsetAt.slice(0, 10)} 起`);
+  if (item.symptomCount) parts.push(`${item.symptomCount} 个症状`);
+  if (item.linkCount) parts.push(`${item.linkCount} 次就诊`);
+  return parts.join(" · ") || "未记录起病日期";
+}
+
+function diagnosisMeta(item: DiseaseCatalogEntry) {
+  const parts = [`${item.count} 次`];
+  if (item.lastAt) parts.push(`最近 ${item.lastAt.slice(0, 10)}`);
+  return parts.join(" · ");
 }
 
 function openReport(reportId: string) {
@@ -62,11 +99,18 @@ async function load(memberId: string, silent = false) {
   if (!silent) loading.value = true;
   error.value = "";
   try {
-    const overview = await request<OverviewSummary>(`overview?memberId=${encodeURIComponent(memberId)}`);
+    const [overview, episodeList, catalog] = await Promise.all([
+      request<OverviewSummary>(`overview?memberId=${encodeURIComponent(memberId)}`),
+      /* 病程与疾病目录是概览的补充信息：取不到（例如服务端版本较旧）也不该拖垮整个概览 */
+      request<CaseEpisode[]>(`episodes?memberId=${encodeURIComponent(memberId)}`).catch(() => []),
+      request<DiseaseCatalogEntry[]>(`disease-catalog?memberId=${encodeURIComponent(memberId)}`).catch(() => []),
+    ]);
     stats.value = overview.stats;
     recentReadyReports.value = overview.recentReadyReports;
     unfiledReports.value = overview.unfiledReports;
     reminders.value = overview.pendingReminders;
+    episodes.value = episodeList;
+    catalogEntries.value = catalog;
     await app.refreshReminderCount(memberId);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "概览加载失败";
@@ -107,6 +151,8 @@ watch(() => app.selectedMemberId.value, (memberId) => {
     recentReadyReports.value = [];
     unfiledReports.value = [];
     reminders.value = [];
+    episodes.value = [];
+    catalogEntries.value = [];
     return;
   }
   load(memberId).catch(() => {});
@@ -143,6 +189,42 @@ watch(() => app.selectedMemberId.value, (memberId) => {
           <span class="stat-icon"><BellRing :size="23" /></span>
           <span class="stat-text"><span>待处理提醒</span><strong>{{ pendingReminders.length }}</strong></span>
         </RouterLink>
+      </section>
+
+      <section class="overview-grid">
+        <section class="settings-band overview-card">
+          <header>
+            <div><ClipboardList :size="18" /><h3>进行中的病程</h3></div>
+            <RouterLink to="/episodes">全部</RouterLink>
+          </header>
+          <div class="overview-card-body">
+            <div v-if="!activeEpisodes.length" class="overview-empty-line">暂无进行中的病程</div>
+            <article v-for="item in activeEpisodes" :key="item.id" class="overview-row report-row">
+              <div>
+                <strong>{{ item.title }}</strong>
+                <span>{{ episodeMeta(item) }}</span>
+              </div>
+              <RouterLink to="/episodes">查看</RouterLink>
+            </article>
+          </div>
+        </section>
+
+        <section class="settings-band overview-card">
+          <header>
+            <div><Activity :size="18" /><h3>常见疾病</h3></div>
+            <RouterLink to="/diseases">全部</RouterLink>
+          </header>
+          <div class="overview-card-body">
+            <div v-if="!topDiagnoses.length" class="overview-empty-line">暂无诊断记录</div>
+            <article v-for="item in topDiagnoses" :key="item.name" class="overview-row report-row">
+              <div>
+                <strong>{{ item.name }}</strong>
+                <span>{{ diagnosisMeta(item) }}</span>
+              </div>
+              <RouterLink to="/diseases">查看</RouterLink>
+            </article>
+          </div>
+        </section>
       </section>
 
       <section v-if="pendingReminders.length" class="settings-band overview-card">
