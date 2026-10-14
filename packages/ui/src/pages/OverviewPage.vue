@@ -205,13 +205,19 @@ watch(() => app.selectedMemberId.value, (memberId) => {
           </header>
           <div class="overview-card-body">
             <div v-if="!activeEpisodes.length" class="overview-empty-line">暂无进行中的病程</div>
-            <article v-for="item in activeEpisodes" :key="item.id" class="overview-row report-row">
+            <!-- 整行可点（不必去找右边那个「查看」），并带 ?episode= 直接展开这一条 -->
+            <RouterLink
+              v-for="item in activeEpisodes"
+              :key="item.id"
+              class="overview-row report-row"
+              :to="{ path: '/episodes', query: { episode: item.id } }"
+            >
               <div>
                 <strong>{{ item.title }}</strong>
                 <span>{{ episodeMeta(item) }}</span>
               </div>
-              <RouterLink to="/episodes">查看</RouterLink>
-            </article>
+              <span class="overview-row-go">查看</span>
+            </RouterLink>
           </div>
         </section>
 
@@ -222,13 +228,13 @@ watch(() => app.selectedMemberId.value, (memberId) => {
           </header>
           <div class="overview-card-body">
             <div v-if="!topDiagnoses.length" class="overview-empty-line">暂无诊断记录</div>
-            <article v-for="item in topDiagnoses" :key="item.name" class="overview-row report-row">
+            <RouterLink v-for="item in topDiagnoses" :key="item.name" class="overview-row report-row" to="/diseases">
               <div>
                 <strong>{{ item.name }}</strong>
                 <span>{{ diagnosisMeta(item) }}</span>
               </div>
-              <RouterLink to="/diseases">查看</RouterLink>
-            </article>
+              <span class="overview-row-go">查看</span>
+            </RouterLink>
           </div>
         </section>
       </section>

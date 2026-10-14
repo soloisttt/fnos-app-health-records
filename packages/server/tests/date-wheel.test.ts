@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { dateWheelStep, dateWheelIndex, clampCalendarDay } from '../../ui/src/utils/date-wheel';
+import { dateWheelStep, clampWheelIndex, clampCalendarDay } from '../../ui/src/utils/date-wheel';
 
 test('mouse wheel notches and large deltas advance at most one item', () => {
   for (const [delta, mode] of [[120, 0], [900, 0], [3, 1], [1, 2]]) {
@@ -23,11 +23,22 @@ test('trackpad deltas accumulate and reversal drops the previous direction', () 
   assert.equal(dateWheelStep(0, 0, 0).step, 0);
 });
 
-test('buffered columns wrap safely in both directions, including long gestures', () => {
-  assert.equal(dateWheelIndex(-1, 12), 11);
-  assert.equal(dateWheelIndex(12, 12), 0);
-  assert.equal(dateWheelIndex(-25, 12), 11);
-  assert.equal(dateWheelIndex(61, 60), 1);
+test('滚轮不循环：滑到头就停住，越界索引夹到两端', () => {
+  /* 以前滑到 2026 年下面会蹦出 1900 年 —— 现在到顶/到底就是停住 */
+  assert.equal(clampWheelIndex(-1, 12), 0);
+  assert.equal(clampWheelIndex(12, 12), 11);
+  assert.equal(clampWheelIndex(-25, 12), 0);
+  assert.equal(clampWheelIndex(61, 60), 59);
+  assert.equal(clampWheelIndex(3, 60), 3);
+  assert.equal(clampWheelIndex(0, 0), 0);
+});
+
+test('日期滚轮已经没有首尾循环缓冲了', () => {
+  const source = readFileSync('packages/ui/src/components/DateTimePicker.vue', 'utf8');
+  assert.doesNotMatch(source, /BUFFER_SIZE|getBufferedOptions|getBufSize/);
+  assert.match(source, /clampWheelIndex/);
+  /* 五项（年 / 月 / 日 / 时 / 分）都直接渲染原数组 */
+  assert.equal((source.match(/class="datetime-wheel-item" v-for=/g) || []).length, 5);
 });
 
 test('month and year changes preserve valid days and clamp leap dates', () => {

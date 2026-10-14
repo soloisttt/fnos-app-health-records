@@ -91,6 +91,27 @@ const DOSE_PATTERN = /(\d+(?:\.\d+)?)\s*(ml|毫升|mg|毫克|克|片|粒|袋|支
 /** 服药动词 + 剂量同时出现也算用药（盖住「吃美林5ml」这种没写剂型的）。 */
 const TAKE_VERB_PATTERN = /(吃|服用|口服|冲服|服|喂|喝|滴|喷)/;
 
+/* 「吃了布洛芬」——没有剂量、也没有「混悬液」这类剂型词，但明显是在记吃药。
+   前提是别把「吃」当条件状语：「吃药后咳嗽」重点在咳嗽，不该记成用药。 */
+const TAKE_AS_PRECONDITION_PATTERN =
+  /(?:吃|服用|口服|冲服|服|喂|喝|滴|喷)[^，,。；;！!？?]{0,8}(?:后|之后|过后|然后|完就|完又|完再)/;
+/** 「吃了 XXX」里，XXX 明显不是药的东西：数量词、时间词、食物饮料。 */
+const NON_DRUG_OBJECT_PATTERN =
+  /^(?:\d|[一二两三四五六七八九十百千万几半]|次|顿|口|点|些|完|好|奶|母乳|奶粉|水|汤|饭|粥|面|米|果|菜|肉|蛋|东|零)/;
+
+/**
+ * 从「吃了 / 服用了 / 喂了 XXX」里抠出药名。
+ * 抠不出来、或抠出来明显不是药，就返回 null（继续按症状处理，用户改一下即可）。
+ */
+function takenDrugName(text: string): string | null {
+  if (TAKE_AS_PRECONDITION_PATTERN.test(text)) return null;
+  const match = text.match(/(?:吃|服用|口服|冲服|服|喂)了?\s*([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9]{1,11})/);
+  if (!match) return null;
+  const name = match[1]!;
+  if (name === "药" || NON_DRUG_OBJECT_PATTERN.test(name)) return null;
+  return name;
+}
+
 /** 清理药名时只剥掉**开头**的服药动词：「吃美林」→「美林」。
     「氨溴特罗口服溶液」里的「口服」是药名的一部分，不能动。 */
 const LEADING_TAKE_VERB_PATTERN = /^\s*(?:吃|服用|口服|冲服|服|喂|喝|滴|喷)了?\s*/;
@@ -213,9 +234,11 @@ export function parseQuickEntry(rawInput: string, now: Date = new Date()): Quick
   const dose = rest.match(DOSE_PATTERN);
   const frequency = FREQUENCY_PATTERNS.map((pattern) => rest.match(pattern)?.[0]).find(Boolean) ?? null;
   const route = rest.match(ROUTE_PATTERN)?.[0] ?? null;
+  const takenDrug = takenDrugName(rest);
   const isMedication =
     MEDICATION_FORM_PATTERN.test(rest) ||
     (TAKE_VERB_PATTERN.test(rest) && Boolean(dose)) ||
+    Boolean(takenDrug) ||
     Boolean(frequency && dose);
 
   if (isMedication) {
@@ -223,7 +246,8 @@ export function parseQuickEntry(rawInput: string, now: Date = new Date()): Quick
     draft.dose = dose ? `${dose[1]}${(dose[2] ?? "").toLowerCase()}` : null;
     draft.frequency = frequency ? frequency.replace(/\s+/g, "") : null;
     draft.route = route;
-    if (dose || frequency) draft.matched = true;
+    /* 「吃了布洛芬」这种没写剂量也没写剂型的，认出药名就算识别到了 */
+    if (dose || frequency || takenDrug) draft.matched = true;
     const name = cleanName(
       rest
         .replace(DOSE_PATTERN, " ")

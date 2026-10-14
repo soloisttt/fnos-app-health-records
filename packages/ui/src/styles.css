@@ -321,6 +321,11 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
 }
 .overview-row.report-row { cursor: pointer; transition: background .15s, border-color .15s; }
 .overview-row.report-row:hover { background: var(--brand-softer); border-color: var(--brand-soft-hover); }
+/* 概览里整行可点的卡片（进行中的病程 / 常见疾病）：点哪儿都能进去，不必去找右边那个「查看」 */
+a.overview-row { text-decoration: none; color: inherit; }
+a.overview-row > .overview-row-go {
+  border: 0; background: transparent; color: var(--brand-strong); font-size: 12px; font-weight: 800; flex: 0 0 auto;
+}
 
 /* 桌面端概览放大（触屏保持紧凑） */
 @media (min-width: 761px) {

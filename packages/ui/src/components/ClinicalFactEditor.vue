@@ -258,7 +258,7 @@ async function save() {
             <label class="field-wide"><span>操作名称</span><input v-model="form.procedureName" required /></label>
             <label><span>操作编码</span><input v-model="form.procedureCode" /></label>
             <label><span>部位</span><input v-model="form.bodyPart" /></label>
-            <label><span>执行时间</span><DateTimePicker v-model="form.performedAt" show-time disable-future aria-label="执行时间" /></label>
+            <label><span>执行时间</span><DateTimePicker v-model="form.performedAt" show-time disable-future default-today aria-label="执行时间" /></label>
             <label class="field-wide"><span>结果原文</span><textarea v-model="form.resultText" rows="3"></textarea></label>
           </div>
           <div v-else-if="type === 'vaccination'" class="form-grid">
@@ -266,7 +266,7 @@ async function save() {
             <label><span>剂次</span><input v-model="form.doseNumber" /></label>
             <label><span>厂家</span><input v-model="form.manufacturer" /></label>
             <label><span>批号</span><input v-model="form.lotNumber" /></label>
-            <label><span>接种时间</span><DateTimePicker v-model="form.administeredAt" show-time disable-future aria-label="接种时间" /></label>
+            <label><span>接种时间</span><DateTimePicker v-model="form.administeredAt" show-time disable-future default-today aria-label="接种时间" /></label>
             <label><span>接种部位</span><input v-model="form.administrationSite" /></label>
             <label><span>下次接种时间</span><DateTimePicker v-model="form.nextDueAt" show-time aria-label="下次接种时间" /></label>
           </div>

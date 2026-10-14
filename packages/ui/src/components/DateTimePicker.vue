@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch, useId } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, useId } from "vue";
 import { CalendarDays, Check, X } from "@lucide/vue";
 import { useScrollLock } from "../composables/useScrollLock";
-import { DATE_WHEEL_ITEM_HEIGHT, dateWheelStep, dateWheelIndex, clampCalendarDay } from "../utils/date-wheel";
+import { DATE_WHEEL_ITEM_HEIGHT, dateWheelStep, clampWheelIndex, clampCalendarDay } from "../utils/date-wheel";
 
 const props = defineProps<{
   modelValue: string | null;
@@ -23,6 +23,12 @@ const props = defineProps<{
    * **不要**用在本来就该是未来的字段上（提醒日期、下次接种时间）。
    */
   disableFuture?: boolean;
+  /**
+   * 「已经发生过」的日期字段：没填过就**默认填今天**，省得每次打开表单都要自己点一遍。
+   * 用在新建病程的起病日期、操作 / 疫苗的执行时间这类地方；
+   * **不要**用在出生日期（填今天没意义）、报告已有的日期、列表筛选这些地方。
+   */
+  defaultToday?: boolean;
 }>();
 const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 
@@ -106,9 +112,21 @@ watch(open, (value) => {
   }
 });
 
+/**
+ * 「没填过就默认今天」：挂载时补一次。
+ * 用到它的表单都是 `v-if` 展开的，每次打开都会重新挂载，所以不必再监听别的。
+ */
+function applyDefaultToday() {
+  if (!props.defaultToday || props.disabled || props.modelValue) return;
+  const now = new Date();
+  const day = `${now.getFullYear()}-${padZero(now.getMonth() + 1)}-${padZero(now.getDate())}`;
+  emit("update:modelValue", props.showTime ? `${day}T${padZero(now.getHours())}:${padZero(now.getMinutes())}` : day);
+}
+onMounted(applyDefaultToday);
+watch(() => props.defaultToday, (value) => { if (value) applyDefaultToday(); });
+
 // 生成滚轮数据
-const years = computed(() => {
-  const configuredMin = Number.isInteger(props.minYear) ? Number(props.minYear) : 1900;
+const years = computed(() => {  const configuredMin = Number.isInteger(props.minYear) ? Number(props.minYear) : 1900;
   let configuredMax = Number.isInteger(props.maxYear) ? Number(props.maxYear) : currentYear + 20;
   if (props.disableFuture) configuredMax = Math.min(configuredMax, currentYear);
   const existingYear = parsedDate.value?.year;
@@ -278,27 +296,13 @@ let wheelRemainder: Partial<Record<WheelType, number>> = {};
 let wheelLastAt: Partial<Record<WheelType, number>> = {};
 const touching = new Set<WheelType>();
 let drag: { type: WheelType; element: HTMLElement; pointerId: number; startY: number; startTop: number } | null = null;
-const BUFFER_SIZE = 100; // 循环缓冲项数量（足够大以实现平滑循环）
 
-// 获取缓冲后的选项数组
-function getBufferedOptions(type: "year" | "month" | "day" | "hour" | "minute"): number[] {
-  let options: number[];
-  switch (type) {
-    case "year": options = years.value; break;
-    case "month": options = months.value; break;
-    case "day": options = days.value; break;
-    case "hour": options = hours.value; break;
-    case "minute": options = minutes.value; break;
-  }
-  // 关键：缓冲区大小不超过原始数组长度，避免重复
-  const bufSize = Math.min(BUFFER_SIZE, options.length);
-  const front = options.slice(-bufSize);
-  const back = options.slice(0, bufSize);
-  return [...front, ...options, ...back];
-}
-
-// 获取原始选项数组
-function getOriginalOptions(type: "year" | "month" | "day" | "hour" | "minute"): number[] {
+/*
+ * 滚轮**不做循环**：第一项上面就是头、最后一项下面就是底，滑到头就停住。
+ * 以前用「首尾各补一段」的循环缓冲实现无限滚动，结果滑到 2026 年下面直接蹦出 1900 年，
+ * 用户以为坏了。两侧的 `--datetime-wheel-center-offset` 内边距保证首尾两项也能滚到正中。
+ */
+function getOptions(type: WheelType): number[] {
   switch (type) {
     case "year": return years.value;
     case "month": return months.value;
@@ -306,12 +310,6 @@ function getOriginalOptions(type: "year" | "month" | "day" | "hour" | "minute"):
     case "hour": return hours.value;
     case "minute": return minutes.value;
   }
-}
-
-// 获取实际缓冲区大小
-function getBufSize(type: "year" | "month" | "day" | "hour" | "minute"): number {
-  const options = getOriginalOptions(type);
-  return Math.min(BUFFER_SIZE, options.length);
 }
 
 // 更新选中值
@@ -336,15 +334,15 @@ function getSelectedValue(type: "year" | "month" | "day" | "hour" | "minute"): n
   }
 }
 
-// Native touch scrolling only reads the selection. Recenter the loop after
+// Native touch scrolling only reads the selection. Recenter the column after
 // scrolling settles, never while momentum is still moving the column.
 function onScroll(e: Event, type: WheelType) {
   const el = e.target as HTMLElement;
   if (!open.value || Math.abs(el.scrollTop - (positioned[type] ?? -10000)) < 0.5) return;
   delete positioned[type];
-  const options = getOriginalOptions(type);
-  const index = dateWheelIndex(Math.round(el.scrollTop / ITEM_HEIGHT) - getBufSize(type), options.length);
-  updateSelectedValue(type, options[index]);
+  const options = getOptions(type);
+  const index = clampWheelIndex(Math.round(el.scrollTop / ITEM_HEIGHT), options.length);
+  updateSelectedValue(type, options[index]!);
   clearTimeout(scrollTimers[type]);
   scrollTimers[type] = setTimeout(() => {
     if (!touching.has(type) && drag?.type !== type) snapToNearest(type);
@@ -354,9 +352,9 @@ function onScroll(e: Event, type: WheelType) {
 function positionColumn(type: WheelType) {
   const el = wheelRefs[type].value;
   if (!el || !open.value) return;
-  const index = getOriginalOptions(type).indexOf(getSelectedValue(type));
+  const index = getOptions(type).indexOf(getSelectedValue(type));
   if (index < 0) return;
-  const top = (index + getBufSize(type)) * ITEM_HEIGHT;
+  const top = index * ITEM_HEIGHT;
   positioned[type] = top;
   el.scrollTop = top;
 }
@@ -366,7 +364,7 @@ function syncCalendarDays() {
   displayedYear.value = selectedYear.value;
   displayedMonth.value = selectedMonth.value;
   selectedDay.value = clampCalendarDay(selectedYear.value, selectedMonth.value, selectedDay.value);
-  // Even an unchanged day needs repositioning when the front buffer shrinks.
+  /* 选项数量变了（换了月份、或"不许选未来"把日期截短）就要重新定位 */
   if (days.value.length !== previousLength) {
     clearTimeout(scrollTimers.day);
     nextTick(() => positionColumn("day"));
@@ -390,9 +388,9 @@ function onWheel(event: WheelEvent, type: WheelType) {
   wheelRemainder[type] = result.remainder;
   wheelLastAt[type] = now;
   if (!result.step) return;
-  const options = getOriginalOptions(type);
-  const index = dateWheelIndex(options.indexOf(getSelectedValue(type)) + result.step, options.length);
-  updateSelectedValue(type, options[index]);
+  const options = getOptions(type);
+  const index = clampWheelIndex(options.indexOf(getSelectedValue(type)) + result.step, options.length);
+  updateSelectedValue(type, options[index]!);
   snapToNearest(type);
 }
 
@@ -419,8 +417,9 @@ function moveDrag(event: PointerEvent) {
   const { element, startTop, startY, type } = drag;
   element.scrollTop = startTop + startY - event.clientY;
   // Read immediately: pointerup can precede the browser's next scroll event.
-  const options = getOriginalOptions(type);
-  updateSelectedValue(type, options[dateWheelIndex(Math.round(element.scrollTop / ITEM_HEIGHT) - getBufSize(type), options.length)]);
+  const options = getOptions(type);
+  const index = clampWheelIndex(Math.round(element.scrollTop / ITEM_HEIGHT), options.length);
+  updateSelectedValue(type, options[index]!);
 }
 
 function releaseDrag() {
@@ -552,7 +551,7 @@ onBeforeUnmount(() => {
                 <div class="wheel-scroll-wrapper">
                   <div ref="wheelYear" class="wheel-scroll"
                     @pointerdown="startDrag($event, 'year')" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @scroll="onScroll($event, 'year')" @wheel="onWheel($event, 'year')" @touchstart.passive="touching.add('year')" @touchend="endTouch('year')" @touchcancel="endTouch('year')">
-                    <div class="datetime-wheel-item" v-for="(y, idx) in getBufferedOptions('year')" :key="`year-${idx}`" :class="{ selected: y === selectedYear }">{{ y }}</div>
+                    <div class="datetime-wheel-item" v-for="y in years" :key="`year-${y}`" :class="{ selected: y === selectedYear }">{{ y }}</div>
                   </div>
                 </div>
               </div>
@@ -561,7 +560,7 @@ onBeforeUnmount(() => {
                 <div class="wheel-scroll-wrapper">
                   <div ref="wheelMonth" class="wheel-scroll"
                     @pointerdown="startDrag($event, 'month')" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @scroll="onScroll($event, 'month')" @wheel="onWheel($event, 'month')" @touchstart.passive="touching.add('month')" @touchend="endTouch('month')" @touchcancel="endTouch('month')">
-                    <div class="datetime-wheel-item" v-for="(m, idx) in getBufferedOptions('month')" :key="`month-${idx}`" :class="{ selected: m === selectedMonth }">{{ padZero(m) }}</div>
+                    <div class="datetime-wheel-item" v-for="m in months" :key="`month-${m}`" :class="{ selected: m === selectedMonth }">{{ padZero(m) }}</div>
                   </div>
                 </div>
               </div>
@@ -570,7 +569,7 @@ onBeforeUnmount(() => {
                 <div class="wheel-scroll-wrapper">
                   <div ref="wheelDay" class="wheel-scroll"
                     @pointerdown="startDrag($event, 'day')" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @scroll="onScroll($event, 'day')" @wheel="onWheel($event, 'day')" @touchstart.passive="touching.add('day')" @touchend="endTouch('day')" @touchcancel="endTouch('day')">
-                    <div class="datetime-wheel-item" v-for="(d, idx) in getBufferedOptions('day')" :key="`day-${idx}`" :class="{ selected: d === selectedDay }">{{ padZero(d) }}</div>
+                    <div class="datetime-wheel-item" v-for="d in days" :key="`day-${d}`" :class="{ selected: d === selectedDay }">{{ padZero(d) }}</div>
                   </div>
                 </div>
               </div>
@@ -580,7 +579,7 @@ onBeforeUnmount(() => {
                   <div class="wheel-scroll-wrapper">
                     <div ref="wheelHour" class="wheel-scroll"
                     @pointerdown="startDrag($event, 'hour')" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @scroll="onScroll($event, 'hour')" @wheel="onWheel($event, 'hour')" @touchstart.passive="touching.add('hour')" @touchend="endTouch('hour')" @touchcancel="endTouch('hour')">
-                      <div class="datetime-wheel-item" v-for="(h, idx) in getBufferedOptions('hour')" :key="`hour-${idx}`" :class="{ selected: h === selectedHour }">{{ padZero(h) }}</div>
+                      <div class="datetime-wheel-item" v-for="h in hours" :key="`hour-${h}`" :class="{ selected: h === selectedHour }">{{ padZero(h) }}</div>
                     </div>
                   </div>
                 </div>
@@ -589,7 +588,7 @@ onBeforeUnmount(() => {
                   <div class="wheel-scroll-wrapper">
                     <div ref="wheelMinute" class="wheel-scroll"
                     @pointerdown="startDrag($event, 'minute')" @pointermove="moveDrag" @pointerup="endDrag" @pointercancel="endDrag" @lostpointercapture="endDrag" @scroll="onScroll($event, 'minute')" @wheel="onWheel($event, 'minute')" @touchstart.passive="touching.add('minute')" @touchend="endTouch('minute')" @touchcancel="endTouch('minute')">
-                      <div class="datetime-wheel-item" v-for="(min, idx) in getBufferedOptions('minute')" :key="`minute-${idx}`" :class="{ selected: min === selectedMinute }">{{ padZero(min) }}</div>
+                      <div class="datetime-wheel-item" v-for="min in minutes" :key="`minute-${min}`" :class="{ selected: min === selectedMinute }">{{ padZero(min) }}</div>
                     </div>
                   </div>
                 </div>

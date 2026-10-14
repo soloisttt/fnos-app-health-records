@@ -165,4 +165,24 @@ describe("快速记录解析 · 用药", () => {
     expect(result.kind).toBe("symptom");
     expect(result.name).toBe("吃药后咳嗽");
   });
+
+  it("用户实测：吃了布洛芬（没剂量也没剂型词）也算服药", () => {
+    const result = parseQuickEntry("昨天17:30 吃了布洛芬", NOW);
+    expect(result.kind).toBe("medication");
+    expect(result.name).toBe("布洛芬");
+    expect(result.onsetAt).toBe("2026-10-12 17:30");
+    /* 认出药名就算「识别到了」，预览要亮出来 */
+    expect(result.matched).toBe(true);
+  });
+
+  it("「吃了 / 服用了 / 喂了」都认，且不会把动词留在药名里", () => {
+    expect(parseQuickEntry("服用了美林", NOW)).toMatchObject({ kind: "medication", name: "美林" });
+    expect(parseQuickEntry("喂了泰诺林", NOW)).toMatchObject({ kind: "medication", name: "泰诺林" });
+  });
+
+  it("「吃了两次」「喝了奶」这类不能被当成服药", () => {
+    expect(parseQuickEntry("吃了两次", NOW).kind).toBe("symptom");
+    expect(parseQuickEntry("喝了奶", NOW).kind).toBe("symptom");
+    expect(parseQuickEntry("吃了点东西", NOW).kind).toBe("symptom");
+  });
 });

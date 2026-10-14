@@ -1,11 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowMount } from "@vue/test-utils";
-import { nextTick } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 
 /*
  * 概览页原先只汇总报告；现在要同时能看到「正在生病中」和「常犯什么病」。
  * 病程与疾病目录走既有接口，取不到时（服务端版本较旧）也不能拖垮整个概览。
  */
+
+/* RouterLink 的替身：渲染成 <a>，把目标路径与参数放进 data-*，方便断言"整行可点、点到哪" */
+const RouterLinkStub = defineComponent({
+  props: { to: { type: [String, Object], default: "" } },
+  setup(props, { slots }) {
+    const target = typeof props.to === "string" ? { path: props.to, query: {} } : (props.to as Record<string, unknown>);
+    return () =>
+      h(
+        "a",
+        {
+          class: "router-link-stub",
+          "data-path": String(target.path ?? ""),
+          "data-query": JSON.stringify(target.query ?? {}),
+        },
+        slots.default?.(),
+      );
+  },
+});
 
 const mocked = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("../src/utils/api", () => ({
@@ -85,7 +103,9 @@ async function mountOverview() {
 
   const OverviewPage = (await import("../src/pages/OverviewPage.vue")).default;
   /* EmptyState 不能被 shallowMount 桩掉，否则空状态的文案不参与 text() 断言 */
-  const wrapper = shallowMount(OverviewPage, { global: { stubs: { RouterLink: true, EmptyState: false } } });
+  const wrapper = shallowMount(OverviewPage, {
+    global: { stubs: { RouterLink: RouterLinkStub, EmptyState: false } },
+  });
   await settle();
   return wrapper;
 }
@@ -202,6 +222,32 @@ describe("概览的空状态不只看报告", () => {
     const wrapper = await mountOverview();
 
     expect(wrapper.text()).toContain("还没有健康档案");
+    wrapper.unmount();
+  });
+});
+
+/* 以前只有右边那个小小的「查看」能点，很容易点不中 */
+describe("概览里的卡片整行可点", () => {
+  it("「进行中的病程」点哪都能进去，并带上 ?episode= 直接展开那一条", async () => {
+    stubApi({ episodes: [episode({ id: "ep-7", title: "10月呼吸道感染", symptomCount: 2 })] });
+    const wrapper = await mountOverview();
+
+    const row = wrapper.findAll("a.overview-row").find((item) => item.attributes("data-path") === "/episodes");
+    expect(row).toBeTruthy();
+    expect(row!.text()).toContain("10月呼吸道感染");
+    /* 「查看」还在，但只是行内的一句提示，整行都是链接 */
+    expect(row!.text()).toContain("查看");
+    expect(JSON.parse(row!.attributes("data-query")!)).toEqual({ episode: "ep-7" });
+    wrapper.unmount();
+  });
+
+  it("「常见疾病」也是整行可点", async () => {
+    stubApi({ catalog: [{ kind: "diagnosis", name: "支气管炎", count: 2, lastAt: "2026-09-20" }] });
+    const wrapper = await mountOverview();
+
+    const row = wrapper.findAll("a.overview-row").find((item) => item.attributes("data-path") === "/diseases");
+    expect(row).toBeTruthy();
+    expect(row!.text()).toContain("支气管炎");
     wrapper.unmount();
   });
 });

@@ -40,6 +40,7 @@ import { temperatureLevel } from "../utils/temperature";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
+import { useRoute, type RouteLocationNormalizedLoaded } from "vue-router";
 
 const app = useAppContext();
 const toast = useToast();
@@ -1389,8 +1390,16 @@ function removeIntake(intakeId: string) {
   });
 }
 
-async function load(memberId: string, keepDetailId?: string) {
-  if (!memberId) {
+/* 概览页点「进行中的病程」会带 `?episode=<id>` 过来，直接展开那一条，
+   不用进了列表再自己找。本页的测试是直接 mount、不带 router，所以 route 可能是 undefined。 */
+const route: RouteLocationNormalizedLoaded | undefined = useRoute();
+
+function deepLinkEpisodeId(): string {
+  const value = route?.query?.episode;
+  return typeof value === "string" ? value : "";
+}
+
+async function load(memberId: string, keepDetailId?: string) {  if (!memberId) {
     detail.value = null;
     episodes.value = [];
     loading.value = false;
@@ -1600,8 +1609,8 @@ function removeSymptom(symptomId: string) {
 }
 
 watch(
-  () => app.selectedMemberId.value,
-  (memberId) => void load(memberId),
+  () => [app.selectedMemberId.value, deepLinkEpisodeId()] as const,
+  ([memberId, episodeId]) => void load(memberId, episodeId || undefined),
   { immediate: true },
 );
 
@@ -1615,7 +1624,7 @@ onActivated(() => {
   }
   const memberId = app.selectedMemberId.value;
   if (!memberId) return;
-  void load(memberId, detail.value?.episode.id);
+  void load(memberId, deepLinkEpisodeId() || detail.value?.episode.id);
 });
 </script>
 
@@ -1679,7 +1688,7 @@ onActivated(() => {
         <div class="form-grid">
           <label>
             <span>起病日期</span>
-            <DateTimePicker v-model="onsetDraft" disable-future aria-label="起病日期" />
+            <DateTimePicker v-model="onsetDraft" disable-future default-today aria-label="起病日期" />
           </label>
           <label>
             <span>病因（自己填写，系统不做推断）</span>
@@ -2097,7 +2106,7 @@ onActivated(() => {
           <form class="entry-form" @submit.prevent="createEpisode">
             <div class="form-grid">
               <label><span>病程标题</span><input v-model="episodeForm.title" placeholder="例如 10月呼吸道感染" /></label>
-              <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" disable-future aria-label="起病日期" /></label>
+              <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" disable-future default-today aria-label="起病日期" /></label>
               <label><span>病因（可留空）</span><input v-model="episodeForm.causeText" placeholder="例如 受凉" /></label>
             </div>
             <div class="form-actions">
