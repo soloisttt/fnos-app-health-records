@@ -772,12 +772,12 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     await settle();
     expect(wrapper.find(".episode-summary-text").exists()).toBe(false);
 
-    /* 「病程信息」卡已去掉：病因、改病因、标记痊愈都收到标题区，状态做成标题旁药丸 */
+    /* 「病程信息」卡已去掉：「编辑」（起病日期 + 病因）、标记痊愈都收到标题区，状态做成标题旁药丸 */
     const intro = wrapper.find(".episode-detail-intro");
     expect(intro.exists()).toBe(true);
     expect(intro.text()).toContain("病因");
     expect(intro.text()).toContain("受凉");
-    expect(intro.text()).toContain("改病因");
+    expect(intro.text()).toContain("编辑");
     expect(intro.text()).toContain("标记痊愈");
     expect(wrapper.find(".episode-title-chip").text()).toBe("进行中");
     expect(wrapper.find(".episode-info-line").exists()).toBe(false);
@@ -1190,15 +1190,15 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     await wrapper.find(".entry-row-open").trigger("click");
     await settle();
 
-    /* 「改病因 / 标记痊愈」进了标题行，排在状态药丸前面，不再挂在右上角那组里 */
+    /* 「编辑 / 标记痊愈」进了标题行，排在状态药丸前面，不再挂在右上角那组里 */
     const title = wrapper.find(".episode-title");
     expect(title.exists()).toBe(true);
     const titleHtml = title.html();
-    expect(titleHtml).toContain("改病因");
+    expect(titleHtml).toContain("编辑");
     expect(titleHtml).toContain("恢复进行中");
-    expect(titleHtml.indexOf("改病因")).toBeLessThan(titleHtml.indexOf("episode-title-chip"));
+    expect(titleHtml.indexOf("编辑")).toBeLessThan(titleHtml.indexOf("episode-title-chip"));
     expect(titleHtml.indexOf("恢复进行中")).toBeLessThan(titleHtml.indexOf("episode-title-chip"));
-    expect(wrapper.find(".episode-detail-actions").html()).not.toContain("改病因");
+    expect(wrapper.find(".episode-detail-actions").html()).not.toContain("编辑");
     expect(wrapper.find(".episode-title-chip").text()).toBe("已痊愈");
 
     /* 痊愈总结：吃了几次药、症状怎么变、体温怎么变 */
@@ -1214,6 +1214,75 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(recap.text()).toContain("布洛芬混悬液");
     /* 体温数值按高低上色 */
     expect(recap.findAll(".episode-temp-high").length).toBeGreaterThan(0);
+  });
+
+  it("标题区的「编辑」能改起病日期（病因照旧能改）", async () => {
+    const row = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: "受凉",
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 0,
+      linkCount: 0,
+    };
+    const puts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const payload = () => ({ episode: row, symptoms: [], medications: [], intakes: [], links: [], linkedFacts: [] });
+    mocked.request.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (init?.method === "PUT") {
+        puts.push({ path, body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown> });
+        return payload();
+      }
+      if (path.startsWith("episodes?")) return [row];
+      if (path.startsWith("episodes/")) return payload();
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 表单平时不展开 */
+    expect(wrapper.find(".episode-cause-form").exists()).toBe(false);
+    const editButton = wrapper.findAll(".episode-title-action").find((button) => button.text() === "编辑")!;
+    expect(editButton).toBeTruthy();
+    await editButton.trigger("click");
+    await settle();
+
+    const form = wrapper.find(".episode-cause-form");
+    expect(form.exists()).toBe(true);
+    const dateInput = form.find('input[aria-label="起病日期"]');
+    expect(dateInput.exists()).toBe(true);
+    expect((dateInput.element as HTMLInputElement).value).toBe("2026-10-09");
+
+    await dateInput.setValue("2026-10-05");
+    await dateInput.trigger("blur");
+    await settle();
+    await form.find('input[placeholder^="例如 受凉"]').setValue("着凉");
+    await settle();
+    await form.trigger("submit");
+    await settle();
+
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.path).toBe("episodes/ep-1");
+    expect(puts[0]!.body.onsetAt).toBe("2026-10-05");
+    expect(puts[0]!.body.causeText).toBe("着凉");
+    wrapper.unmount();
   });
 
   it("疾病页在过渡层内能渲染出内容", async () => {

@@ -54,6 +54,8 @@ const formOpen = ref(false);
 const previewReportId = ref<string | null>(null);
 const causeOpen = ref(false);
 const causeDraft = ref("");
+/** 标题区「编辑」里同时能改起病日期 —— 建完病程才发现日期填错了，原来只能删了重建 */
+const onsetDraft = ref("");
 const summaryOpen = ref(false);
 const quickInput = ref("");
 /** 「一句话记」的就地提示：以前把错误抛到页面顶部，用户在下面根本看不到 */
@@ -1417,6 +1419,7 @@ async function openEpisode(episodeId: string, silent = false) {
     const data = await request<CaseEpisodeDetail>(`episodes/${episodeId}`);
     detail.value = data;
     causeDraft.value = data.episode.causeText ?? "";
+    onsetDraft.value = data.episode.onsetAt ?? "";
     causeOpen.value = false;
     summaryOpen.value = false;
     quickInput.value = "";
@@ -1485,9 +1488,27 @@ async function patchEpisode(patch: Record<string, unknown>, message: string) {
   }
 }
 
-async function saveCause() {
-  await patchEpisode({ causeText: causeDraft.value }, "病因已保存");
-  if (detail.value) causeDraft.value = detail.value.episode.causeText ?? "";
+/**
+ * 起病日期只按「日期」编辑。库里若存的是带时刻的值（历史数据 / 导入），
+ * 而用户没动日期，就把原来的时刻留着 —— 别因为改了病因就把时刻悄悄削掉。
+ */
+function onsetValueToSave(): string | null {
+  const stored = detail.value?.episode.onsetAt ?? "";
+  const picked = onsetDraft.value.trim();
+  if (!picked) return null;
+  if (stored.length > 10 && picked === stored.slice(0, 10)) return stored;
+  return picked;
+}
+
+async function saveEpisodeInfo() {
+  await patchEpisode(
+    { onsetAt: onsetValueToSave(), causeText: causeDraft.value },
+    "病程信息已保存",
+  );
+  if (detail.value) {
+    causeDraft.value = detail.value.episode.causeText ?? "";
+    onsetDraft.value = detail.value.episode.onsetAt ?? "";
+  }
   causeOpen.value = false;
 }
 
@@ -1609,10 +1630,10 @@ onActivated(() => {
               class="episode-title-action"
               type="button"
               :disabled="saving"
-              title="病因只有你自己知道，系统不做推断"
+              title="改起病日期和病因；病因只有你自己知道，系统不做推断"
               @click="causeOpen = !causeOpen"
             >
-              {{ causeOpen ? "收起" : detail.episode.causeText ? "改病因" : "填病因" }}
+              {{ causeOpen ? "收起" : "编辑" }}
             </button>
             <button
               v-if="detail.episode.status !== 'resolved'"
@@ -1653,15 +1674,21 @@ onActivated(() => {
         </div>
       </div>
 
-      <!-- 病因表单：点了标题区的「改病因 / 填病因」才展开，平时不占地方 -->
-      <form v-if="causeOpen" class="entry-form episode-cause-form" @submit.prevent="saveCause">
-        <label>
-          <span>病因（自己填写，系统不做推断）</span>
-          <input v-model="causeDraft" placeholder="例如 受凉、接触感冒的家人" />
-        </label>
+      <!-- 病程信息表单：点了标题区的「编辑」才展开，平时不占地方。起病日期与病因都能改 -->
+      <form v-if="causeOpen" class="entry-form episode-cause-form" @submit.prevent="saveEpisodeInfo">
+        <div class="form-grid">
+          <label>
+            <span>起病日期</span>
+            <DateTimePicker v-model="onsetDraft" disable-future aria-label="起病日期" />
+          </label>
+          <label>
+            <span>病因（自己填写，系统不做推断）</span>
+            <input v-model="causeDraft" placeholder="例如 受凉、接触感冒的家人" />
+          </label>
+        </div>
         <div class="form-actions">
           <button type="button" @click="causeOpen = false">取消</button>
-          <button class="primary-button compact-primary" :disabled="saving">保存病因</button>
+          <button class="primary-button compact-primary" :disabled="saving">保存</button>
         </div>
       </form>
 
