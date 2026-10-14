@@ -12,6 +12,11 @@
 
 - 取消 Docker 镜像签名及签名附件发布；GitHub Release 仅保留应用安装产物，Docker Hub 继续提供精确版本和稳定版 `latest`。
 
+### Fixed
+
+- 修复 PDF 补页预处理与识别失败，支持重试已上传的补页文件。
+
+
 ## 0.2.12
 
 ### Added

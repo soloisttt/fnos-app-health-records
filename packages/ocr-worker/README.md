@@ -7,6 +7,11 @@ passes.
 It is a single long-lived Python process controlled by the Nitro server through
 newline-delimited JSON.
 
+PDF thumbnail and OCR processing use the validated file content rather than
+the filename extension, including page-append files stored with a `.bin` suffix.
+Declared MIME types and recognized filename extensions must still match the
+file content. Existing staged append files can be retried without renaming them.
+
 Development setup:
 
 ```bash
