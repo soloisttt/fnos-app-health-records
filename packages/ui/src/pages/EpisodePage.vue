@@ -21,6 +21,7 @@ import EpisodeEntrySheet, {
 } from "../components/EpisodeEntrySheet.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
 import TemperatureText from "../components/TemperatureText.vue";
+import TemperatureCurve from "../components/TemperatureCurve.vue";
 import { request } from "../utils/api";
 import type {
   CaseEpisode,
@@ -36,7 +37,7 @@ import { withFrequencyNote } from "../utils/medication-frequency";
 import { copyTextToClipboard } from "../utils/clipboard";
 import { isFutureMoment } from "../utils/time";
 import { parseQuickEntry, type QuickEntryDraft } from "../utils/quick-entry";
-import { temperatureLevel } from "../utils/temperature";
+import { temperatureLevel, type TemperatureInfo } from "../utils/temperature";
 import { useAppContext } from "../composables/useAppContext";
 import { useConfirm } from "../composables/useConfirm";
 import { useToast } from "../composables/useToast";
@@ -478,8 +479,8 @@ type TimelineItem = {
   detail: string | null;
   /** 症状状态：单独渲染，按含义加粗上色（加重红 / 减轻绿 / 消失·存在灰） */
   status: { label: string; level: "worse" | "better" | "gone" | "same" } | null;
-  /** 体温数值（按高低上色），没有则 null */
-  value: { text: string; level: "normal" | "mid" | "high" } | null;
+  /** 体温数值（按高低上色）：时间轴上单独一套长相（大数字 + 小单位），没有则 null */
+  value: TemperatureInfo | null;
   /** 时间轴分类，用于「全部 / 症状 / 体温 / 服药」筛选 */
   category: "symptom" | "temperature" | "intake" | "other";
   reportId: string | null;
@@ -811,8 +812,32 @@ const feverSummary = computed(() => {
   };
 });
 
-const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
+/** 体温曲线的数据点：按时间排好的、这次生病的全部体温读数 */
+const temperaturePoints = computed(() =>
+  (detail.value?.symptoms ?? [])
+    .map((item) => ({ at: item.onsetAt, info: temperatureLevel(item.measuredValue, item.measuredUnit) }))
+    .filter((entry): entry is { at: string | null; info: TemperatureInfo } => Boolean(entry.info))
+    .sort((left, right) => (left.at ?? "").localeCompare(right.at ?? ""))
+    .map((entry) => ({ at: entry.at, reading: entry.info.reading, level: entry.info.level })),
+);
 
+const temperatureCard = ref<HTMLElement | null>(null);
+const temperatureFocused = ref(false);
+let temperatureFocusTimer: number | undefined;
+
+/** 时间轴上点体温数字 → 滑到体温小结卡并闪一下：一下就能看到整条曲线 */
+function focusTemperatureCard() {
+  const element = temperatureCard.value;
+  if (!element) return;
+  element.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  temperatureFocused.value = true;
+  if (temperatureFocusTimer) window.clearTimeout(temperatureFocusTimer);
+  temperatureFocusTimer = window.setTimeout(() => {
+    temperatureFocused.value = false;
+  }, 1600);
+}
+
+const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
 function emptySymptomForm() {
   return {
     name: "",
@@ -1739,7 +1764,12 @@ onActivated(() => {
         </div>
       </section>
 
-      <section v-if="feverSummary" class="settings-band entry-list-card episode-fever-card">
+      <section
+        v-if="feverSummary"
+        ref="temperatureCard"
+        class="settings-band entry-list-card episode-fever-card"
+        :class="{ 'is-focused': temperatureFocused }"
+      >
         <header>
           <div><Thermometer :size="18" /><h3>发热小结</h3></div>
           <span class="count-label">共记录 {{ feverSummary.count }} 次</span>
@@ -1762,6 +1792,10 @@ onActivated(() => {
               <small>{{ episodeDurationText || "—" }}</small>
             </div>
           </div>
+          <template v-if="temperaturePoints.length">
+            <p class="episode-temp-curve-title">这次生病的体温变化</p>
+            <TemperatureCurve :points="temperaturePoints" />
+          </template>
         </div>
       </section>
 
@@ -2054,15 +2088,25 @@ onActivated(() => {
               <time v-if="block.at">{{ formatMoment(block.at) }}</time>
             </div>
             <div class="episode-event-items">
-              <div v-for="item in block.items" :key="item.key" class="episode-event-item">
-                <strong>
-                  {{ item.title }}
-                  <em
-                    v-if="item.value"
-                    class="episode-temp"
-                    :class="`episode-temp-${item.value.level}`"
-                  >{{ item.value.text }}</em>
-                </strong>
+              <div
+                v-for="item in block.items"
+                :key="item.key"
+                class="episode-event-item"
+                :class="{ 'is-temperature': Boolean(item.value) }"
+              >
+                <!-- 体温单开一套长相：数值大字 + 小单位，按高低上色；点一下滑到体温曲线 -->
+                <button
+                  v-if="item.value"
+                  class="episode-temp-figure"
+                  :class="`is-${item.value.level}`"
+                  type="button"
+                  title="看这次生病的体温曲线"
+                  @click="focusTemperatureCard"
+                >
+                  <span class="episode-temp-figure-name">{{ item.title }}</span>
+                  <span class="episode-temp-figure-value">{{ item.value.reading }}<small>{{ item.value.unit }}</small></span>
+                </button>
+                <strong v-else>{{ item.title }}</strong>
                 <small v-if="item.status || item.detail" class="episode-item-meta">
                   <em
                     v-if="item.status"

@@ -7,8 +7,11 @@ export function temperatureLevel(value: string | null, unit: string | null) {
   const looksLikeTemperature = unit === "℃" || (number >= 30 && number <= 45);
   if (!looksLikeTemperature || !Number.isFinite(number)) return null;
   const level: TemperatureLevel = number >= 38.5 ? "high" : number >= 37.5 ? "mid" : "normal";
-  return { text: `${value}${unit ?? ""}`, level } as const;
+  /* `reading` / `unit` 分开给：时间轴上体温是「大数字 + 小单位」单开一套长相 */
+  return { text: `${value}${unit ?? ""}`, reading: value, unit: unit ?? "", level } as const;
 }
+
+export type TemperatureInfo = NonNullable<ReturnType<typeof temperatureLevel>>;
 
 export type TemperatureRun = { text: string; level?: TemperatureLevel };
 

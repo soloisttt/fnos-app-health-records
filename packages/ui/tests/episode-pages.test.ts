@@ -681,12 +681,26 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(fever.text()).toContain("38.5");
     expect(fever.text()).toContain("最高");
 
-    /* 体温在时间轴上直接显示数值并按高低上色：38.5 是「要不要吃退烧药」的门槛 → 红 */
+    /* 体温在时间轴上单独一套长相：数值大字 + 小单位，按高低上色（38.5 是「要不要吃退烧药」的门槛 → 红） */
     const feverEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("发热"))!;
-    expect(feverEvent.find(".episode-temp").text()).toBe("38.5℃");
-    expect(feverEvent.find(".episode-temp-high").exists()).toBe(true);
+    const figure = feverEvent.find(".episode-temp-figure");
+    expect(figure.exists()).toBe(true);
+    expect(figure.classes()).toContain("is-high");
+    expect(figure.find(".episode-temp-figure-value").text()).toBe("38.5℃");
     /* 体温只关心数值与间隔，「存在 / 加重」这类状态对体温没有意义，不挂状态标签 */
     expect(feverEvent.find(".episode-status").exists()).toBe(false);
+
+    /* 体温小结卡里带一条体温曲线；点时间轴上那个数字就滑过去看整条 */
+    expect(fever.find(".episode-temp-curve").exists()).toBe(true);
+    expect(fever.find(".episode-temp-curve-top").text()).toBe("38.5℃");
+    if (typeof Element.prototype.scrollIntoView !== "function") {
+      Element.prototype.scrollIntoView = () => {};
+    }
+    const scrollSpy = vi.spyOn(Element.prototype, "scrollIntoView");
+    await figure.trigger("click");
+    expect(scrollSpy).toHaveBeenCalled();
+    expect(wrapper.find(".episode-fever-card").classes()).toContain("is-focused");
+    scrollSpy.mockRestore();
     /* 其他症状：状态单独渲染成加粗药丸，加重=红 */
     const worseEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("鼻塞"))!;
     expect(worseEvent.find(".episode-status-worse").text()).toBe("加重");
@@ -710,7 +724,7 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     await settle();
     expect(wrapper.find(".episode-event--symptom").exists()).toBe(false);
     expect(wrapper.find(".episode-visit").exists()).toBe(false);
-    expect(wrapper.findAll(".episode-temp").length).toBeGreaterThan(0);
+    expect(wrapper.findAll(".episode-temp-figure").length).toBeGreaterThan(0);
     await filterOf("全部").trigger("click");
     await settle();
     expect(wrapper.find(".episode-visit").exists()).toBe(true);
