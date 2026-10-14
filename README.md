@@ -2,7 +2,7 @@
 
 > ## 本仓库是个人二开版本（fork）
 >
-> 基于上游 [timor-m/fnos-app-health-records](https://github.com/timor-m/fnos-app-health-records) 的 **v0.2.11** 做二次开发：
+> 基于上游 [timor-m/fnos-app-health-records](https://github.com/timor-m/fnos-app-health-records) 的 **v0.2.12** 做二次开发：
 > 在原有「报告归档」之上，增加了一层 **病程管理** —— 把同一个人的多次就诊串成一段病程。
 >
 > **新增能力**
@@ -17,7 +17,8 @@
 > **与原版的关系**：完全独立运行；数据库结构随上游升级（当前 schema **v19**），
 > 二开新增的表使用兼容式草案、旧库启动时自动补齐，**可随时切回原版而不丢数据**。
 >
-> 开发分支 `feature/episode` ｜ 存档标签 `v0.2.11-wuyang.1`（当前）、
+> 开发分支 `feature/episode` ｜ 存档标签 `v0.2.12-wuyang.1`（当前）、
+> `v0.2.11-wuyang.1` ～ `.6`（基于上游 0.2.11）、
 > `v0.2.10-wuyang.2`、`v0.2.10-wuyang.1`（基于上游 0.2.10 的前两阶段）
 >
 > 详细说明见 [docs/二开说明-病程主线.md](docs/二开说明-病程主线.md)
