@@ -137,6 +137,9 @@ const navItems = [
   { to: "/trends", label: "趋势", icon: ChartNoAxesCombined },
   { to: "/me", label: "我的", icon: UserRound, badge: reminderBadge }
 ];
+/* 底部导航只放「我要去哪」，不放「我要做什么」：
+   上传报告是个动作，挪到右下角当悬浮按钮（桌面端侧边栏里照旧有这一项）。 */
+const mobileNavItems = navItems.filter((item) => item.to !== "/upload");
 </script>
 
 <template>
@@ -251,14 +254,18 @@ const navItems = [
     </section>
 
     <nav class="mobile-nav" aria-label="触屏导航">
-      <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" :class="{ primary: item.primary, 'router-link-active': isNavActive(item.to) }" :aria-label="item.primary ? '拍照上传' : undefined">
+      <RouterLink v-for="item in mobileNavItems" :key="item.to" :to="item.to" :class="{ 'router-link-active': isNavActive(item.to) }">
         <span class="mobile-nav-icon">
-          <component :is="item.icon" :size="item.primary ? 26 : 21" />
+          <component :is="item.icon" :size="21" />
           <span v-if="item.badge?.value" class="nav-badge mobile">{{ item.badge.value }}</span>
         </span>
-        <span v-if="!item.primary">{{ item.label }}</span>
+        <span>{{ item.label }}</span>
       </RouterLink>
     </nav>
+
+    <RouterLink class="upload-fab" to="/upload" aria-label="上传报告">
+      <Camera :size="24" />
+    </RouterLink>
 
     <MemberSwitcher :open="memberSheetOpen" @close="memberSheetOpen = false" />
     <SetupGuideModal v-if="setupGuideOpen" @done="setupGuideOpen = false" />
