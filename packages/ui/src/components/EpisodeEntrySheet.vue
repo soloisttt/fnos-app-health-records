@@ -186,7 +186,7 @@ function submit(repeat: boolean) {
             <div class="episode-sheet-grid">
               <label class="episode-sheet-field">
                 <span>{{ intent === "log" ? "这次吃了多少" : "单次剂量" }}</span>
-                <input v-model="draft.dose" placeholder="例如 5ml、半片" />
+                <input v-model="draft.dose" class="episode-sheet-dose" placeholder="例如 5ml、半片" />
               </label>
               <label class="episode-sheet-field">
                 <span>用法</span>

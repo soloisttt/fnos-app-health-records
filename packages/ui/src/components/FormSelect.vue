@@ -20,6 +20,7 @@ const emit = defineEmits<{ "update:modelValue": [value: string]; change: [value:
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
 const layer = ref<HTMLElement | null>(null);
+const panel = ref<HTMLElement | null>(null);
 const panelStyle = ref<Record<string, string>>({});
 const lockScroll = ref(false);
 useScrollLock(computed(() => open.value && lockScroll.value));
@@ -36,11 +37,25 @@ function updatePanelPosition() {
     return;
   }
   const rect = root.value?.getBoundingClientRect();
-  const width = rect ? Math.min(Math.max(rect.width, props.panelMinWidth || 0), window.innerWidth - 24) : 0;
+  // Measure intrinsic content independently of the trigger's narrow width.
+  // Include selected font weight so picking a long option needs no extra room.
+  let contentWidth = 0;
+  if (panel.value) {
+    panel.value.style.width = 'max-content';
+    const labels = [...panel.value.querySelectorAll<HTMLElement>('.form-select-option > span')];
+    const weights = labels.map(label => label.style.fontWeight);
+    labels.forEach(label => label.style.fontWeight = '600');
+    contentWidth = panel.value.scrollWidth;
+    labels.forEach((label, index) => label.style.fontWeight = weights[index]);
+  }
+  const width = rect ? Math.min(Math.max(rect.width, props.panelMinWidth || 0, contentWidth), window.innerWidth - 24) : 0;
+  if (panel.value && rect) panel.value.style.width = `${width}px`;
   panelStyle.value = rect
     ? { position: "fixed", left: `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`, top: `${rect.bottom + 6}px`, width: `${width}px` }
     : {};
 }
+
+watch(() => [props.options, props.panelMinWidth], () => { if (open.value) nextTick(updatePanelPosition); }, { deep: true });
 
 function toggle() {
   if (props.disabled) return;
@@ -90,13 +105,13 @@ onBeforeUnmount(() => {
       :aria-label="ariaLabel" :aria-expanded="open" aria-haspopup="listbox"
       @click="toggle"
     >
-      <span :class="{ placeholder: !current }">{{ current?.label || placeholder || "请选择" }}</span>
+      <span :class="{ placeholder: !current }" :title="current?.label || placeholder">{{ current?.label || placeholder || "请选择" }}</span>
       <ChevronDown :size="16" class="form-select-caret" />
     </button>
     <Teleport to="body">
       <!-- 用 click 关闭遮罩：mousedown/touchstart 提前关闭会让后续 click 透穿到底层元素 -->
       <div v-if="open" ref="layer" class="form-select-layer" @click.self="open = false">
-        <div class="form-select-panel" :style="panelStyle" role="listbox" :aria-label="ariaLabel">
+        <div ref="panel" class="form-select-panel" :style="panelStyle" role="listbox" :aria-label="ariaLabel">
           <span class="sheet-grabber" aria-hidden="true"></span>
           <slot name="panel" :pick="pick" :close="() => open = false">
           <p v-if="!options.length || hint" class="form-select-empty">{{ hint || emptyText || '暂无可选项' }}</p>
@@ -111,8 +126,8 @@ onBeforeUnmount(() => {
             :aria-selected="option.value === modelValue"
             @click="pick(option)"
           >
-            <span>{{ option.label }}</span>
-            <Check v-if="option.value === modelValue" :size="16" />
+            <span :title="option.label">{{ option.label }}</span>
+            <Check :size="16" class="form-select-check" :class="{ inactive: option.value !== modelValue }" aria-hidden="true" />
           </button>
           </slot>
         </div>

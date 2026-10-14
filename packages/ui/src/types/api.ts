@@ -302,6 +302,7 @@ export type ReportPage = {
   width: number | null;
   height: number | null;
   rotation: number;
+  /** OCR 坐标缺少可靠的方向/尺寸基准，无法与底图对齐；不再仅表示角度变化。 */
   ocrStale: boolean;
   sourcePageNumber: number | null;
   sourcePageCount: number | null;
@@ -511,6 +512,7 @@ export type OcrPageDetail = {
   modelVersion: string | null;
   coordWidth: number | null;
   coordHeight: number | null;
+  /** 坐标无法可靠转换时为 true；已转换的坐标对应图片原件或当前 PDF 预览。 */
   orientationChanged: boolean;
   lines: OcrLineDetail[];
 };

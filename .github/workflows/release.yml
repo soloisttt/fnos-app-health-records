@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.package.outputs.version }}
-      minor: ${{ steps.package.outputs.minor }}
       stable: ${{ steps.package.outputs.stable }}
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +28,6 @@ jobs:
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "minor=$(node -p "const [major, minor] = require('./package.json').version.split('.'); major + '.' + minor")" >> "$GITHUB_OUTPUT"
           if [[ "${VERSION}" == *-* ]]; then
             echo "stable=false" >> "$GITHUB_OUTPUT"
           else
@@ -105,6 +103,8 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.5.2
       - name: Validate Docker Hub configuration
         shell: bash
         env:
@@ -130,10 +130,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=v${{ needs.prepare.outputs.version }}
-            type=raw,value=${{ needs.prepare.outputs.minor }}
             type=raw,value=latest,enable=${{ needs.prepare.outputs.stable == 'true' }}
-            type=sha,format=short
           labels: |
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.title=健康档案
@@ -161,7 +158,49 @@ jobs:
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.docker-build.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const { IMAGE, DIGEST, VERSION } = process.env;
+          const claim = { critical: {
+            identity: { 'docker-reference': IMAGE },
+            image: { 'docker-manifest-digest': DIGEST },
+            type: 'cosign container image signature'
+          } };
+          writeFileSync(`dist/docker-image-${VERSION}.json`, JSON.stringify(claim));
+          NODE
+          cosign sign-blob --yes --tlog-upload=true \
+            --bundle "dist/docker-image-${VERSION}.bundle.json" \
+            --output-signature "dist/docker-image-${VERSION}.sig" \
+            --output-certificate "dist/docker-image-${VERSION}.pem" \
+            "dist/docker-image-${VERSION}.json"
+
+      - name: Verify Docker image signature
+        shell: bash
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.docker-build.outputs.digest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cosign verify-blob --offline \
+            --bundle "dist/docker-image-${VERSION}.bundle.json" \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "dist/docker-image-${VERSION}.json"
+          node scripts/verify-image-claim.mjs "dist/docker-image-${VERSION}.json" "${IMAGE}" "${DIGEST}"
+
+      - name: Upload Docker signature artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-docker-signature-${{ needs.prepare.outputs.version }}
+          path: |
+            dist/docker-image-${{ needs.prepare.outputs.version }}.sig
+            dist/docker-image-${{ needs.prepare.outputs.version }}.pem
+            dist/docker-image-${{ needs.prepare.outputs.version }}.json
+            dist/docker-image-${{ needs.prepare.outputs.version }}.bundle.json
+          if-no-files-found: error
 
   publish:
     needs: [prepare, fpk, docker]
@@ -171,6 +210,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-fpk-${{ needs.prepare.outputs.version }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-docker-signature-${{ needs.prepare.outputs.version }}
           path: dist
       - name: Prepare release notes
         run: node scripts/generate-release-notes.mjs --output=RELEASE_NOTES.md
@@ -195,6 +238,7 @@ jobs:
           ```
 
           完整安装和回滚说明见 `docs/DOCKER_DEPLOYMENT.md`。
+          本次镜像签名、证书及 digest 声明作为 `docker-image-版本号.sig`、`.pem`、`.json` 及透明日志凭证 `.bundle.json` 附件提供；验证方法见该文档“镜像签名验证”。
           EOF
 
       - name: Create GitHub release
@@ -207,3 +251,7 @@ jobs:
           files: |
             dist/app.tgz
             dist/fnos-app-health-records-${{ needs.prepare.outputs.version }}.fpk
+            dist/docker-image-${{ needs.prepare.outputs.version }}.sig
+            dist/docker-image-${{ needs.prepare.outputs.version }}.pem
+            dist/docker-image-${{ needs.prepare.outputs.version }}.json
+            dist/docker-image-${{ needs.prepare.outputs.version }}.bundle.json

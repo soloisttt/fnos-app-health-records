@@ -1,9 +1,11 @@
 import { createError } from 'h3';
 import { getAppConfig } from '../utils/runtime-config';
 import { getFeedbackInstallation } from './feedback-installation.service';
+import { deploymentType, feedbackUserAgent } from '../utils/deployment';
 export const feedbackServiceBase = 'https://gateway.lby.link/health/v1';
 export async function sendFeedbackRequest(path: string, options: {method?:'GET'|'POST';body?:BodyInit;key?:string;json?:boolean;signal?:AbortSignal}={}, dependencies={fetch:globalThis.fetch,identity:getFeedbackInstallation}) {
-  const headers: Record<string,string>={'x-client-id':dependencies.identity(),'x-version':getAppConfig().appVersion};
+  const config = getAppConfig();
+  const headers: Record<string,string>={'x-client-id':dependencies.identity(),'x-version':config.appVersion,'User-Agent':feedbackUserAgent(config.appVersion,deploymentType(config.authMode))};
   if(options.key) headers['Idempotency-Key']=options.key;
   if(options.json) headers['Content-Type']='application/json';
   let response: Response;

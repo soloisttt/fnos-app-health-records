@@ -1,3 +1,4 @@
+import { repairLegacyObservationUnitEvidence } from './observation-evidence-repair.service';
 import { hasLostMeasurementBound, hasLostMeasurementInterval, parseExactMeasurement, leadingMeasurementNumber, measurementEvidenceRegions } from '../utils/measurement-bound';
 import { memberAccessSql } from "./member.service";
 import { rollbackAfterError, getDatabase } from "../database/client";
@@ -2264,7 +2265,18 @@ function addMaintenanceResult(
 }
 
 export function normalizeReportObservations(reportId: string): IndicatorNormalizationMaintenanceResult {
-  return collectNormalizationResult(observationRowsForReport(reportId));
+  ensureBuiltinIndicatorCatalog();
+  const db = getDatabase();
+  db.exec('SAVEPOINT normalize_report_evidence');
+  try {
+    repairLegacyObservationUnitEvidence(reportId);
+    const result = collectNormalizationResult(observationRowsForReport(reportId));
+    db.exec('RELEASE normalize_report_evidence');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK TO normalize_report_evidence; RELEASE normalize_report_evidence');
+    throw error;
+  }
 }
 
 export function backfillBuiltinIndicatorNormalizations(): BuiltinIndicatorBackfillResult {

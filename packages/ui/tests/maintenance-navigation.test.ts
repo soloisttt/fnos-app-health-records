@@ -29,7 +29,7 @@ describe("maintenance navigation permissions", () => {
   it("provides all three groups and existing tools to administrators", () => {
     const wrapper = render(true);
     expect(wrapper.findAllComponents(RouterLinkStub).map(link => link.props("to")))
-      .toEqual(["/me/data", "/me/duplicates", "/me/maintenance/indicators", "/me/system-logs", "/me/audit", "/me/ai-audit"]);
+      .toEqual(["/me/data", "/me/maintenance/member-merges", "/me/duplicates", "/me/maintenance/indicators", "/me/system-logs", "/me/audit", "/me/ai-audit"]);
     expect(wrapper.text()).toContain("检查与修复");
     expect(wrapper.findAll("button").map(button => button.text())).toEqual(["重新关联", "重新生成"]);
   });

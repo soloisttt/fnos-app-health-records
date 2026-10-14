@@ -22,7 +22,7 @@ import ReportEpisodeLinker from "./ReportEpisodeLinker.vue";
 import { request, apiUrl } from "../utils/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
 import { downloadDirectUrl, downloadStreamedFile } from "../utils/download";
-import { describeObservationAbnormal, observationAttentionHint, formatReferenceRange } from "../utils/indicator-display";
+import { describeObservationAbnormal, observationAttentionHint, observationDetailGroup, formatReferenceRange } from "../utils/indicator-display";
 import { formatDatabaseTime, formatDatabaseTimeWithYear } from "../utils/time";
 import { hasEmptyCompletedOcr, resolveAiTriggerState } from "../utils/ai-trigger-state";
 import { resolveClinicalEvidenceNavigation } from "../utils/clinical-evidence-navigation";
@@ -321,7 +321,13 @@ const medicalCandidateObservations = computed(() => secondaryObservations.value.
 const qualitativeObservations = computed(() => secondaryObservations.value.filter((item) => item.displayCategory === "qualitative_finding"));
 const technicalObservations = computed(() => secondaryObservations.value.filter((item) => item.displayCategory === "technical_measurement"));
 const governanceObservations = computed(() => detail.value?.observations.filter((item) => item.displayTier === "governance_only") || []);
-const pendingReviewObservations = computed(() => [...secondaryObservations.value, ...governanceObservations.value]);
+const nonTrendObservations = computed(() => [...secondaryObservations.value, ...governanceObservations.value]);
+const pendingReviewObservations = computed(() => nonTrendObservations.value.filter(item => observationDetailGroup(item) === 'review'));
+const nonTrendSections = computed(() => [
+  { key: 'qualitative', title: '定性结果', description: '阴性、阳性等定性记录，保留完整结果，不绘制数值趋势' },
+  { key: 'technical', title: '其他检查记录', description: '专业技术参数，保留在报告中，不默认进入趋势' },
+  { key: 'review', title: '待核对指标', description: '存在识别、标准化或参考信息待核对事项，请查看具体提示' },
+].map(section => ({ ...section, items: nonTrendObservations.value.filter(item => observationDetailGroup(item) === section.key) })).filter(section => section.items.length));
 const selectedObservation = computed(() => detail.value?.observations.find((item) => item.id === selectedObservationId.value) || null);
 const observationSourcePage = computed(() => detail.value?.pages[observationSourcePageIndex.value] || null);
 const observationEvidenceLineIds = computed(() => {
@@ -1232,6 +1238,8 @@ async function rotateSavedPage(page: ReportPage) {
       method: "PUT",
       body: JSON.stringify({ expectedRotation: page.rotation, rotation: (page.rotation + 90) % 360 })
     });
+    ++ocrDetailSeq;
+    ocrDetailLoading.value = false;
     if (ocrDetailPage.value?.pageId === page.id) ocrDetailPage.value = null;
     showOcrOverlay.value = false;
     await refreshJobs(true);
@@ -1322,17 +1330,24 @@ async function loadOcrPages(reportId = props.reportId) {
   }
 }
 
+let ocrDetailSeq = 0;
 async function loadOcrDetail(pageId: string) {
   if (!pageId || ocrDetailPage.value?.pageId === pageId) return;
   ocrDetailLoading.value = true;
   ocrDetailError.value = "";
   ocrDetailPage.value = null;
+  const seq = ++ocrDetailSeq;
+  const reportId = props.reportId;
   try {
-    ocrDetailPage.value = await request<OcrPageDetail>(`reports/${encodeURIComponent(props.reportId)}/pages/${encodeURIComponent(pageId)}/ocr`);
+    const result = await request<OcrPageDetail>(`reports/${encodeURIComponent(reportId)}/pages/${encodeURIComponent(pageId)}/ocr`);
+    if (seq !== ocrDetailSeq || props.reportId !== reportId) return;
+    ocrDetailPage.value = result;
+    const page = detail.value?.pages.find(page => page.id === pageId);
+    if (page && result) page.ocrStale = result.orientationChanged;
   } catch (cause) {
-    ocrDetailError.value = cause instanceof Error ? cause.message : "无法读取 OCR 详情";
+    if (seq === ocrDetailSeq && props.reportId === reportId) ocrDetailError.value = cause instanceof Error ? cause.message : "无法读取 OCR 详情";
   } finally {
-    ocrDetailLoading.value = false;
+    if (seq === ocrDetailSeq) ocrDetailLoading.value = false;
   }
 }
 
@@ -2537,20 +2552,30 @@ onActivated(() => {
       </div>
       <div v-if="detail?.pages.length" class="original-grid">
         <div v-for="(page, index) in detail.pages" :key="page.id" class="original-tile-card">
-          <button type="button" class="original-tile" :disabled="savingPages" @click="openOriginalViewer(index)">
+          <div class="original-tile">
+            <button type="button" class="original-tile-open" :aria-label="`查看第 ${page.pageNumber} 页原件`" :disabled="savingPages" @click="openOriginalViewer(index)" />
             <img v-if="page.hasThumbnail" :src="thumbnailUrl(page)" alt="" loading="lazy" decoding="async" />
             <FileText v-else-if="page.mimeType === 'application/pdf'" :size="28" />
             <FileImage v-else :size="28" />
-            <span>第 {{ page.pageNumber }} 页</span>
+            <div class="original-tile-label">
+              <span>第 {{ page.pageNumber }} 页</span>
+              <IndicatorHint v-if="page.ocrStale" hover text="这一页缺少可靠的 OCR 位置或方向信息，标记暂不可用；原识别文字保留。">
+                <template #trigger="{ show, open, panelId }">
+                  <button type="button" class="original-orientation-warning" :aria-label="`查看第 ${page.pageNumber} 页方向调整说明`"
+                    :aria-expanded="open" :aria-controls="open ? panelId : undefined" @click="show">
+                    <CircleAlert :size="15" aria-hidden="true" />
+                  </button>
+                </template>
+              </IndicatorHint>
+            </div>
             <Maximize2 :size="15" />
-          </button>
+          </div>
           <div class="page-edit-actions">
             <button v-if="canManageReport" type="button" :disabled="savingPages || index === 0" title="上移" @click="moveSavedPage(page, -1)"><ArrowUp :size="15" /></button>
             <button v-if="canManageReport" type="button" :disabled="savingPages || index === detail.pages.length - 1" title="下移" @click="moveSavedPage(page, 1)"><ArrowDown :size="15" /></button>
             <button v-if="canManageReport" type="button" :disabled="savingPages || hasRunningJobs" title="保存页面方向：顺时针旋转 90°，不重新识别" @click="rotateSavedPage(page)"><RotateCw :size="15" /></button>
             <button v-if="canManageReport" type="button" :disabled="savingPages || detail.pages.length <= 1" title="删除" @click="deleteSavedPage(page)"><Trash2 :size="15" /></button>
           </div>
-          <small v-if="page.ocrStale" class="preview-hint">页面方向已调整，OCR 文字仍是原识别结果，标记位置暂不可用。</small>
         </div>
       </div>
       <p v-else class="preview-hint">详情加载后会显示关联原件。</p>
@@ -2603,11 +2628,11 @@ onActivated(() => {
               </article>
             </div>
           </section>
-          <section v-if="pendingReviewObservations.length" class="observation-tier-section">
-            <header><strong>待核对指标</strong><span>{{ pendingReviewObservations.length }} 项，已识别但暂不进入趋势</span></header>
+          <section v-for="section in nonTrendSections" :key="section.key" class="observation-tier-section">
+            <header><strong>{{ section.title }}</strong><span>{{ section.items.length }} 项，{{ section.description }}</span></header>
             <div class="observation-list">
               <article
-                v-for="item in pendingReviewObservations"
+                v-for="item in section.items"
                 :key="item.id"
                 :class="{ 'is-selected': selectedObservationId === item.id }"
                 tabindex="0"
@@ -2642,7 +2667,7 @@ onActivated(() => {
                     @load="onObservationOriginalImageLoad(observationSourcePage.id)"
                   />
                   <OcrTextOverlay
-                    v-if="ocrDetailPage?.pageId === observationSourcePage.id && !ocrDetailPage.orientationChanged && !observationSourcePage.ocrStale && loadedObservationOriginalPageId === observationSourcePage.id && observationEvidenceLineIds.length"
+                    v-if="ocrDetailPage?.pageId === observationSourcePage.id && !ocrDetailPage.orientationChanged && loadedObservationOriginalPageId === observationSourcePage.id && observationEvidenceLineIds.length"
                     :image="observationOriginalImage"
                     :lines="ocrDetailPage.lines"
                     :coord-width="ocrDetailPage.coordWidth"
@@ -2760,7 +2785,7 @@ onActivated(() => {
             <div class="section-title-row">
               <div><h4>报告原件</h4><p>OCR 文字可叠加在原图上选择复制</p></div>
               <div class="edit-original-actions">
-                <button v-if="currentOriginalPage" type="button" class="soft-action-button" :disabled="ocrDetailLoading || currentOriginalPage.ocrStale" :title="currentOriginalPage.ocrStale ? '页面方向调整后 OCR 标记暂不可用' : ''" @click="showOcrOverlay = !showOcrOverlay">
+                <button v-if="currentOriginalPage" type="button" class="soft-action-button" :disabled="ocrDetailLoading || ocrDetailPage?.orientationChanged" :title="ocrDetailPage?.orientationChanged ? '这一页缺少可靠的 OCR 位置信息' : ''" @click="showOcrOverlay = !showOcrOverlay">
                   <Sparkles :size="14" />
                   <template v-if="showOcrOverlay">隐藏</template>
                   <template v-else>显示</template>
@@ -2803,10 +2828,10 @@ onActivated(() => {
                         decoding="async"
                         @load="onOriginalImageLoad(currentOriginalPage.id)"
                       />
-                      <OcrTextOverlay v-if="showOcrOverlay && ocrDetailPage?.pageId === currentOriginalPage.id && !ocrDetailPage.orientationChanged && !currentOriginalPage.ocrStale && loadedOriginalImagePageId === currentOriginalPage.id" :image="editOriginalImage" :lines="ocrDetailPage.lines" :coord-width="ocrDetailPage.coordWidth" :coord-height="ocrDetailPage.coordHeight" />
+                      <OcrTextOverlay v-if="showOcrOverlay && ocrDetailPage?.pageId === currentOriginalPage.id && !ocrDetailPage.orientationChanged && loadedOriginalImagePageId === currentOriginalPage.id" :image="editOriginalImage" :lines="ocrDetailPage.lines" :coord-width="ocrDetailPage.coordWidth" :coord-height="ocrDetailPage.coordHeight" />
                     </div>
                     </OriginalOrientation>
-                    <small v-if="currentOriginalPage.ocrStale" class="preview-hint">OCR 标记与当前页面方向不一致，已暂时隐藏；原识别文字保留。</small>
+                    <small v-if="ocrDetailPage?.pageId === currentOriginalPage.id && ocrDetailPage.orientationChanged" class="preview-hint">这一页缺少可靠的 OCR 位置信息，标记暂不可用；原识别文字保留。</small>
                     <span>第 {{ currentOriginalPage.pageNumber }} 页</span>
                   </div>
                 </Transition>
@@ -2964,7 +2989,7 @@ onActivated(() => {
                   <div class="ocr-page-compare__image">
                     <img :ref="setOcrCompareImage" :src="reviewOriginalUrl(page.pageNumber)" :alt="`第 ${page.pageNumber} 页原件`" decoding="async" @load="onOcrCompareImageLoad(page.pageId)" />
                     <OcrTextOverlay
-                      v-if="ocrDetailPage?.pageId === page.pageId && !ocrDetailPage.orientationChanged && !reportPageByNumber(page.pageNumber)?.ocrStale && loadedOcrCompareImagePageId === page.pageId"
+                      v-if="ocrDetailPage?.pageId === page.pageId && !ocrDetailPage.orientationChanged && loadedOcrCompareImagePageId === page.pageId"
                       :image="ocrCompareImage"
                       :lines="ocrDetailPage.lines"
                       :coord-width="ocrDetailPage.coordWidth"

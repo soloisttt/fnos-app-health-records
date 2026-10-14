@@ -13,17 +13,19 @@
 | 项 | 当前值 | 来源 |
 | --- | --- | --- |
 | 应用 ID | `fnos-app-health-records` | `template.config.json` |
-| 应用版本 | 以 `package.json` 为准 | `package.json` |
-| fnOS manifest 版本 | 与 `package.json` 一致 | `scripts/prepare-package.mjs` 从 `package.json` 写入 |
-| fnOS sub_version | 与 `package.json` 一致 | `scripts/prepare-package.mjs` 生成 |
-| Docker 镜像版本 | 同时使用 `X.Y.Z`、`vX.Y.Z` 等标签 | GitHub Tag 工作流从 `package.json` 生成 |
+| 应用版本 | `0.2.12` | `package.json` |
+| fnOS manifest 版本 | `0.2.12` | `scripts/prepare-package.mjs` 从 `package.json` 写入 |
+| fnOS sub_version | `0.2.12.0` | `scripts/prepare-package.mjs` 生成 |
+| Docker 镜像版本 | 精确版本 `0.2.12`，稳定版另提供 `latest` | GitHub Tag 工作流从 `package.json` 生成 |
 | Docker 镜像仓库 | `docker.io/timorm/fnos-app-health-records` | Docker Hub，可通过 `DOCKERHUB_IMAGE` 覆盖 |
 | 数据库 schema | `v19` | `packages/server/database/migrations.ts` 最后一个迁移版本 |
 | 数据库记录表 | `schema_migrations`、`app_upgrade_history` | 服务端首次启动时初始化或迁移 |
 
 发布前必须确认：当前应用版本支持的目标 schema 版本明确、可初始化新库、可从上一发布版本迁移。
 
-0.2.11 目标数据库 schema v19。保留原 v18 OCR 页面方向迁移，新增 v19 反馈状态、通知和管理员阅读记录；支持 0.2.10 的 v17、原 0.2.11 的 v18，以及已补齐反馈结构但仍记录 v18 的测试库，升级前自动备份，幂等保留数据。历史同号但不同内容的 v18 草案仍拒绝自动升级，保留数据并单独评审。重发保持应用版本 0.2.11，不改已发布迁移或清理旧安装数据；原镜像的已下载副本不会自动更新，需要主动拉取并重建容器。后续开发继续使用无编号 Unreleased，不自动递增版本。
+0.2.12 已冻结发布内容，应用版本及构建统一为 0.2.12，目标数据库 schema 保持 v19，不新增编号迁移；成员合并记录通过备份后的幂等结构补齐提供。后续开发进入无编号 Unreleased。
+
+上一正式版本 0.2.11 的目标数据库 schema 为 v19。保留原 v18 OCR 页面方向迁移，新增 v19 反馈状态、通知和管理员阅读记录；支持 0.2.10 的 v17、原 0.2.11 的 v18，以及已补齐反馈结构但仍记录 v18 的测试库，升级前自动备份，幂等保留数据。历史同号但不同内容的 v18 草案仍拒绝自动升级，保留数据并单独评审。0.2.11 撤回重发时保持同一应用版本，不改已发布迁移或清理旧安装数据；原镜像的已下载副本不会自动更新，需要主动拉取并重建容器。
 
 ## 记录什么时候建立
 
@@ -76,9 +78,9 @@ schema 仍为 v6
 要求：
 
 - 更新 `package.json` 版本。
-- 在 `migrations.ts` 新增 schema 版本。
+- 先按 [数据库版本最小变更原则](../AGENTS.md#数据库版本最小变更原则优先规则) 判断兼容性；只有确需新版本门槛时才在 `migrations.ts` 新增版本，兼容补齐不机械升号。
 - 更新 `schema.ts` 最新完整 schema。
-- 更新 `CHANGELOG.md`，写明 schema 变化。
+- 更新 `CHANGELOG.md`，写明 schema 是否变化、结构补齐及备份影响。
 - 更新 `template.config.json` 的 `releaseNotes`。
 - 增加迁移测试，覆盖旧版本库升级到新版本库。
 - 真机验证旧版本升级。
@@ -140,7 +142,7 @@ schema v6 -> v7
 - 上一个正式版本数据库 -> 最新版本。
 - 中间任一包含数据库变化的版本 -> 最新版本。
 - 缺少 `schema_migrations` 的早期开发库 -> 最新版本，如果这个版本曾经对外发布或已有用户数据。
-- 高版本数据库 -> 低版本应用，必须拒绝启动。
+- 高版本数据库 -> 低版本应用，必须停止业务并保留维护页。
 
 ## 开发阶段流程
 
@@ -222,7 +224,7 @@ npm run release:ci
 - 旧版本数据库启动，检查自动备份文件生成。
 - 旧版本数据库启动，检查 `schema_migrations` 写入缺失版本。
 - 旧版本数据库启动，检查 `app_upgrade_history` 写入 completed。
-- 构造高版本数据库，确认当前应用拒绝启动。
+- 构造高版本数据库，确认业务被阻止且 Nitro 继续提供维护页。
 - 迁移失败时，确认保留备份并写入 failed 记录。
 
 Release notes 预览：
@@ -240,8 +242,9 @@ npm run release:notes
 - Release notes 会自动读取 `CHANGELOG.md` 当前版本段落、`package.json`、`template.config.json` 和迁移注册表，输出本版本变更、发布摘要（含应用 ID 与目标 schema）、发布产物和 Docker 镜像信息；`releaseNotes.highlights` 仅保留给 `release:info` 检查和发布校验，不再写入 GitHub Release 正文。
 - 包结构校验会确认 manifest 版本、sub_version、应用介绍、changelog 和图标尺寸。
 - `vX.Y.Z` Tag 先构建 fnOS `.fpk`，再通过 Buildx 发布 `linux/amd64`、`linux/arm64` 的 Docker Hub 多架构镜像，最后创建同时包含 `.fpk`、镜像地址和 digest 的 GitHub Release。
-- Docker 镜像标签包含精确版本 `X.Y.Z`、`vX.Y.Z`、`X.Y` 和短提交 SHA；稳定版本额外更新 `latest`。镜像版本与 `.fpk` 版本都只取自同一个 `package.json`。
+- Docker 镜像仅发布精确版本 `X.Y.Z`；稳定版本额外更新 `latest`，预发布版本不更新 `latest`。不再生成 `vX.Y.Z`、`X.Y` 或短提交 SHA 镜像标签；Git Release tag 仍使用 `vX.Y.Z`。镜像版本与 `.fpk` 版本都只取自同一个 `package.json`。已有 Docker Hub 标签不会自动删除，使用旧标签的部署需先改为精确版本。
 - 镜像发布启用 OCI 源码、版本、许可证标签、SBOM 和 GitHub Actions provenance。发布前应确认 Docker Hub Access Token 和 GitHub Actions Secrets 配置正确。
+- Cosign v2.5.2 使用 `sign-blob` 对包含多架构镜像仓库与 digest 的声明签名，不把签名存入 Docker Hub。签名 `.sig`、证书 `.pem`、已签名的 digest 声明 `.json` 和透明日志凭证 `.bundle.json` 在发布作业中验证后，作为 GitHub Release 附件保存；不新增签名仓库或凭据。验证方法见 [Docker 部署](DOCKER_DEPLOYMENT.md#镜像签名验证)。
 
 本地完整发布：
 

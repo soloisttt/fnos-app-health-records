@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 
-const props = withDefaults(defineProps<{ text: string; label?: string }>(), { label: "查看指标提示" });
+const props = withDefaults(defineProps<{ text: string; label?: string; hover?: boolean }>(), { label: "查看指标提示", hover: false });
 const id = useId();
 const open = ref(false);
 const trigger = ref<HTMLElement>();
@@ -23,9 +23,8 @@ function blur(event: FocusEvent) {
 function scroll(event: Event) {
   if (!panel.value?.contains(event.target as Node)) close();
 }
-async function toggle() {
-  open.value = !open.value;
-  if (!open.value) return;
+async function show() {
+  open.value = true;
   await nextTick();
   const anchor = trigger.value?.getBoundingClientRect();
   const box = panel.value?.getBoundingClientRect();
@@ -34,6 +33,10 @@ async function toggle() {
     left: `${Math.max(12, Math.min(anchor.left, window.innerWidth - box.width - 12))}px`,
     top: `${Math.max(12, anchor.bottom + box.height + 8 < window.innerHeight ? anchor.bottom + 8 : anchor.top - box.height - 8)}px`
   };
+}
+function toggle() {
+  if (open.value) close();
+  else void show();
 }
 function cleanup() {
   document.removeEventListener("pointerdown", outside, true);
@@ -54,8 +57,9 @@ onBeforeUnmount(cleanup);
 
 <template>
   <span v-if="text.trim()" class="indicator-hint" @click.stop @keydown.stop>
-    <span ref="trigger" class="indicator-hint-anchor" @focusout="blur" @keydown.esc="close">
-      <slot name="trigger" :toggle="toggle" :open="open" :panel-id="id">
+    <span ref="trigger" class="indicator-hint-anchor" @focusout="blur" @keydown.esc="close"
+      @mouseenter="hover && show()" @mouseleave="hover && close()" @focusin="hover && show()">
+      <slot name="trigger" :toggle="toggle" :show="show" :open="open" :panel-id="id">
         <button type="button" class="indicator-hint-toggle" :aria-label="label"
           :aria-expanded="open" :aria-controls="open ? id : undefined"
           @click="toggle">!</button>

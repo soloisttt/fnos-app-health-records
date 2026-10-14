@@ -1,3 +1,6 @@
+import { H3 } from "h3";
+import versionMaintenance from "../middleware/00-0-database-version.ts";
+import { initializeDatabaseForStartup } from "../database/client.ts";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,6 +83,39 @@ test("never reuses a connection rejected for an unsupported schema version", asy
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.throws(() => getDatabase(), /newer than this app supports/);
   }
+}));
+
+test("unsupported database keeps maintenance HTTP available and blocks every business route without writes", async () => withDatabase(async () => {
+  const db = getDatabase();
+  db.exec("INSERT INTO schema_migrations(version) VALUES (999)");
+  const before = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+  const reports = db.prepare("SELECT * FROM reports").all();
+  closeDatabaseForTests();
+  assert.equal(initializeDatabaseForStartup()?.databaseVersion, 999);
+  const app = new H3();
+  app.use(versionMaintenance);
+  let businessCalls = 0;
+  app.use(() => { businessCalls++; return 'business'; });
+  for (const path of ['/','/me','/app/fnos-app-health-records/me']) {
+    const response = await app.request(`http://localhost${path}`);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const html = await response.text();
+    assert.match(html, /v999/);
+    assert.match(html, /重新检查/);
+    assert.doesNotMatch(html, /repair-unreleased-schema/);
+  }
+  for (const path of ['/api/reports', '/api/storage/migrate', '/api/maintenance/repair-unreleased-schema', '/healthz']) {
+    const response = await app.request(`http://localhost${path}`, { method: 'POST' });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'DATABASE_UNAVAILABLE');
+  }
+  assert.equal(businessCalls, 0);
+  const probe = new DatabaseSync(getDatabasePath(), { readOnly: true });
+  try {
+    assert.deepEqual(probe.prepare("SELECT * FROM schema_migrations ORDER BY version").all(), before);
+    assert.deepEqual(probe.prepare("SELECT * FROM reports").all(), reports);
+  } finally { probe.close(); }
 }));
 
 test("closes an explicitly repaired connection when migration fails and safely reopens after recovery", async () => withDatabase(() => {

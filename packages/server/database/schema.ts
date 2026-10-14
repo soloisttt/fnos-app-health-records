@@ -1,3 +1,4 @@
+import { memberMergeSchemaSql } from "./member-merge-draft";
 import { feedbackNotificationsSchemaSql } from "./feedback-notifications";
 import { reportExaminationDraftSql } from "./report-examination-draft";
 import { reportDuplicateDraftSql } from "./report-duplicate-draft";
@@ -25,6 +26,7 @@ import { trendGroupsSchemaSql } from "./trend-groups-draft";
 export const schemaVersion = latestSchemaVersion;
 
 export const schemaSql = `
+${memberMergeSchemaSql}
 ${memberSharingSchemaSql}
 ${reportNotesSchemaSql}
 ${trendGroupsSchemaSql}

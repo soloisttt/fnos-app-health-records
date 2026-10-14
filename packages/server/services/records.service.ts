@@ -1241,15 +1241,25 @@ export function getReportDetail(
   const pages = getDatabase()
     .prepare(
       `
-    SELECT id, report_id AS reportId, page_number AS pageNumber, original_name AS originalName,
-      mime_type AS mimeType, file_size AS fileSize, width, height, rotation,
-      (ocr_rotation IS NOT NULL AND ocr_rotation <> rotation) AS ocrStale,
-      source_page_number AS sourcePageNumber, source_page_count AS sourcePageCount,
-      thumbnail_path IS NOT NULL AS hasThumbnail
-    FROM report_pages WHERE report_id = ? ORDER BY page_number
+    SELECT p.id, p.report_id AS reportId, p.page_number AS pageNumber, p.original_name AS originalName,
+      p.mime_type AS mimeType, p.file_size AS fileSize, p.width, p.height, p.rotation,
+      p.ocr_rotation AS ocrRotation, o.id AS ocrResultId,
+      o.coord_width AS coordWidth, o.coord_height AS coordHeight,
+      p.source_page_number AS sourcePageNumber, p.source_page_count AS sourcePageCount,
+      p.thumbnail_path IS NOT NULL AS hasThumbnail
+    FROM report_pages p
+    LEFT JOIN ocr_results o ON o.id = (SELECT id FROM ocr_results WHERE page_id=p.id ORDER BY rowid DESC LIMIT 1)
+    WHERE p.report_id = ? ORDER BY p.page_number
   `,
     )
-    .all(reportId) as unknown as ReportPage[];
+    .all(reportId)
+    .map(value => {
+      const { ocrRotation, ocrResultId, coordWidth, coordHeight, ...page } = value as unknown as ReportPage & Pick<OcrPageRow, "ocrRotation" | "ocrResultId" | "coordWidth" | "coordHeight">;
+      return {
+        ...page,
+        ocrStale: Boolean(ocrResultId) && ocrOverlayRotation({ ...page, ocrRotation, coordWidth, coordHeight }) === null
+      };
+    });
   const detailOcrLineCache = new Map<string, Array<{ id: string; text: string }>>();
   const admissionReport = row;
   const observations = suppressDuplicateMeasurementCandidates(getDatabase()
@@ -2243,9 +2253,20 @@ type OcrPageRow = {
   coordHeight: number | null;
 };
 
+// 图片原件由前端整体旋转，PDF 预览已在服务端旋转；坐标先对齐各自的底图。
+// 返回 null 表示识别方向或参考尺寸不足，不能可靠转换。
+function ocrOverlayRotation(row: Pick<OcrPageRow, "rotation" | "ocrRotation" | "mimeType" | "coordWidth" | "coordHeight">): number | null {
+  const sourceRotation = row.ocrRotation ?? (row.rotation === 0 ? 0 : null);
+  if (sourceRotation === null) return null;
+  const targetRotation = row.mimeType === "application/pdf" ? row.rotation : 0;
+  const delta = (targetRotation - sourceRotation + 360) % 360;
+  if (delta && !(Number.isFinite(row.coordWidth) && row.coordWidth! > 0 && Number.isFinite(row.coordHeight) && row.coordHeight! > 0)) return null;
+  return delta;
+}
+
 // 历史 OCR 结果的坐标系不统一：内嵌 PDF 文本框是页面点坐标，OCR 行是渲染
 // 像素坐标（×renderScale），叠加层无法直接对齐。首次访问时把整页归一到
-// 页面点坐标（含用户旋转角度），并把参考尺寸写回 ocr_results，之后按新
+// 页面点坐标（含识别时旋转角度），并把参考尺寸写回 ocr_results，之后按新
 // 格式直接读取。
 async function healLegacyOcrCoordSpace(
   reportId: string,
@@ -2282,7 +2303,7 @@ async function healLegacyOcrCoordSpace(
     return null;
   }
   if (!pageWidth || !pageHeight) return null;
-  const rotation = ((row.rotation % 360) + 360) % 360;
+  const rotation = ((row.ocrRotation ?? row.rotation) % 360 + 360) % 360;
   const renderScale = legacyOcrRenderScale(reportId, row.pageId);
   const normalizedLines = rawLines.map((line) => {
     const box = line.box;
@@ -2332,7 +2353,7 @@ async function healLegacyOcrCoordSpace(
     .prepare(
       `
     UPDATE ocr_results SET lines_json = ?, coord_width = ?, coord_height = ?
-    WHERE id = ? AND coord_width IS NULL
+    WHERE id = ? AND (coord_width IS NULL OR coord_width <= 0 OR coord_height IS NULL OR coord_height <= 0)
   `,
     )
     .run(
@@ -2368,13 +2389,12 @@ export async function getReportPageOcrDetail(
       o.lines_json AS linesJson, o.coord_width AS coordWidth,
       o.coord_height AS coordHeight
     FROM report_pages p
-    LEFT JOIN ocr_results o ON o.page_id = p.id
+    LEFT JOIN ocr_results o ON o.id = (SELECT id FROM ocr_results WHERE page_id=p.id ORDER BY rowid DESC LIMIT 1)
     WHERE p.id = ? AND p.report_id = ?
   `,
     )
     .get(pageId, reportId) as OcrPageRow | undefined;
   if (!row) return null;
-  const orientationChanged = row.ocrRotation !== null && row.ocrRotation !== row.rotation;
   let rawLines = parseJson<Array<Record<string, unknown>>>(row.linesJson, []);
   let coordWidth =
     typeof row.coordWidth === "number" && row.coordWidth > 0
@@ -2384,7 +2404,7 @@ export async function getReportPageOcrDetail(
     typeof row.coordHeight === "number" && row.coordHeight > 0
       ? row.coordHeight
       : null;
-  if (!orientationChanged && (!coordWidth || !coordHeight) && rawLines.length) {
+  if ((row.ocrRotation !== null || row.rotation === 0) && (!coordWidth || !coordHeight) && rawLines.length) {
     const healed = await healLegacyOcrCoordSpace(
       reportId,
       row,
@@ -2396,6 +2416,13 @@ export async function getReportPageOcrDetail(
       coordWidth = healed.coordWidth;
       coordHeight = healed.coordHeight;
     }
+  }
+  const coordinateRotation = ocrOverlayRotation({ ...row, coordWidth, coordHeight });
+  const orientationChanged = Boolean(row.ocrResultId) && coordinateRotation === null;
+  const sourceCoordWidth = coordWidth;
+  const sourceCoordHeight = coordHeight;
+  if (coordinateRotation && coordinateRotation % 180) {
+    [coordWidth, coordHeight] = [coordHeight, coordWidth];
   }
   const lines = rawLines
     .map((line, index): OcrLineDetail | null => {
@@ -2410,7 +2437,10 @@ export async function getReportPageOcrDetail(
           : `page_${row.pageNumber}_line_${index + 1}`;
       const confidence =
         typeof line.confidence === "number" ? line.confidence : 0;
-      const box = orientationChanged ? null : normalizeOcrBox(line.box);
+      let box = orientationChanged ? null : normalizeOcrBox(line.box);
+      if (box && coordinateRotation) {
+        box = rotateOcrPointBox(box, coordinateRotation, sourceCoordWidth!, sourceCoordHeight!);
+      }
       return { id, text, confidence, box };
     })
     .filter((line): line is OcrLineDetail => line !== null);

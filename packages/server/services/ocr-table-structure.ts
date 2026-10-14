@@ -136,7 +136,15 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(
         && !headers.includes(item) && /参考|范围|历史|上次|前次|预测|预计|标准|(?:19|20|21)\d{2}[-/.年]/.test(item.text));
       if (unsupportedHeader) continue;
       // Left-aligned headings describe column starts, not centre midpoints.
-      const edges = [first.box.left - height, ...headers.slice(1).map(item => item.box.left - height), last.box.right + height / 2];
+      // Name headings are often centred above left-aligned project names.
+      // Bound the first column by the previous panel, not the heading's left edge.
+      const previousPanelHeader = items.filter(item => !headers.includes(item)
+        && headerLabel.test(item.text) && Math.abs(y(item) - y(anchor)) <= height * .65
+        && item.box.right < first.box.left).sort((a,b)=>b.box.right-a.box.right)[0];
+      const firstEdge = nameCol === 0
+        ? (previousPanelHeader ? (previousPanelHeader.box.right + first.box.left) / 2 : 0)
+        : first.box.left - height;
+      const edges = [firstEdge, ...headers.slice(1).map(item => item.box.left - height), last.box.right + height / 2];
       if (edges.some((edge, i) => i > 0 && edge <= edges[i - 1])) continue;
       const column = (item: typeof anchor) => {
         if (item.box.left >= edges[nameCol] && item.box.left < edges[nameCol + 1] && /\p{L}/u.test(item.text)) return nameCol;

@@ -184,6 +184,8 @@ TRUST_PROXY=1 docker compose up -d
 
 ## 升级与回滚
 
+后续发布只提供精确版本标签（例如 `0.2.12`）和稳定版的 `latest`，预发布版本只提供精确版本标签。历史 `v版本号`、`0.2`、`sha-*` 和签名标签不会自动删除；已有部署若使用这些别名，建议改用精确版本号。`sha256-….sig` 是签名产物，不能作为应用镜像启动。
+
 正式环境建议固定版本，不要长期依赖 `latest`：
 
 ```bash
@@ -201,6 +203,25 @@ HEALTH_RECORDS_VERSION=<version> docker compose up -d
 应用启动时会按数据库 schema 自动迁移，并在需要时创建迁移前备份。升级前仍建议在“我的 -> 备份与恢复”创建并下载一份完整备份。
 
 回滚前必须确认旧镜像支持当前数据库 schema。若新版本已经执行不可向下兼容的迁移，不要直接启动旧镜像；应先保留当前数据卷，再使用升级前的完整备份恢复到独立卷或新实例中验证。
+
+## 镜像签名验证
+
+后续发布的镜像仍由 GitHub Actions 使用 Cosign 签名，签名文件独立附在对应 GitHub Release 中，不再生成 Docker Hub 签名标签。下载同一版本的 `docker-image-<version>.sig`、`.pem`、`.json` 和 `.bundle.json`，使用 Cosign v2.5.2 验证签名、发布身份和镜像 digest：
+
+```bash
+VERSION=0.2.12 # 替换为已发布且要验证的版本
+DIGEST='sha256:...' # 从该版本 Release 复制完整 digest
+cosign verify-blob --offline \
+  --bundle "docker-image-${VERSION}.bundle.json" \
+  --certificate-identity "https://github.com/timor-m/fnos-app-health-records/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "docker-image-${VERSION}.json"
+# 验证签名后，还必须核对声明中的镜像仓库与 digest。
+node scripts/verify-image-claim.mjs "docker-image-${VERSION}.json" \
+  "docker.io/timorm/fnos-app-health-records" "${DIGEST}"
+```
+
+若发布由手动运行工作流触发，证书身份中的 `refs/tags/v版本号` 应替换为该次运行实际使用的 ref（例如 `refs/heads/main`）。上述 Node.js 脚本来自本仓库；两步均成功才算通过验证。透明日志记录使用 bundle 校验，信任根首次初始化仍可能需要访问 Sigstore 服务；验证通过后可使用相同 digest 拉取镜像。历史版本仍使用原来的仓库签名方式。
 
 ## 数据备份
 

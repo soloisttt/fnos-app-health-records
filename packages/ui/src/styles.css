@@ -1924,16 +1924,22 @@ button.entry-row-open:disabled { cursor: default; }
   font-size: 12px; font-weight: 700;
 }
 .job-log-item button.retry-action { background: var(--danger-soft); color: var(--danger); }
-.original-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 10px; }
+.original-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); align-items: start; gap: 10px; }
 .original-tile-card { min-width: 0; display: grid; gap: 6px; }
 .original-tile {
   width: 100%;
-  position: relative; min-height: 126px; padding: 12px 10px 10px; border-radius: var(--radius-m);
+  position: relative; height: 126px; padding: 12px 10px 10px; border-radius: var(--radius-m);
   border: 0; background: var(--fill-1); color: var(--brand); display: grid; justify-items: center; align-content: center; gap: 6px;
   overflow: hidden; transition: background .15s, transform .1s;
 }
 .original-tile:hover { background: var(--brand-softer); }
 .original-tile:active { transform: scale(.98); }
+.original-tile-open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: transparent; }
+.original-tile img, .original-tile > svg { pointer-events: none; }
+.original-tile-label { position: relative; display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 18px; pointer-events: none; }
+.original-tile-label .indicator-hint { pointer-events: auto; }
+.original-orientation-warning { width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--amber); }
+.original-orientation-warning:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 4px; }
 .original-tile img { width: 100%; height: 78px; object-fit: contain; border-radius: 8px; background: #fff; }
 .original-tile span { color: var(--ink); font-size: 12px; font-weight: 700; }
 .page-edit-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
@@ -2755,7 +2761,7 @@ button.entry-row-open:disabled { cursor: default; }
 
 .form-select-layer { position: fixed; inset: 0; z-index: 140; }
 .form-select-panel {
-  max-height: 264px; overflow: auto; padding: 6px; display: grid; gap: 2px;
+  max-height: 264px; overflow: auto; padding: 6px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px;
   background: var(--surface); border-radius: var(--radius-m); box-shadow: var(--shadow-l);
   animation: pop-in .15s ease;
 }
@@ -2763,10 +2769,12 @@ button.entry-row-open:disabled { cursor: default; }
 .form-select-empty { margin: 0; padding: 16px 12px; color: var(--muted); font-size: 13px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
 .form-select-option {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  width: 100%; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px;
+  width: 100%; min-width: 0; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px;
   background: transparent; color: var(--ink); text-align: left; font-size: 14px;
   transition: background .12s;
 }
+.form-select-option > span { flex: 1 0 auto; white-space: nowrap; }
+.form-select-check.inactive { visibility: hidden; }
 .form-select-option:hover:not(:disabled) { background: var(--fill-4); }
 .form-select-option.selected { background: var(--brand-softer); color: var(--brand-strong); font-weight: 600; }
 .form-select-option > svg { color: var(--brand); flex: 0 0 auto; }
@@ -3529,7 +3537,7 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
   .processing-recovery-notice > button,
   .processing-delay-notice > button { grid-column: 2; justify-self: start; }
   .mobile-section-card .original-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mobile-section-card .original-tile { min-height: 112px; }
+  .mobile-section-card .original-tile { height: 112px; }
   .mobile-section-card .original-tile img { height: 62px; }
   .original-viewer-header {
     min-height: 0; padding-inline: 10px; align-items: flex-start; flex-wrap: wrap; gap: 8px;

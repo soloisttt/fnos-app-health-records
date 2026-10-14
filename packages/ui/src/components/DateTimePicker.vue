@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, useId } from "vue";
 import { CalendarDays, Check, X } from "@lucide/vue";
 import { useScrollLock } from "../composables/useScrollLock";
 import { DATE_WHEEL_ITEM_HEIGHT, dateWheelStep, dateWheelIndex, clampCalendarDay } from "../utils/date-wheel";
@@ -43,10 +43,11 @@ const wheelRefs: Record<string, { value: HTMLElement | null }> = {
   minute: wheelMinute,
 };
 
-// 解析当前值。分隔符同时接受 `T`（本组件写出的格式）与空格（快速记录/默认值写出的格式），
-// 否则已有的「2026-10-13 17:30」会被当成空值，显示回「请选择」并丢掉时刻。
+// 解析当前值
 const parsedDate = computed(() => {
   if (!props.modelValue) return null;
+  /* 分隔符同时接受 `T`（本组件写出的格式）与空格（快速记录/默认值写出的格式），
+     否则已有的「2026-10-13 17:30」会被当成空值，滚轮打开时定位不到当前值。 */
   const match = props.modelValue.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!match) return null;
   return {
@@ -130,11 +131,102 @@ function formatValue(): string | null {
   return `${y}-${m}-${d}T${h}:${min}`;
 }
 
-function displayValue(): string {
-  if (!parsedDate.value) return props.label || "请选择";
-  const { year, month, day, hour, minute } = parsedDate.value;
-  if (!props.showTime) return `${year}-${padZero(month)}-${padZero(day)}`;
-  return `${year}-${padZero(month)}-${padZero(day)} ${padZero(hour)}:${padZero(minute)}`;
+const inputElement = ref<HTMLInputElement | null>(null);
+const inputText = ref('');
+const inputError = ref('');
+const showInputError = ref(false);
+const errorId = useId();
+const errorTooltip = ref<HTMLElement | null>(null);
+const errorStyle = ref<Record<string, string>>({});
+const errorVisible = computed(() => showInputError.value && !!inputError.value && !open.value && !props.disabled);
+function positionError() {
+  if (!errorVisible.value || !inputElement.value || !errorTooltip.value) return;
+  const rect = inputElement.value.getBoundingClientRect();
+  const width = Math.min(320, window.innerWidth - 24);
+  const height = errorTooltip.value.offsetHeight;
+  const below = rect.bottom + 6;
+  errorStyle.value = {
+    width: `${width}px`,
+    left: `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`,
+    top: `${Math.max(12, below + height <= window.innerHeight - 12 ? below : rect.top - height - 6)}px`,
+  };
+}
+watch([errorVisible, inputError], () => nextTick(positionError));
+watch(errorVisible, value => {
+  const action = value ? 'addEventListener' : 'removeEventListener';
+  window[action]('resize', positionError);
+  window[action]('scroll', positionError, true);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', positionError);
+  window.removeEventListener('scroll', positionError, true);
+});
+const inputPlaceholder = computed(() => props.showTime ? 'YYYY-MM-DD HH:mm' : 'YYYY-MM-DD');
+watch(() => [props.modelValue, props.showTime] as const, () => {
+  inputText.value = (props.modelValue || '').replace('T', ' ').slice(0, props.showTime ? 16 : 10);
+  inputError.value = '';
+  showInputError.value = false;
+  inputElement.value?.setCustomValidity('');
+}, { immediate: true });
+
+const composingInput = ref(false);
+function allowedInput(value: string) {
+  return (props.showTime ? /^[0-9/ :\-]*$/ : /^[0-9/\-]*$/).test(value);
+}
+function beforeTextInput(event: InputEvent) {
+  if (!event.isComposing && event.data && !allowedInput(event.data)) event.preventDefault();
+}
+function onTextInput(event: Event) {
+  if (composingInput.value || (event as InputEvent).isComposing) return;
+  const element = event.target as HTMLInputElement;
+  if (!allowedInput(element.value)) {
+    // Reject the edit as a whole: stripping pasted text could create a different date.
+    const caret = Math.min(element.selectionStart ?? inputText.value.length, inputText.value.length);
+    element.value = inputText.value;
+    element.setSelectionRange(caret, caret);
+    return;
+  }
+  inputText.value = element.value;
+  readInput(false);
+}
+function finishComposition(event: CompositionEvent) {
+  composingInput.value = false;
+  onTextInput(event);
+}
+
+function readInput(commit = false) {
+  if (props.disabled) return;
+  const text = inputText.value.trim();
+  if (!text) {
+    inputError.value = '';
+    inputElement.value?.setCustomValidity('');
+    if (commit) emit('update:modelValue', null);
+    return;
+  }
+  const match = text.match(props.showTime
+    ? /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})$/
+    : /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  const [y, m, d, h, minute] = match ? match.slice(1).map(Number) : [];
+  const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const valid = match && years.value.includes(y) && m >= 1 && m <= 12 && d >= 1 && d <= monthDays[m - 1]
+    && (!props.showTime || (h >= 0 && h <= 23 && minute >= 0 && minute <= 59));
+  inputError.value = valid ? '' : `请输入有效日期（${inputPlaceholder.value}，年份 ${years.value[0]}–${years.value.at(-1)}）`;
+  inputElement.value?.setCustomValidity(inputError.value);
+  if (valid && commit) {
+    const value = `${y}-${padZero(m)}-${padZero(d)}` + (props.showTime ? `T${padZero(h)}:${padZero(minute)}` : '');
+    emit('update:modelValue', value);
+  }
+}
+function finishInput() {
+  if (composingInput.value) return;
+  readInput(true);
+  showInputError.value = true;
+}
+function openPicker() {
+  if (props.disabled) return;
+  inputElement.value?.blur();
+  open.value = true;
 }
 
 // 滚轮滚动处理（带自动吸附）
@@ -323,6 +415,10 @@ function scrollToSelected() {
 // 确认选择
 function confirm() {
   syncCalendarDays();
+  inputText.value = (formatValue() || '').replace('T', ' ');
+  inputError.value = '';
+  showInputError.value = false;
+  inputElement.value?.setCustomValidity('');
   emit("update:modelValue", formatValue());
   open.value = false;
 }
@@ -384,17 +480,20 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="root" class="datetime-picker" :class="[{ disabled }, variant === 'plain' ? 'plain' : '']">
-    <button
-      type="button"
-      class="datetime-picker-trigger"
-      :disabled="disabled"
-      :aria-label="ariaLabel"
-      @click="open = true"
-    >
-      <CalendarDays class="datetime-picker-trigger-icon" :size="variant === 'plain' ? 15 : 17" aria-hidden="true" />
-      <span :class="{ placeholder: !modelValue }">{{ displayValue() }}</span>
-    </button>
+    <div class="datetime-picker-field">
+      <input ref="inputElement" :value="inputText" type="text" :disabled="disabled" :readonly="variant === 'plain'"
+        :placeholder="label || inputPlaceholder" :aria-label="ariaLabel || label || (showTime ? '日期和时间' : '日期')"
+        :aria-invalid="!!inputError" :aria-describedby="errorVisible ? errorId : undefined"
+        autocomplete="off" :title="inputPlaceholder" @beforeinput="beforeTextInput" @input="onTextInput" @compositionstart="composingInput = true" @compositionend="finishComposition" @blur="finishInput"
+        @focus="showInputError = true" @mouseenter="showInputError = true" @keydown.esc="showInputError = false" @keydown.enter.prevent="finishInput" @keydown.down.alt.prevent="openPicker"
+        @click="variant === 'plain' && openPicker()" />
+      <button type="button" class="datetime-picker-trigger" :disabled="disabled"
+        :aria-label="'选择' + (ariaLabel || label || '日期')" :aria-expanded="open" aria-haspopup="dialog" @click="openPicker">
+        <CalendarDays :size="17" aria-hidden="true" />
+      </button>
+    </div>
     <Teleport to="body">
+      <div v-if="errorVisible" :id="errorId" ref="errorTooltip" class="datetime-input-error" :style="errorStyle" role="tooltip" aria-live="polite">{{ inputError }}</div>
       <!-- click 关闭遮罩避免透穿；touchstart.prevent 阻止触屏合成 click 落到底层元素 -->
       <div v-if="open" ref="layer" class="datetime-picker-layer" @click.self="cancel" @touchstart.self.prevent="cancel">
         <div ref="panel" class="datetime-picker-panel" :style="panelStyle" role="dialog" aria-modal="true" :aria-label="label || '请选择时间'">
@@ -466,41 +565,30 @@ onBeforeUnmount(() => {
 .datetime-picker { display: block; width: 100%; min-width: 0; }
 .datetime-picker.compact-filter { width: auto; min-width: 0; padding: 0; background: transparent; box-shadow: none; }
 
-.datetime-picker input {
-  display: block; width: 100%; min-height: 44px; padding-block: 0;
-  line-height: normal; text-align: left; font-variant-numeric: tabular-nums;
-}
+.datetime-picker-field { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.datetime-picker-field:focus-within { border-color: var(--brand); }
+.datetime-picker input { flex: 1; width: 100%; min-width: 0; min-height: 44px; padding: 0 10px; border: 0; border-radius: inherit; background: transparent; color: var(--ink); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; box-shadow: none; outline: none; }
+.datetime-picker input::placeholder { color: var(--muted); }
+.datetime-picker-trigger { display: flex; align-items: center; justify-content: center; flex: 0 0 40px; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.datetime-picker-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: -3px; }
+.datetime-picker-trigger:hover:not(:disabled) { color: var(--brand); background: var(--brand-soft); }
+.datetime-picker.disabled { opacity: .6; }
+.datetime-input-error { position: fixed; z-index: 160; box-sizing: border-box; width: min(320px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-s); color: var(--red, #b42318); font-size: 12px; line-height: 1.6; pointer-events: none; }
+.datetime-picker-field:has(input[aria-invalid="true"]) { border-color: var(--red, #b42318); }
+.datetime-picker.compact-filter .datetime-picker-field { box-shadow: var(--shadow-s); border: 0; }
+.datetime-picker.compact-filter input, .datetime-picker.compact-filter .datetime-picker-trigger { min-height: 38px; font-size: 13px; }
 
-.datetime-picker-trigger {
-  display: flex; align-items: center; width: 100%; min-height: 44px;
-  padding: 0 12px; border: 1px solid var(--line); border-radius: 10px;
-  background: var(--surface); color: var(--ink); font-size: 14px;
-  text-align: left; cursor: pointer; transition: border-color .15s;
+/* plain：只显示一行可点的文字（默认已填好当前时间，点一下才展开选择器）。
+   输入框改成只读、点它即开选择器，避免表单里到处摆一个输入框。 */
+.datetime-picker.plain .datetime-picker-field { border: 0; background: transparent; box-shadow: none; }
+.datetime-picker.plain input {
+  flex: 0 1 auto; width: auto; min-height: 32px; padding: 0;
+  color: var(--brand-strong); font-weight: 600; cursor: pointer;
 }
-.datetime-picker-trigger-icon { flex: 0 0 auto; margin-right: 8px; color: var(--muted); }
-.datetime-picker-trigger:focus { border-color: var(--brand); outline: none; }
-.datetime-picker-trigger .placeholder { color: var(--muted); }
-.datetime-picker.compact-filter .datetime-picker-trigger {
-  min-height: 38px;
-  padding-inline: 10px;
-  border: 0;
-  box-shadow: var(--shadow-s);
-  font-size: 13px;
-}
-
-/* plain：只显示一行可点的文字（默认已填好当前时间，点一下才展开选择器） */
-.datetime-picker.plain .datetime-picker-trigger {
-  min-height: 32px; padding: 0; border: 0; border-radius: 8px;
-  background: transparent; color: var(--brand-strong); font-weight: 600;
-  width: auto; max-width: 100%;
-}
-.datetime-picker.plain .datetime-picker-trigger-icon { margin-right: 6px; color: var(--brand); }
-.datetime-picker.plain .datetime-picker-trigger:active { opacity: .7; }
-.datetime-picker.plain .datetime-picker-trigger .placeholder { color: var(--muted); font-weight: 500; }
-
-/* PC 上触发器同步收紧到桌面表单密度，移动端保持 44px 触控目标 */
+.datetime-picker.plain input::placeholder { color: var(--muted); font-weight: 500; }
+.datetime-picker.plain .datetime-picker-trigger { flex: 0 0 26px; min-height: 32px; color: var(--brand); }
+.datetime-picker.plain .datetime-picker-trigger:hover:not(:disabled) { background: transparent; }
 @media (min-width: 761px) and (pointer: fine) {
-  .datetime-picker-trigger { min-height: 36px; font-size: 13px; }
-  .datetime-picker.plain .datetime-picker-trigger { min-height: 30px; font-size: 13px; }
+  .datetime-picker input, .datetime-picker-trigger { min-height: 36px; font-size: 13px; }
 }
 </style>

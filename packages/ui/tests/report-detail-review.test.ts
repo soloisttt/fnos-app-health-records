@@ -104,6 +104,129 @@ afterEach(() => {
 });
 
 describe("ReportDetail 核对指标模式", () => {
+  it('shows a compact direction warning only for stale pages without opening the original viewer', async () => {
+    const pages = [1, 2].map(pageNumber => ({
+      id: `p${pageNumber}`, reportId: 'r1', pageNumber, mimeType: 'image/png',
+      hasThumbnail: true, rotation: pageNumber === 2 ? 90 : 0, ocrStale: pageNumber === 2
+    }));
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/reports/r1')) return jsonResponse({ ...detailPayload, pages });
+      if (url.includes('/original/status')) return jsonResponse({ status: 'ready' });
+      if (url.includes('jobs')) return jsonResponse([]);
+      return jsonResponse({});
+    });
+    const wrapper = mount(ReportDetail, {
+      attachTo: document.body, props: { reportId: 'r1', variant: 'panel' },
+      global: { stubs: { RouterLink: true, ReportNotesPanel: true, ReportPageAppend: true } }
+    });
+    try {
+      await flushPromises(); await flushPromises();
+      const cards = wrapper.findAll('.original-tile-card');
+      expect(cards[0]!.find('.original-orientation-warning').exists()).toBe(false);
+      const warning = cards[1]!.get('.original-orientation-warning');
+      expect(warning.attributes('aria-label')).toBe('查看第 2 页方向调整说明');
+      expect(cards[1]!.find('.preview-hint').exists()).toBe(false);
+      expect(document.querySelector('button button')).toBeNull();
+      expect(document.querySelector('.indicator-hint-panel')).toBeNull();
+      await warning.trigger('click'); await flushPromises();
+      expect(document.querySelector('.indicator-hint-panel')?.textContent).toContain('缺少可靠的 OCR 位置');
+      expect(document.querySelector('.original-viewer')).toBeNull();
+      await warning.trigger('focusout', { relatedTarget: null });
+      expect(document.querySelector('.indicator-hint-panel')).toBeNull();
+      const anchor = cards[1]!.get('.indicator-hint-anchor');
+      await anchor.trigger('mouseenter');
+      await warning.trigger('click');
+      expect(document.querySelector('.indicator-hint-panel')).not.toBeNull();
+      await anchor.trigger('mouseleave');
+      expect(document.querySelector('.indicator-hint-panel')).toBeNull();
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(['image/png', 'application/pdf'])('restores OCR overlays and removes a healed warning for %s without rotating the PDF twice', async mimeType => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const pdf = mimeType === 'application/pdf';
+    const page = { id: 'p1', reportId: 'r1', pageNumber: 1, mimeType, hasThumbnail: true, rotation: 90, ocrStale: true };
+    const coords = pdf ? { coordWidth: 300, coordHeight: 200, box: [240, 10, 280, 40] } : { coordWidth: 200, coordHeight: 300, box: [10, 20, 40, 60] };
+    const dimensions = [
+      vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(coords.coordWidth),
+      vi.spyOn(HTMLImageElement.prototype, 'naturalHeight', 'get').mockReturnValue(coords.coordHeight),
+      vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(200),
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300)
+    ];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/reports/r1')) return jsonResponse({ ...detailPayload, pages: [page] });
+      if (url.endsWith('/pages/p1/ocr')) return jsonResponse({
+        pageId: 'p1', pageNumber: 1, orientationChanged: false,
+        coordWidth: coords.coordWidth, coordHeight: coords.coordHeight,
+        lines: [{ id: 'stable-line', text: '合成文字', confidence: 0.96, box: coords.box }]
+      });
+      if (url.includes('/original/status')) return jsonResponse({ status: 'ready' });
+      if (url.includes('jobs')) return jsonResponse([]);
+      if (url.endsWith('/ocr')) return jsonResponse([]);
+      return jsonResponse({});
+    });
+    const wrapper = mount(ReportDetail, {
+      attachTo: document.body, props: { reportId: 'r1', variant: 'panel' },
+      global: { stubs: { teleport: true, transition: false, RouterLink: true, ReportNotesPanel: true, ReportPageAppend: true } }
+    });
+    try {
+      await flushPromises(); await flushPromises();
+      expect(wrapper.find('.original-orientation-warning').exists()).toBe(true);
+      await wrapper.findAll('button').find(button => button.text() === '校对字段')!.trigger('click');
+      await flushPromises(); await flushPromises();
+      expect(wrapper.find('.original-orientation-warning').exists()).toBe(false);
+      const image = wrapper.get('.edit-original-image-wrapper img');
+      await image.trigger('load');
+      await flushPromises();
+      const toggle = wrapper.findAll('.edit-original-actions button').find(button => button.text().includes('OCR'))!;
+      expect(toggle.attributes('disabled')).toBeUndefined();
+      await toggle.trigger('click'); await flushPromises();
+      expect(wrapper.get('.ocr-text-line').text()).toBe('合成文字');
+      const line = wrapper.get('.ocr-text-line').element as HTMLElement;
+      expect(line.style.left).toBe(pdf ? '80%' : '5%');
+      expect(line.style.top).toBe(pdf ? '5%' : `${20 / 300 * 100}%`);
+      expect(wrapper.get('.edit-original-page .original-orientation-content').attributes('style')).toContain(`rotate(${pdf ? 0 : 90}deg)`);
+      expect(wrapper.text()).not.toContain('标记暂不可用');
+    } finally { wrapper.unmount(); dimensions.forEach(mock => mock.mockRestore()); }
+  });
+
+  it('ignores a pending OCR response from before a saved page rotation', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    let rotation = 0;
+    let resolveOcr!: (response: Response) => void;
+    const page = () => ({ id: 'p1', reportId: 'r1', pageNumber: 1, mimeType: 'image/png', hasThumbnail: true, rotation, ocrStale: false });
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/pages/p1/ocr')) return new Promise<Response>(resolve => { resolveOcr = resolve; });
+      if (url.endsWith('/pages/p1/rotation') && init?.method === 'PUT') {
+        rotation = 90;
+        return jsonResponse({ ...detailPayload, pages: [page()] });
+      }
+      if (url.endsWith('/api/reports/r1')) return jsonResponse({ ...detailPayload, pages: [page()] });
+      if (url.includes('jobs') || url.endsWith('/ocr')) return jsonResponse([]);
+      return jsonResponse({});
+    });
+    const wrapper = mount(ReportDetail, {
+      attachTo: document.body, props: { reportId: 'r1', variant: 'panel' },
+      global: { stubs: { teleport: true, RouterLink: true, ReportNotesPanel: true, ReportPageAppend: true } }
+    });
+    try {
+      await flushPromises(); await flushPromises();
+      await wrapper.findAll('button').find(button => button.text() === '校对字段')!.trigger('click');
+      await flushPromises();
+      await wrapper.get('.report-edit-backdrop button[title="关闭"]').trigger('click');
+      await wrapper.get('.page-edit-actions button[title^="保存页面方向"]').trigger('click');
+      await flushPromises();
+      resolveOcr(jsonResponse({ pageId: 'p1', pageNumber: 1, orientationChanged: true, coordWidth: null, coordHeight: null, lines: [] }));
+      await flushPromises(); await flushPromises();
+      expect(rotation).toBe(90);
+      expect(wrapper.find('.original-orientation-warning').exists()).toBe(false);
+      expect(callsTo('/pages/p1/ocr')).toHaveLength(1);
+    } finally { wrapper.unmount(); }
+  });
+
   it('报告字段保存携带打开编辑器时的版本，冲突时保留输入', async () => {
     let version = 7;
     fetchMock.mockImplementation(async (input:RequestInfo|URL,init?:RequestInit) => {

@@ -891,7 +891,8 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     const latestSheet = () => [...document.body.querySelectorAll(".episode-sheet")].at(-1)!;
     expect(latestSheet().textContent).toContain("记一次服药 · 氨溴特罗口服溶液");
 
-    const doseInput = latestSheet().querySelectorAll<HTMLInputElement>("input")[0]!;
+    /* 按类名取用量输入框：日期选择器改成输入框之后，"第一个 input" 不再是它 */
+    const doseInput = latestSheet().querySelector<HTMLInputElement>(".episode-sheet-dose")!;
     doseInput.value = "4ml";
     doseInput.dispatchEvent(new Event("input"));
     await settle();

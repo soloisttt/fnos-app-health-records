@@ -1,3 +1,4 @@
+import MemberMergeSettingsPage from "./pages/settings/MemberMergeSettingsPage.vue";
 import { createRouter, createWebHistory } from "vue-router";
 import OverviewPage from "./pages/OverviewPage.vue";
 import RecordsPage from "./pages/RecordsPage.vue";
@@ -51,6 +52,7 @@ const router = createRouter({
     { path: "/me/audit", component: UserAuditSettingsPage, meta: { title: "用户操作日志", requiresAdmin: true } },
     { path: "/me/ai-audit", component: AiAuditSettingsPage, meta: { title: "AI 审计", requiresAdmin: true } },
     { path: "/me/system-logs", component: SystemLogsSettingsPage, meta: { title: "系统日志", requiresAdmin: true } },
+    { path: "/me/maintenance/member-merges", component: MemberMergeSettingsPage, meta: { title: "成员档案合并", requiresAdmin: true } },
     { path: "/me/maintenance", component: MaintenanceSettingsPage, meta: { title: "维护工具", requiresAdmin: true } },
     { path: '/me/storage', component: StorageSettingsPage, meta: { title: '存储设置', requiresAdmin: true, requiresArchiveStorage: true } },
     { path: "/me/maintenance/indicators", component: IndicatorManagementSettingsPage, meta: { title: "指标管理", requiresAdmin: true } },
