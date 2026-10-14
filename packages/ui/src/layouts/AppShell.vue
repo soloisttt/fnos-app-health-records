@@ -2,7 +2,7 @@
 import MemberManager from "../components/MemberManager.vue";
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { Activity, Bell, Camera, ChartNoAxesCombined, ChevronsUpDown, ClipboardList, FolderHeart, LayoutDashboard, Search, UserRound, X } from "@lucide/vue";
+import { Bell, Camera, ChartNoAxesCombined, ChevronsUpDown, ClipboardList, FolderHeart, LayoutDashboard, Search, UserRound, X } from "@lucide/vue";
 import appIcon from "../assets/app-icon.png";
 import MemberSwitcher from "../components/MemberSwitcher.vue";
 import SetupGuideModal from "../components/SetupGuideModal.vue";
@@ -63,6 +63,8 @@ const reminderBadge = computed(() => {
   return count > 99 ? "99+" : String(count);
 });
 function isNavActive(to: string) {
+  /* 疾病已并进病程当「按病看」：从老地址 /diseases 进来时也把「病程」点亮 */
+  if (to === "/episodes") return route.path === "/diseases" || route.path === to || route.path.startsWith(`${to}/`);
   return route.path === to || route.path.startsWith(`${to}/`);
 }
 // “我的”及其二级设置页统一展示账号信息顶栏，页面标题由页面内的 SubPageHeader 承担
@@ -129,7 +131,7 @@ const roleLabel = computed(() => app.session.value?.isAdmin ? "管理员" : "家
 const navItems = [
   { to: "/overview", label: "概览", icon: LayoutDashboard },
   { to: "/records", label: "档案", icon: FolderHeart },
-  { to: "/diseases", label: "疾病", icon: Activity },
+  /* 疾病并进病程页当「按病看」了：底部少一格，老地址 /diseases 仍然能用（见 isNavActive） */
   { to: "/episodes", label: "病程", icon: ClipboardList },
   { to: "/upload", label: "上传报告", icon: Camera, primary: true },
   { to: "/trends", label: "趋势", icon: ChartNoAxesCombined },

@@ -38,12 +38,16 @@ const props = defineProps<{
   busy?: boolean;
   /** 是否显示「数值 / 单位」（体温、血压这类） */
   showValue?: boolean;
+  /** 编辑一条已有记录时给 true：面板左下角出现「删除这条」 */
+  canRemove?: boolean;
   form: EpisodeSheetForm;
 }>();
 
 const emit = defineEmits<{
   close: [];
   save: [values: EpisodeSheetForm, repeat: boolean];
+  /** 编辑一条已有记录时，直接从这个面板删掉它（不再让用户先退出去找「移除」） */
+  remove: [];
 }>();
 
 const draft = ref<EpisodeSheetForm>({ ...props.form });
@@ -229,6 +233,16 @@ function submit(repeat: boolean) {
         <p v-if="error" class="episode-sheet-error" role="alert">{{ error }}</p>
 
         <div class="episode-sheet-actions">
+          <!-- 删除靠左、跟「保存」拉开，免得手滑点到 -->
+          <button
+            v-if="canRemove"
+            type="button"
+            class="episode-sheet-remove"
+            :disabled="busy"
+            @click="emit('remove')"
+          >
+            删除这条
+          </button>
           <button type="button" class="episode-sheet-cancel" @click="emit('close')">取消</button>
           <button v-if="intent === 'log'" type="button" class="episode-sheet-secondary" :disabled="busy" @click="submit(true)">
             保存并再记一条

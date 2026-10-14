@@ -3,6 +3,7 @@ import { computed, ref, watch, onActivated, onDeactivated } from "vue";
 import {
   ArrowLeft,
   ArrowUpDown,
+  ChevronRight,
   ClipboardCheck,
   ClipboardList,
   Copy,
@@ -12,6 +13,7 @@ import {
   Thermometer,
   Trash2,
 } from "@lucide/vue";
+import CaseViewTabs from "../components/CaseViewTabs.vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
 import EpisodeEntrySheet, {
@@ -169,6 +171,18 @@ function openSheet(options: {
 
 function closeSheet() {
   sheet.value = { ...sheet.value, open: false };
+}
+
+/** 编辑面板里点「删除这条」：按面板对着的是哪种记录，走各自原来的删除流程（都带二次确认） */
+function removeFromSheet() {
+  const entry = sheet.value;
+  if (!entry.id || saving.value) return;
+  const id = entry.id;
+  const isIntake = entry.mode === "medication" && entry.intent === "log";
+  closeSheet();
+  if (entry.mode === "symptom") removeSymptom(id);
+  else if (isIntake) removeIntake(id);
+  else removeMedication(id);
 }
 
 /** 症状名值得显示数值的：体温/发热这类，或本来就有单位 */
@@ -821,22 +835,6 @@ const temperaturePoints = computed(() =>
     .map((entry) => ({ at: entry.at, reading: entry.info.reading, level: entry.info.level })),
 );
 
-const temperatureCard = ref<HTMLElement | null>(null);
-const temperatureFocused = ref(false);
-let temperatureFocusTimer: number | undefined;
-
-/** 时间轴上点体温数字 → 滑到体温小结卡并闪一下：一下就能看到整条曲线 */
-function focusTemperatureCard() {
-  const element = temperatureCard.value;
-  if (!element) return;
-  element.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  temperatureFocused.value = true;
-  if (temperatureFocusTimer) window.clearTimeout(temperatureFocusTimer);
-  temperatureFocusTimer = window.setTimeout(() => {
-    temperatureFocused.value = false;
-  }, 1600);
-}
-
 const episodeForm = ref({ title: "", onsetAt: "", causeText: "" });
 function emptySymptomForm() {
   return {
@@ -1367,6 +1365,7 @@ function editIntake(item: CaseMedicationIntake) {
     mode: "medication",
     intent: "log",
     subject: item.medicationName,
+    id: item.id,
     reportId: item.sourceReportId,
     form: {
       name: item.medicationName,
@@ -1764,12 +1763,7 @@ onActivated(() => {
         </div>
       </section>
 
-      <section
-        v-if="feverSummary"
-        ref="temperatureCard"
-        class="settings-band entry-list-card episode-fever-card"
-        :class="{ 'is-focused': temperatureFocused }"
-      >
+      <section v-if="feverSummary" class="settings-band entry-list-card episode-fever-card">
         <header>
           <div><Thermometer :size="18" /><h3>发热小结</h3></div>
           <span class="count-label">共记录 {{ feverSummary.count }} 次</span>
@@ -2087,25 +2081,23 @@ onActivated(() => {
               <span class="chip status-label">{{ block.badge }}</span>
               <time v-if="block.at">{{ formatMoment(block.at) }}</time>
             </div>
+            <!-- 条目不再各摆一个「编辑 / 移除」按钮：点整条就进编辑面板，删除在面板里 -->
             <div class="episode-event-items">
               <div
                 v-for="item in block.items"
                 :key="item.key"
                 class="episode-event-item"
-                :class="{ 'is-temperature': Boolean(item.value) }"
+                :class="{ 'is-temperature': Boolean(item.value), 'is-tappable': Boolean(item.edit) }"
+                :role="item.edit ? 'button' : undefined"
+                :tabindex="item.edit ? 0 : undefined"
+                @click="item.edit?.()"
+                @keydown.enter.prevent="item.edit?.()"
               >
-                <!-- 体温单开一套长相：数值大字 + 小单位，按高低上色；点一下滑到体温曲线 -->
-                <button
-                  v-if="item.value"
-                  class="episode-temp-figure"
-                  :class="`is-${item.value.level}`"
-                  type="button"
-                  title="看这次生病的体温曲线"
-                  @click="focusTemperatureCard"
-                >
+                <!-- 体温单开一套长相：数值大字 + 小单位，按高低上色 -->
+                <span v-if="item.value" class="episode-temp-figure" :class="`is-${item.value.level}`">
                   <span class="episode-temp-figure-name">{{ item.title }}</span>
                   <span class="episode-temp-figure-value">{{ item.value.reading }}<small>{{ item.value.unit }}</small></span>
-                </button>
+                </span>
                 <strong v-else>{{ item.title }}</strong>
                 <small v-if="item.status || item.detail" class="episode-item-meta">
                   <em
@@ -2117,13 +2109,8 @@ onActivated(() => {
                     <span v-if="item.status"> · </span>{{ item.detail }}
                   </template>
                 </small>
-                <div v-if="item.edit || item.remove || item.derived" class="row-actions">
-                  <button v-if="item.edit" type="button" :disabled="saving" @click="item.edit()">编辑</button>
-                  <button v-if="item.remove" class="danger-action" type="button" :disabled="saving" @click="item.remove()">
-                    <Trash2 :size="15" />移除
-                  </button>
-                  <span v-else-if="item.derived" class="derived-hint">随报告记入</span>
-                </div>
+                <span v-if="item.derived" class="episode-item-derived">随报告记入</span>
+                <ChevronRight v-else-if="item.edit" class="episode-item-chevron" :size="16" aria-hidden="true" />
               </div>
             </div>
           </div>
@@ -2139,6 +2126,9 @@ onActivated(() => {
           <Plus :size="17" />新建病程
         </button>
       </div>
+
+      <!-- 病程（按次）和疾病（按病）是同一个入口的两个视角，切换条两边一样 -->
+      <CaseViewTabs />
 
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
 
@@ -2205,9 +2195,11 @@ onActivated(() => {
       :intent="sheet.intent"
       :subject="sheet.subject"
       :show-value="sheet.showValue"
+      :can-remove="Boolean(sheet.id)"
       :busy="saving"
       :form="sheetForm"
       @close="closeSheet"
+      @remove="removeFromSheet"
       @save="submitSheet"
     />
 

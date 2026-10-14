@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowLeft, Activity, Search, X } from "@lucide/vue";
+import CaseViewTabs from "../components/CaseViewTabs.vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
@@ -254,6 +255,9 @@ onActivated(() => {
     </template>
 
     <template v-else>
+      <!-- 和病程页顶部同一排切换条：这条路进来看的是「按病」 -->
+      <CaseViewTabs />
+
       <label class="search-field entry-search">
         <Search :size="16" />
         <input v-model="keyword" type="search" placeholder="搜索症状或疾病，例如 咳嗽" />

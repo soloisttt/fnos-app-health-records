@@ -148,3 +148,42 @@ describe("量出来的数值不摆状态与程度、部位", () => {
     expect(text).toContain("填一下这次量到的数值");
   });
 });
+
+/*
+ * 「点时间轴上的条目 → 直接进编辑表单」的最后一环：
+ * 删除不再在条目上单独摆一个按钮，而是收进编辑面板里。
+ */
+describe("编辑面板里的「删除这条」", () => {
+  it("编辑一条已有记录时出现在左下角，点了把 remove 抛出去", async () => {
+    const wrapper = mount(EpisodeEntrySheet, {
+      attachTo: document.body,
+      props: {
+        open: true,
+        mode: "symptom",
+        intent: "edit",
+        subject: "发热",
+        canRemove: true,
+        form: baseForm({ name: "发热", value: "38.5", unit: "℃" }),
+      },
+    });
+    wrapperList.push(wrapper);
+    await nextTick();
+
+    const remove = document.body.querySelector<HTMLButtonElement>(".episode-sheet-remove");
+    expect(remove?.textContent).toContain("删除这条");
+    remove!.click();
+    await nextTick();
+    expect(wrapper.emitted("remove")).toBeTruthy();
+  });
+
+  it("新记一条时不给删除按钮（还没有东西可删）", async () => {
+    const wrapper = mount(EpisodeEntrySheet, {
+      attachTo: document.body,
+      props: { open: true, mode: "symptom", intent: "create", subject: "咳嗽", form: baseForm() },
+    });
+    wrapperList.push(wrapper);
+    await nextTick();
+
+    expect(document.body.querySelector(".episode-sheet-remove")).toBeNull();
+  });
+});

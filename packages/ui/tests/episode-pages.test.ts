@@ -577,11 +577,12 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(symptomEvent.exists()).toBe(true);
     expect(medicationEvent.classes()).not.toContain("episode-event--symptom");
 
-    /* 手动补录的用药标明来源，并且可以单独删除 */
+    /* 手动补录的用药标明来源；条目上不再摆「编辑 / 移除」按钮 —— 点整条进编辑面板，删除在面板里 */
     expect(medicationEvent.text()).toContain("氨溴特罗口服溶液");
     expect(medicationEvent.text()).toContain("bid（每日两次）");
     expect(medicationEvent.text()).toContain("手动补录");
-    expect(medicationEvent.find(".danger-action").exists()).toBe(true);
+    expect(medicationEvent.find(".episode-event-item.is-tappable").exists()).toBe(true);
+    expect(medicationEvent.find(".danger-action").exists()).toBe(false);
   });
 
   it("就诊卡片合并同一次就诊、缺口提示、发热小结与快捷记录", async () => {
@@ -690,17 +691,22 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     /* 体温只关心数值与间隔，「存在 / 加重」这类状态对体温没有意义，不挂状态标签 */
     expect(feverEvent.find(".episode-status").exists()).toBe(false);
 
-    /* 体温小结卡里带一条体温曲线；点时间轴上那个数字就滑过去看整条 */
+    /* 体温小结卡里带一条体温曲线（曲线看这里） */
     expect(fever.find(".episode-temp-curve").exists()).toBe(true);
     expect(fever.find(".episode-temp-curve-top").text()).toBe("38.5℃");
-    if (typeof Element.prototype.scrollIntoView !== "function") {
-      Element.prototype.scrollIntoView = () => {};
-    }
-    const scrollSpy = vi.spyOn(Element.prototype, "scrollIntoView");
-    await figure.trigger("click");
-    expect(scrollSpy).toHaveBeenCalled();
-    expect(wrapper.find(".episode-fever-card").classes()).toContain("is-focused");
-    scrollSpy.mockRestore();
+
+    /* 时间轴上点这条体温 → 直接进编辑面板（不再先弹一层「看曲线 / 编辑 / 删除」的菜单），
+       面板里带着删掉的入口，且值是这条记录自己的 */
+    await feverEvent.find(".episode-event-item.is-tappable").trigger("click");
+    const tempSheet = document.body.querySelector(".episode-sheet-layer")!;
+    expect(tempSheet).toBeTruthy();
+    expect(tempSheet.textContent).toContain("编辑症状");
+    expect(tempSheet.querySelector(".episode-sheet-remove")!.textContent).toContain("删除这条");
+    const valueInput = tempSheet.querySelector<HTMLInputElement>(".episode-sheet-grid input")!;
+    expect(valueInput.value).toBe("38.5");
+    /* 关掉面板，免得影响后面的断言 */
+    document.body.querySelector<HTMLElement>(".episode-sheet-close")!.click();
+    await nextTick();
     /* 其他症状：状态单独渲染成加粗药丸，加重=红 */
     const worseEvent = wrapper.findAll(".episode-event").find((el) => el.text().includes("鼻塞"))!;
     expect(worseEvent.find(".episode-status-worse").text()).toBe("加重");
