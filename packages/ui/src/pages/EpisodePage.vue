@@ -56,6 +56,13 @@ const causeOpen = ref(false);
 const causeDraft = ref("");
 const summaryOpen = ref(false);
 const quickInput = ref("");
+/** 「一句话记」的就地提示：以前把错误抛到页面顶部，用户在下面根本看不到 */
+const quickError = ref("");
+
+/* 重新输入就把提示收掉 */
+watch(quickInput, () => {
+  quickError.value = "";
+});
 
 /**
  * 「给医生看」是浮在时间轴上方的一张卡：点页面别处就收起来，
@@ -403,14 +410,15 @@ async function applyQuickDraft() {
     return;
   }
   const isMedication = parsed.kind === "medication";
-  /* 今天还没到的时间点（例如下午三点却写了 22:30）先拦下来，别把错数据记进去 */
+  /* 今天还没到的时间点（例如下午三点却写了 22:30）先拦下来，别把错数据记进去。
+     提示要写在输入框下面 —— 抛到页面顶部用户看不到，会以为「点了没反应」。 */
   const at = parsed.onsetAt || nowLocal();
   if (isFutureMoment(at)) {
-    error.value = "时间不能晚于现在，请重新输入";
+    quickError.value = "时间不能晚于现在，请改一下时间";
     return;
   }
   saving.value = true;
-  error.value = "";
+  quickError.value = "";
   try {
     if (isMedication) {
       const before = new Set((detail.value?.intakes ?? []).map((item) => item.id));
@@ -453,7 +461,7 @@ async function applyQuickDraft() {
     toast.show(isMedication ? "已记入服药" : "已记入症状");
     quickInput.value = "";
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "记录失败";
+    quickError.value = cause instanceof Error ? cause.message : "记录失败";
   } finally {
     saving.value = false;
   }
@@ -1771,6 +1779,7 @@ onActivated(() => {
               @keydown.enter.prevent="applyQuickDraft"
             />
           </label>
+          <p v-if="quickError" class="quick-entry-error">{{ quickError }}</p>
           <p v-if="quickDraft" class="quick-entry-preview">
             <span>识别为</span>
             <strong>{{ quickDraftText(quickDraft) }}</strong>
@@ -2061,7 +2070,7 @@ onActivated(() => {
           <form class="entry-form" @submit.prevent="createEpisode">
             <div class="form-grid">
               <label><span>病程标题</span><input v-model="episodeForm.title" placeholder="例如 10月呼吸道感染" /></label>
-              <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" aria-label="起病日期" /></label>
+              <label><span>起病日期</span><DateTimePicker v-model="episodeForm.onsetAt" disable-future aria-label="起病日期" /></label>
               <label><span>病因（可留空）</span><input v-model="episodeForm.causeText" placeholder="例如 受凉" /></label>
             </div>
             <div class="form-actions">

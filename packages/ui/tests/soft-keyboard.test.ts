@@ -70,6 +70,40 @@ describe("软键盘弹起时收起底部导航", () => {
     wrapper.unmount();
   });
 
+  it("键盘收起后导航自己回来（输入框仍保持焦点、focusout 不触发的情况）", async () => {
+    /* 手机上收起键盘时输入框往往还是聚焦的，所以不能只看焦点，还要看可视高度有没有恢复 */
+    const listeners: Array<() => void> = [];
+    const viewport = {
+      height: 800,
+      addEventListener: (_type: string, handler: () => void) => listeners.push(handler),
+      removeEventListener: () => {},
+    };
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+
+    try {
+      const wrapper = mount(Host);
+      const input = focusElement(document.createElement("input"));
+      await nextTick();
+      expect(wrapper.classes()).toContain("kb-open");
+
+      /* 键盘弹起：可视高度明显变小 */
+      viewport.height = 460;
+      listeners.forEach((fire) => fire());
+      await nextTick();
+      expect(wrapper.classes()).toContain("kb-open");
+
+      /* 键盘收起：高度回到静止值，但输入框仍然聚焦 */
+      viewport.height = 800;
+      listeners.forEach((fire) => fire());
+      await nextTick();
+      expect(wrapper.classes()).toContain("kb-closed");
+      expect(document.activeElement).toBe(input);
+      wrapper.unmount();
+    } finally {
+      delete (window as unknown as Record<string, unknown>).visualViewport;
+    }
+  });
+
   it("样式里确实有「键盘弹起时收起底部导航」这条规则", () => {
     const css = readFileSync("packages/ui/src/styles.css", "utf8");
     expect(css).toContain(".app-shell.is-keyboard-open .mobile-nav");

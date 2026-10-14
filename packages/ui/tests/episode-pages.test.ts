@@ -923,6 +923,66 @@ describe("病程与疾病页面在 AppShell 结构下渲染", () => {
     expect(wrapper.find(".episode-quick-input input").element.value).toBe("");
   });
 
+  it("一句话记填了还没到的时间：提示就贴在输入框下面，也不入库", async () => {
+    /* 以前这条提示抛到页面顶部，用户在下面根本看不见，只会以为「点了没反应」 */
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-13T15:55:00"));
+    const episodeRow = {
+      id: "ep-1",
+      memberId: member.id,
+      title: "10月呼吸道感染",
+      status: "active",
+      onsetAt: "2026-10-09",
+      resolvedAt: null,
+      causeText: null,
+      summary: null,
+      createdBy: "user-a",
+      createdAt: "2026-10-09T00:00:00.000Z",
+      updatedAt: "2026-10-09T00:00:00.000Z",
+      symptomCount: 0,
+      linkCount: 0,
+    };
+    const posted: string[] = [];
+    const payload = () => ({ episode: episodeRow, symptoms: [], medications: [], intakes: [], links: [], linkedFacts: [] });
+    mocked.request.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === "session") return account;
+      if (path === "members") return [member];
+      if (path === "account/preferences") return prefs;
+      if (init?.method === "POST") {
+        posted.push(path);
+        return payload();
+      }
+      if (path.startsWith("episodes?")) return [episodeRow];
+      if (path.startsWith("episodes/")) return payload();
+      return [];
+    });
+    const { useAppContext } = await import("../src/composables/useAppContext");
+    const app = useAppContext();
+    await app.load();
+    app.selectedMemberId.value = member.id;
+
+    const EpisodePage = (await import("../src/pages/EpisodePage.vue")).default;
+    const wrapper = mount(EpisodePage);
+    await settle();
+    await wrapper.find(".entry-row-open").trigger("click");
+    await settle();
+
+    /* 「晚上十点」= 今天 22:00，比现在的 15:55 晚 → 应该拦下来 */
+    const input = wrapper.find(".episode-quick-input input");
+    expect(wrapper.find(".quick-entry-error").exists()).toBe(false);
+    await input.setValue("晚上十点体温37.5度");
+    await input.trigger("keydown.enter");
+    await settle();
+
+    const hint = wrapper.find(".quick-entry-error");
+    expect(hint.exists()).toBe(true);
+    expect(hint.text()).toContain("时间不能晚于现在");
+    expect(posted).toEqual([]);
+    /* 输的内容留着，用户只要把时间改一下，不用重打 */
+    expect((input.element as HTMLInputElement).value).toBe("晚上十点体温37.5度");
+    wrapper.unmount();
+  });
+
   it("就医摘要两种排法：按症状归并 / 按天归组，同种药不重复出现", async () => {
     const episodeRow = {
       id: "ep-1",

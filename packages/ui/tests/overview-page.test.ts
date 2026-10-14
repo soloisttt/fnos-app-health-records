@@ -47,7 +47,7 @@ const episode = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-function stubApi(over: { episodes?: unknown[]; catalog?: unknown[] } = {}) {
+function stubApi(over: { episodes?: unknown[]; catalog?: unknown[]; stats?: Record<string, unknown> } = {}) {
   mocked.request.mockImplementation(async (path: string) => {
     if (path === "session") return account;
     if (path === "members") return [member];
@@ -64,6 +64,7 @@ function stubApi(over: { episodes?: unknown[]; catalog?: unknown[] } = {}) {
           observationCount: 40,
           abnormalObservationCount: 5,
           latestReportIssuedAt: "2026-10-09",
+          ...over.stats,
         },
         pendingReminders: [],
         recentReadyReports: [],
@@ -83,7 +84,8 @@ async function mountOverview() {
   app.selectedMemberId.value = member.id;
 
   const OverviewPage = (await import("../src/pages/OverviewPage.vue")).default;
-  const wrapper = shallowMount(OverviewPage, { global: { stubs: { RouterLink: true } } });
+  /* EmptyState 不能被 shallowMount 桩掉，否则空状态的文案不参与 text() 断言 */
+  const wrapper = shallowMount(OverviewPage, { global: { stubs: { RouterLink: true, EmptyState: false } } });
   await settle();
   return wrapper;
 }
@@ -161,6 +163,45 @@ describe("概览页除了报告也汇总疾病与病程", () => {
     expect(wrapper.find(".inline-panel-error").exists()).toBe(false);
     expect(wrapper.text()).toContain("最近报告");
     expect(wrapper.text()).toContain("暂无进行中的病程");
+    wrapper.unmount();
+  });
+});
+
+/*
+ * 「还没有健康档案」的空状态原来只看报告数。刚配好、只记了症状还没拍照上传的家庭，
+ * 一进概览就看到这句，会以为数据没存进去。
+ */
+describe("概览的空状态不只看报告", () => {
+  const noReports = { totalReports: 0, readyReports: 0, needsReviewReports: 0, latestReportIssuedAt: null };
+
+  it("没有报告、但有进行中的病程时，照常展示病程，不喊「还没有健康档案」", async () => {
+    stubApi({
+      stats: noReports,
+      episodes: [episode({ id: "ep-1", title: "10月呼吸道感染", symptomCount: 2 })],
+    });
+    const wrapper = await mountOverview();
+    const text = wrapper.text();
+
+    expect(text).not.toContain("还没有健康档案");
+    expect(text).toContain("10月呼吸道感染");
+    expect(wrapper.find(".overview-stats").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("没有报告、只有疾病目录记录时同理", async () => {
+    stubApi({ stats: noReports, catalog: [{ kind: "diagnosis", name: "支气管炎", count: 1, lastAt: "2026-09-20" }] });
+    const wrapper = await mountOverview();
+
+    expect(wrapper.text()).not.toContain("还没有健康档案");
+    expect(wrapper.text()).toContain("支气管炎");
+    wrapper.unmount();
+  });
+
+  it("确实什么都没有（没报告也没病程/疾病）时才显示空状态", async () => {
+    stubApi({ stats: noReports });
+    const wrapper = await mountOverview();
+
+    expect(wrapper.text()).toContain("还没有健康档案");
     wrapper.unmount();
   });
 });

@@ -50,6 +50,11 @@ const topDiagnoses = computed(() =>
     .sort((left, right) => right.count - left.count)
     .slice(0, 4),
 );
+/* 一份报告都没有、但有病程或症状时，概览不该整页空着说「还没有健康档案」 */
+const overviewIsEmpty = computed(() =>
+  !stats.value ||
+  (stats.value.totalReports === 0 && !episodes.value.length && !catalogEntries.value.length),
+);
 
 function formatDate(value: string | null) {
   if (!value) return "未识别日期";
@@ -167,11 +172,12 @@ watch(() => app.selectedMemberId.value, (memberId) => {
       {{ error }}<button class="error-retry" type="button" @click="retryLoad">重试</button>
     </p>
     <div v-if="loading" class="loading-list"><span v-for="index in 4" :key="index"></span></div>
-    <EmptyState v-else-if="!stats || stats.totalReports === 0" title="还没有健康档案" description="从拍照或上传 PDF 开始，识别完成后这里会汇总档案数量和提醒。">
+    <EmptyState v-else-if="overviewIsEmpty" title="还没有健康档案" description="从拍照或上传 PDF 开始，识别完成后这里会汇总档案数量和提醒。">
       <RouterLink class="primary-button" to="/upload">上传第一份报告</RouterLink>
     </EmptyState>
 
-    <template v-else>
+    <!-- 再判一次 stats：`overviewIsEmpty` 是个布尔量，模板里没法据此把 stats 收窄成非空 -->
+    <template v-else-if="stats">
       <section class="overview-stats">
         <RouterLink class="stat-card" to="/records">
           <span class="stat-icon"><FolderHeart :size="23" /></span>

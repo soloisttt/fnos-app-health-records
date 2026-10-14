@@ -2110,7 +2110,7 @@ onActivated(() => {
             <input v-model="memberCreateForm.displayName" type="text" maxlength="40" placeholder="成员姓名（必填）" required />
             <FormSelect v-model="memberCreateForm.relationship" :options="memberCreateRelationshipOptions" aria-label="家庭关系" />
             <FormSelect v-model="memberCreateForm.sex" :options="memberCreateSexOptions" aria-label="性别" />
-            <DateTimePicker v-model="memberCreateForm.birthDate" :min-year="1900" :max-year="memberCreateMaxYear" aria-label="出生日期" />
+            <DateTimePicker v-model="memberCreateForm.birthDate" :min-year="1900" :max-year="memberCreateMaxYear" disable-future aria-label="出生日期" />
             <p v-if="!memberIdentityAssessment.patientBirthDate && memberIdentityAssessment.patientApproxBirthDate" class="member-create-hint">出生日期按报告年龄推算，请核对后再保存</p>
             <button type="submit" class="duplicate-confirm-button" :disabled="memberCreateSaving">
               {{ memberCreateSaving ? "创建中" : "创建并归属" }}
@@ -2877,8 +2877,8 @@ onActivated(() => {
               <div class="form-grid">
                 <label><span>标题<em v-if="isManualField('title')" class="manual-field-chip">人工校对</em></span><input v-model="editForm.title" /></label>
                 <label><span>报告类型<em v-if="isManualField('reportType')" class="manual-field-chip">人工校对</em></span><FormSelect v-model="editForm.reportType" :options="typeOptions.filter((option) => option.value !== 'all')" aria-label="报告类型" /></label>
-                <label><span>报告生成时间<em v-if="isManualField('reportIssuedAt')" class="manual-field-chip">人工校对</em></span><DateTimePicker v-model="editForm.reportIssuedAt" show-time aria-label="报告生成时间" /></label>
-                <label><span>检查时间<em v-if="isManualField('examinedAt')" class="manual-field-chip">人工校对</em></span><DateTimePicker v-model="editForm.examinedAt" show-time aria-label="检查时间" /></label>
+                <label><span>报告生成时间<em v-if="isManualField('reportIssuedAt')" class="manual-field-chip">人工校对</em></span><DateTimePicker v-model="editForm.reportIssuedAt" show-time disable-future aria-label="报告生成时间" /></label>
+                <label><span>检查时间<em v-if="isManualField('examinedAt')" class="manual-field-chip">人工校对</em></span><DateTimePicker v-model="editForm.examinedAt" show-time disable-future aria-label="检查时间" /></label>
                 <label><span>医院<em v-if="isManualField('hospitalName')" class="manual-field-chip">人工校对</em></span><input v-model="editForm.hospitalName" /></label>
                 <label><span>院区/分院<em v-if="isManualField('hospitalBranch')" class="manual-field-chip">人工校对</em></span><input v-model="editForm.hospitalBranch" /></label>
                 <label><span>城市<em v-if="isManualField('city')" class="manual-field-chip">人工校对</em></span><input v-model="editForm.city" /></label>

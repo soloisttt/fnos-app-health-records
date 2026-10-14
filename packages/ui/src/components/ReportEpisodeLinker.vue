@@ -167,7 +167,7 @@ watch(
           <template v-if="creating">
             <div class="form-grid">
               <label><span>病程标题</span><input v-model="newTitle" placeholder="例如 10月呼吸道感染" /></label>
-              <label><span>起病日期</span><DateTimePicker v-model="newOnsetAt" aria-label="起病日期" /></label>
+              <label><span>起病日期</span><DateTimePicker v-model="newOnsetAt" disable-future aria-label="起病日期" /></label>
             </div>
           </template>
 

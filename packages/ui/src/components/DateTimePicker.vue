@@ -17,6 +17,12 @@ const props = defineProps<{
    * 用于「默认就填好当前时间、点一下才改」的场景，避免表单里到处是输入框。
    */
   variant?: "field" | "plain";
+  /**
+   * 不允许选未来：年 / 月 / 日（以及今天时的时、分）滚轮里**不生成**晚于现在的项。
+   * 用于「已经发生过」的时间（病程起病、症状时间、报告时间…）。
+   * **不要**用在本来就该是未来的字段上（提醒日期、下次接种时间）。
+   */
+  disableFuture?: boolean;
 }>();
 const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 
@@ -68,6 +74,10 @@ const selectedMinute = ref(0);
 const displayedYear = ref(selectedYear.value);
 const displayedMonth = ref(selectedMonth.value);
 const currentYear = new Date().getFullYear();
+const currentMonth = new Date().getMonth() + 1;
+const currentDay = new Date().getDate();
+const currentHour = new Date().getHours();
+const currentMinute = new Date().getMinutes();
 
 watch(open, (value) => {
   clearWheelState();
@@ -99,22 +109,52 @@ watch(open, (value) => {
 // 生成滚轮数据
 const years = computed(() => {
   const configuredMin = Number.isInteger(props.minYear) ? Number(props.minYear) : 1900;
-  const configuredMax = Number.isInteger(props.maxYear) ? Number(props.maxYear) : currentYear + 20;
+  let configuredMax = Number.isInteger(props.maxYear) ? Number(props.maxYear) : currentYear + 20;
+  if (props.disableFuture) configuredMax = Math.min(configuredMax, currentYear);
   const existingYear = parsedDate.value?.year;
   const start = Math.min(configuredMin, configuredMax, existingYear ?? configuredMin);
   const end = Math.max(configuredMin, configuredMax, existingYear ?? configuredMax);
   return Array.from({ length: end - start + 1 }, (_, i) => start + i);
 });
 
-const months = computed(() => Array.from({ length: 12 }, (_, i) => i + 1));
+const months = computed(() => {
+  /* 不允许选未来：滚到今年时，月份最多到当前月 */
+  const last = props.disableFuture && displayedYear.value === currentYear ? currentMonth : 12;
+  return Array.from({ length: last }, (_, i) => i + 1);
+});
 
 const days = computed(() => {
   const daysInMonth = new Date(displayedYear.value, displayedMonth.value, 0).getDate();
-  return Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const isCurrentMonth = displayedYear.value === currentYear && displayedMonth.value === currentMonth;
+  const last = props.disableFuture && isCurrentMonth ? Math.min(daysInMonth, currentDay) : daysInMonth;
+  return Array.from({ length: last }, (_, i) => i + 1);
 });
 
-const hours = computed(() => Array.from({ length: 24 }, (_, i) => i));
-const minutes = computed(() => Array.from({ length: 60 }, (_, i) => i));
+/** 选中的是不是今天 —— 用来决定时 / 分滚轮要不要截断 */
+const selectedIsToday = computed(() =>
+  selectedYear.value === currentYear && selectedMonth.value === currentMonth && selectedDay.value === currentDay,
+);
+
+const hours = computed(() => {
+  const last = props.disableFuture && selectedIsToday.value ? currentHour : 23;
+  return Array.from({ length: last + 1 }, (_, i) => i);
+});
+const minutes = computed(() => {
+  const last =
+    props.disableFuture && selectedIsToday.value && selectedHour.value === currentHour ? currentMinute : 59;
+  return Array.from({ length: last + 1 }, (_, i) => i);
+});
+
+/* 选项被截断后，原来的选中值可能已经不在列表里（例如打开时带的是今天 22:00）→ 收到最后一个可用值 */
+watch(days, (list) => {
+  if (list.length && !list.includes(selectedDay.value)) selectedDay.value = list.at(-1)!;
+});
+watch(hours, (list) => {
+  if (list.length && !list.includes(selectedHour.value)) selectedHour.value = list.at(-1)!;
+});
+watch(minutes, (list) => {
+  if (list.length && !list.includes(selectedMinute.value)) selectedMinute.value = list.at(-1)!;
+});
 
 // 格式化显示
 function padZero(n: number): string {

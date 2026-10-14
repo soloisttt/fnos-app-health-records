@@ -108,3 +108,43 @@ describe("小面板里弹出的时间选择器", () => {
     expect(layerZ).toBeGreaterThan(sheetZ);
   });
 });
+
+/*
+ * 体温、血压这类「量出来的数值」：状态（存在 / 加重 / 减轻 / 消失）和程度、部位对它没有意义
+ * —— 出现「体温 · 存在」「体温 · 轻 · 咽喉」这种组合只会让人犯迷糊。面板里直接不显示。
+ */
+function openSheet(props: Record<string, unknown>) {
+  const wrapper = mount(EpisodeEntrySheet, {
+    attachTo: document.body,
+    props: { open: true, mode: "symptom", intent: "edit", ...props },
+  });
+  wrapperList.push(wrapper);
+  return document.body.textContent ?? "";
+}
+
+describe("量出来的数值不摆状态与程度、部位", () => {
+  it("体温：只填数值 / 单位，不出现状态、程度、部位", () => {
+    const text = openSheet({ subject: "体温", form: baseForm({ name: "体温", value: "38.2", unit: "℃" }) });
+
+    expect(text).not.toContain("现在的状态");
+    expect(text).not.toContain("程度");
+    expect(text).not.toContain("部位");
+    expect(text).toContain("数值");
+    expect(text).toContain("单位");
+  });
+
+  it("普通症状（咳嗽）照旧显示状态与程度、部位", () => {
+    const text = openSheet({ subject: "咳嗽", form: baseForm() });
+
+    expect(text).toContain("现在的状态");
+    expect(text).toContain("程度");
+    expect(text).toContain("部位");
+  });
+
+  it("「记一次体温」直接让填数值，不再要求选状态", () => {
+    const text = openSheet({ intent: "log", subject: "体温", showValue: true, form: baseForm({ name: "体温", unit: "℃" }) });
+
+    expect(document.body.querySelector(".episode-sheet-status")).toBeNull();
+    expect(text).toContain("填一下这次量到的数值");
+  });
+});

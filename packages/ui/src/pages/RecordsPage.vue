@@ -349,8 +349,8 @@ useRefreshOnActivate(() => { void reloadList(); });
       <FormSelect v-model="typeFilter" class="records-filter-select advanced-filter" :options="typeOptions" aria-label="报告类型" @change="applyFilters" />
       <FormSelect v-model="statusFilter" class="records-filter-select advanced-filter" :options="statusOptions" aria-label="归档状态" @change="applyFilters" />
       <FormSelect v-model="sortFilter" class="records-sort-select advanced-filter" :options="sortOptions" aria-label="报告排序" @change="applyFilters" />
-      <DateTimePicker v-model="dateFrom" class="compact-filter date-filter advanced-filter" label="开始日期" aria-label="开始日期" @update:model-value="applyFilters" />
-      <DateTimePicker v-model="dateTo" class="compact-filter date-filter advanced-filter" label="结束日期" aria-label="结束日期" @update:model-value="applyFilters" />
+      <DateTimePicker v-model="dateFrom" class="compact-filter date-filter advanced-filter" label="开始日期" disable-future aria-label="开始日期" @update:model-value="applyFilters" />
+      <DateTimePicker v-model="dateTo" class="compact-filter date-filter advanced-filter" label="结束日期" disable-future aria-label="结束日期" @update:model-value="applyFilters" />
       <button class="soft-action-button advanced-filter" type="button" @click="applyFilters">筛选</button>
     </div>
     <PullIndicator :distance="pullDistance" :refreshing="refreshing" />

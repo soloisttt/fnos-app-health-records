@@ -64,7 +64,7 @@ async function save(){
    </div>
    <div class="observation-time-field">
     <span class="observation-time-label">原件上的日期或时间</span>
-    <DateTimePicker v-model="time" :show-time="includeTime" :disabled="disabled" aria-label="原件上的日期或时间" />
+    <DateTimePicker v-model="time" :show-time="includeTime" :disabled="disabled" disable-future aria-label="原件上的日期或时间" />
    </div>
    <label class="observation-time-precision"><input type="checkbox" :checked="includeTime" :disabled="disabled" @change="toggleTime" />原件注明具体时刻</label>
    <p class="observation-time-hint">只调整当前指标。原件只有日期时，无需填写时刻。</p>

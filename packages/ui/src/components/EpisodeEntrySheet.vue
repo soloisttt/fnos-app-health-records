@@ -95,6 +95,13 @@ const statusOptions: Array<{ value: CaseSymptomStatus; label: string }> = [
 const showName = computed(() => props.intent !== "log");
 const showDetails = computed(() => props.intent !== "log");
 const showValueField = computed(() => props.mode === "symptom" && (props.intent !== "log" || props.showValue));
+/**
+ * 体温、血压这类「量出来的数值」：状态（存在 / 加重 / 减轻 / 消失）与程度、部位对它没有意义，
+ * 面板里就不显示 —— 免得出现「体温 · 存在」「体温 · 轻 · 咽喉」这种自相矛盾的组合。
+ */
+const isMeasurement = computed(() =>
+  props.mode === "symptom" && (/发热|体温|温度|发烧|血压/.test(draft.value.name) || draft.value.unit === "℃"),
+);
 const unitSuggestions = ["℃", "mmHg", "次/分", "kg"];
 
 function submit(repeat: boolean) {
@@ -121,7 +128,8 @@ function submit(repeat: boolean) {
         <div class="episode-sheet-head">
           <div>
             <h3>{{ title }}</h3>
-            <p v-if="intent === 'log' && mode === 'symptom'">选一下现在的状态就行</p>
+            <p v-if="intent === 'log' && mode === 'symptom' && !isMeasurement">选一下现在的状态就行</p>
+            <p v-else-if="intent === 'log' && mode === 'symptom'">填一下这次量到的数值</p>
             <p v-else-if="intent === 'log'">填一下这次吃了多少</p>
           </div>
           <button type="button" class="episode-sheet-close" aria-label="关闭" @click="emit('close')">
@@ -137,10 +145,10 @@ function submit(repeat: boolean) {
 
           <label class="episode-sheet-field">
             <span>{{ mode === "medication" ? "服药时间" : "时间" }}</span>
-            <DateTimePicker v-model="draft.at" :aria-label="mode === 'medication' ? '服药时间' : '症状时间'" show-time variant="plain" />
+            <DateTimePicker v-model="draft.at" :aria-label="mode === 'medication' ? '服药时间' : '症状时间'" show-time variant="plain" disable-future />
           </label>
 
-          <div v-if="mode === 'symptom'" class="episode-sheet-field">
+          <div v-if="mode === 'symptom' && !isMeasurement" class="episode-sheet-field">
             <span>现在的状态</span>
             <div class="episode-sheet-status">
               <button
@@ -204,7 +212,7 @@ function submit(repeat: boolean) {
             </div>
           </template>
 
-          <template v-if="showDetails && mode === 'symptom'">
+          <template v-if="showDetails && mode === 'symptom' && !isMeasurement">
             <div class="episode-sheet-grid">
               <label class="episode-sheet-field">
                 <span>程度</span>

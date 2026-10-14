@@ -314,7 +314,7 @@ const permissionOptions = [
           <label><span>ABO 血型</span><FormSelect v-model="form.bloodTypeAbo" :options="bloodTypeAboOptions" aria-label="ABO 血型" /></label>
           <label><span>Rh 血型</span><FormSelect v-model="form.bloodTypeRh" :options="bloodTypeRhOptions" aria-label="Rh 血型" /></label>
         </div>
-        <label><span>出生日期</span><DateTimePicker v-model="form.birthDate" :min-year="1900" :max-year="currentYear" aria-label="出生日期" /></label>
+        <label><span>出生日期</span><DateTimePicker v-model="form.birthDate" :min-year="1900" :max-year="currentYear" disable-future aria-label="出生日期" /></label>
         <p v-if="error" class="form-error">{{ error }}</p>
         <div class="form-actions"><button type="button" @click="editorOpen = false">取消</button><button class="primary-button" type="submit" :disabled="saving">{{ saving ? "保存中" : "保存" }}</button></div>
       </form>

@@ -516,6 +516,11 @@ button.entry-row-open:disabled { cursor: default; }
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   margin: 0; font-size: 12px; color: var(--muted);
 }
+/* 「一句话记」的就地错误提示：紧贴输入框，用户看得见 */
+.quick-entry-error {
+  margin: 6px 0 0; padding: 6px 10px; border-radius: 8px;
+  background: var(--danger-soft); color: var(--danger); font-size: 12.5px; line-height: 1.5;
+}
 .quick-entry-preview strong { font-size: 13px; color: var(--ink); font-weight: 500; }
 .quick-entry-preview button {
   margin-left: auto; padding: 3px 12px; border: 1px solid var(--line-strong);
