@@ -290,6 +290,37 @@ test("creates admin/admin on a fresh local deployment and requires the first pas
   }
 });
 
+test("「记住我」把登录会话延长到 30 天，不勾维持 12 小时", () => {
+  const storageDir = mkdtempSync(join(tmpdir(), "health-records-remember-me-"));
+  process.env.STORAGE_DIR = storageDir;
+  process.env.AUTH_MODE = "local";
+  try {
+    bootstrapLocalAdministrator();
+    const maxAgeOf = (event: H3Event) =>
+      Number(/max-age=(\d+)/i.exec(event.res.headers.get("set-cookie") || "")?.[1] ?? 0);
+
+    const plain = localAuthEvent();
+    login(plain, { username: "admin", password: "admin" });
+    assert.equal(maxAgeOf(plain), 12 * 60 * 60);
+
+    const remembered = localAuthEvent();
+    login(remembered, { username: "admin", password: "admin", remember: true });
+    assert.equal(maxAgeOf(remembered), 30 * 24 * 60 * 60);
+
+    /* 服务端会话有效期要跟着延长，不能只改 cookie */
+    const db = getDatabase();
+    const row = db.prepare("SELECT expires_at FROM auth_sessions ORDER BY rowid DESC LIMIT 1")
+      .get() as { expires_at: string };
+    const span = db.prepare("SELECT julianday(?) - julianday('now') AS days").get(row.expires_at) as { days: number };
+    assert.ok(span.days > 29 && span.days < 31, `会话有效期应约 30 天，实际 ${span.days} 天`);
+  } finally {
+    closeDatabaseForTests();
+    delete process.env.STORAGE_DIR;
+    delete process.env.AUTH_MODE;
+    rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
 test("allows a local administrator to reset an ordinary local account", () => {
   const storageDir = mkdtempSync(join(tmpdir(), "health-records-local-account-reset-"));
   process.env.STORAGE_DIR = storageDir;

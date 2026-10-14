@@ -119,8 +119,13 @@ function formatLocal(date: Date) {
 }
 
 /**
- * 没写「早上/下午」时，在"当天这个点"和"再加 12 小时"之间取**离现在更近**的那个。
- * 下午两点说「5点半」→ 17:30；早上十点说「9点」→ 当天 9:00。
+ * 没写「早上/下午」时，在"当天这个点"和"再加 12 小时"之间选一个。
+ *
+ * 规则：**优先取不晚于现在的那个**。
+ * 因为记录时间不允许晚于现在（见 `utils/time` 的 `isFutureMoment`），
+ * 解析结果落在未来就等于永远存不进去 —— 会变成"看着填对了、一保存就报错"。
+ * 21 点说「十点」→ 当天 10:00，而不是 1 小时后的 22:00；
+ * 两个都晚于现在时（早上 9 点说「十点」）取较早的那个，交给上层提示「时间不能晚于现在」。
  */
 function resolveHour(hour: number, period: string | undefined, now: Date) {
   const periodValue = period ?? "";
@@ -130,12 +135,15 @@ function resolveHour(hour: number, period: string | undefined, now: Date) {
     if (/下午|傍晚|晚上|夜里|夜晚/.test(periodValue)) return hour <= 12 ? hour + 12 : hour;
     return hour;
   }
-  /* 12 点不能靠"离现在更近"再 +12（会变成 24 点、滚到第二天） */
+  /* 12 点不能靠"再加 12 小时"再算（会变成 24 点、滚到第二天） */
   if (hour >= 12) return hour;
   const nowHours = now.getHours() + now.getMinutes() / 60;
   const sameDay = hour;
   const plusTwelve = hour + 12;
-  return Math.abs(nowHours - sameDay) > Math.abs(plusTwelve - nowHours) ? plusTwelve : sameDay;
+  const sameDayIsPast = sameDay <= nowHours;
+  const plusTwelveIsPast = plusTwelve <= nowHours;
+  if (sameDayIsPast !== plusTwelveIsPast) return sameDayIsPast ? sameDay : plusTwelve;
+  return Math.abs(nowHours - sameDay) <= Math.abs(plusTwelve - nowHours) ? sameDay : plusTwelve;
 }
 
 function emptyDraft(): QuickEntryDraft {

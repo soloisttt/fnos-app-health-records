@@ -3231,6 +3231,10 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
 .login-form { display: grid; gap: 14px; }
 .login-error { margin: 0 !important; color: var(--danger) !important; line-height: 1.5; }
 .login-hint { margin: 0 !important; color: var(--muted) !important; font-size: 12px !important; line-height: 1.5; }
+/* 「记住我」：只记住登录状态，不记住密码 */
+.login-remember { display: flex !important; align-items: center; gap: 8px; cursor: pointer; }
+.login-remember input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+.login-remember > span { color: var(--muted); font-size: 13px; }
 .login-notice { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border-radius: var(--radius-m); background: var(--brand-softer); line-height: 1.55; }
 .login-notice > svg { flex: 0 0 auto; margin-top: 1px; color: var(--brand); }
 .login-warning { background: var(--amber-soft); }

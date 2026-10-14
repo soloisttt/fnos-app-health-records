@@ -4,11 +4,16 @@ import { LoaderCircle, LogIn, ShieldCheck, TriangleAlert } from "@lucide/vue";
 import appIcon from "../assets/app-icon.png";
 import { useAppContext } from "../composables/useAppContext";
 import { request } from "../utils/api";
+import { readStorage, writeStorage } from "../utils/storage";
 
 const emit = defineEmits<{ authenticated: [] }>();
 const app = useAppContext();
-const username = ref("admin");
-const password = ref("admin");
+
+/* 只记住上次登录的用户名（省得每次重打），密码不落盘 */
+const LAST_USERNAME_KEY = "health-records:last-username";
+const username = ref(readStorage(LAST_USERNAME_KEY) ?? "");
+const password = ref("");
+const remember = ref(false);
 const submitting = ref(false);
 const error = ref("");
 
@@ -19,8 +24,9 @@ async function submit() {
   try {
     await request("auth/login", {
       method: "POST",
-      body: JSON.stringify({ username: username.value, password: password.value })
+      body: JSON.stringify({ username: username.value, password: password.value, remember: remember.value })
     });
+    writeStorage(LAST_USERNAME_KEY, username.value);
     password.value = "";
     emit("authenticated");
   } catch (cause) {
@@ -39,7 +45,11 @@ async function submit() {
       <form v-if="app.session.value?.authMode === 'local' && !app.session.value.setupRequired" class="login-form" @submit.prevent="submit">
         <label><span>用户名</span><input v-model.trim="username" autocomplete="username" required /></label>
         <label><span>密码</span><input v-model="password" type="password" autocomplete="current-password" required /></label>
-        <p class="login-hint">首次登录使用 admin / admin，登录后必须修改密码。</p>
+        <label class="login-remember">
+          <input v-model="remember" type="checkbox" />
+          <span>记住我（这台设备 30 天免登录）</span>
+        </label>
+        <p v-if="!username" class="login-hint">首次登录使用 admin / admin，登录后必须修改密码。</p>
         <p v-if="error" class="login-error">{{ error }}</p>
         <button class="primary-button" type="submit" :disabled="submitting || !username || !password">
           <LoaderCircle v-if="submitting" class="spin-icon" :size="17" />

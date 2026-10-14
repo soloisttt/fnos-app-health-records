@@ -387,7 +387,8 @@ function quickDraftText(parsed: QuickEntryDraft) {
   if (parsed.measuredValue) bits.push(`${parsed.measuredValue}${parsed.measuredUnit ?? ""}`);
   if (parsed.dose) bits.push(parsed.dose);
   if (parsed.frequency) bits.push(parsed.frequency);
-  if (parsed.onsetAt) bits.push(parsed.onsetAt);
+  /* 显示解析后的完整时间（「今天 10:00」），否则只写「10点」看不出是上午还是晚上 */
+  if (parsed.onsetAt) bits.push(formatMoment(parsed.onsetAt));
   return bits.join(" · ");
 }
 

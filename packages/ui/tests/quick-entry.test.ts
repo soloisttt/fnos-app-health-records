@@ -7,7 +7,8 @@ const NOW = new Date(2026, 9, 13, 14, 50);
 describe("快速记录解析 · 症状", () => {
   it("口语时间 + 裸体温：5点半 37.5", () => {
     const result = parseQuickEntry("5点半 37.5", NOW);
-    expect(result.onsetAt).toBe("2026-10-13 17:30");
+    /* 现在 14:50：不写时段词时优先落在过去 → 今早 5:30（今晚 17:30 还没到，存不进去） */
+    expect(result.onsetAt).toBe("2026-10-13 05:30");
     expect(result.measuredValue).toBe("37.5");
     expect(result.measuredUnit).toBe("℃");
     /* 只说数值没提名称 → 自动归到「体温」 */
@@ -76,10 +77,23 @@ describe("快速记录解析 · 症状", () => {
     });
   });
 
-  it("没写上下午时，取离现在更近的那个时刻", () => {
-    /* 现在 14:50：9 点更近今早 9:00，5 点更近今晚 17:00 */
+  it("没写上下午时，优先取不晚于现在的那个时刻", () => {
+    /* 现在 14:50：9 点 → 今早 9:00；5 点 → 今早 5:00（今晚 17:00 在未来，存不进去） */
     expect(parseQuickEntry("9点", NOW).onsetAt).toBe("2026-10-13 09:00");
-    expect(parseQuickEntry("5点", NOW).onsetAt).toBe("2026-10-13 17:00");
+    expect(parseQuickEntry("5点", NOW).onsetAt).toBe("2026-10-13 05:00");
+  });
+
+  it("两个候选都晚于现在时取较早的那个（交给上层提示不能晚于现在）", () => {
+    const morning = new Date(2026, 9, 13, 9, 0);
+    expect(parseQuickEntry("十点 37", morning).onsetAt).toBe("2026-10-13 10:00");
+  });
+
+  it("用户实测那句：21 点说「今天十点」，要落在早上 10 点而不是晚上 10 点", () => {
+    const night = new Date(2026, 9, 13, 21, 10);
+    const result = parseQuickEntry("今天十点体温37.5度", night);
+    expect(result.onsetAt).toBe("2026-10-13 10:00");
+    expect(result.measuredValue).toBe("37.5");
+    expect(result.name).toBe("体温");
   });
 
   it("大于 12 的小时按 24 小时制直接使用", () => {
@@ -87,8 +101,8 @@ describe("快速记录解析 · 症状", () => {
   });
 
   it("中文数字时间也要认（三点五十 / 十点半 / 两点二十 / 十二点）", () => {
-    /* 现在 14:50：三点五十 → 15:50（离现在更近的那个） */
-    expect(parseQuickEntry("三点五十 37.8", NOW).onsetAt).toBe("2026-10-13 15:50");
+    /* 现在 14:50：三点五十 → 凌晨 3:50（15:50 还没到）；十点半 → 10:30；两点二十 → 14:20 */
+    expect(parseQuickEntry("三点五十 37.8", NOW).onsetAt).toBe("2026-10-13 03:50");
     expect(parseQuickEntry("十点半 37.5", NOW).onsetAt).toBe("2026-10-13 10:30");
     expect(parseQuickEntry("两点二十 38", NOW).onsetAt).toBe("2026-10-13 14:20");
     /* 12 点不能因为"再加 12 小时"滚到第二天 */
@@ -102,7 +116,7 @@ describe("快速记录解析 · 症状", () => {
     /* 名称不能带时间与服药动词 */
     expect(result.name).toBe("氨溴特罗口服溶液");
     expect(result.dose).toBe("5ml");
-    expect(result.onsetAt).toBe("2026-10-13 15:50");
+    expect(result.onsetAt).toBe("2026-10-13 03:50");
   });
 
   it("不在体温区间的裸数字不当作测量值", () => {

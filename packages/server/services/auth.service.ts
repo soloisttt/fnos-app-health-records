@@ -184,12 +184,15 @@ export function login(event: H3Event, body: Record<string, unknown>) {
     throw createError({ statusCode: 401, statusMessage: "用户名或密码错误" });
   }
 
+  /* 「记住我」勾了才给 30 天；否则维持 12 小时 —— 这是病历数据，默认不做长期免登 */
+  const remember = body.remember === true || body.remember === "true";
+  const sessionHours = remember ? 30 * 24 : 12;
   const token = randomBytes(32).toString("base64url");
   const hash = tokenHash(token);
   db.prepare(`
     INSERT INTO auth_sessions (id, user_id, token_hash, expires_at)
-    VALUES (?, ?, ?, datetime('now', '+12 hours'))
-  `).run(createId("session"), account.userId, hash);
+    VALUES (?, ?, ?, datetime('now', ?))
+  `).run(createId("session"), account.userId, hash, `+${sessionHours} hours`);
   db.prepare("DELETE FROM login_attempts WHERE attempted_at < datetime('now', '-1 day')").run();
   db.prepare("DELETE FROM auth_sessions WHERE expires_at <= CURRENT_TIMESTAMP OR revoked_at IS NOT NULL").run();
   setCookie(event, "health_session", token, {
@@ -197,7 +200,7 @@ export function login(event: H3Event, body: Record<string, unknown>) {
     secure: process.env.NODE_ENV !== "development" && isHttpsRequest(event),
     sameSite: "lax",
     path: "/",
-    maxAge: 12 * 60 * 60
+    maxAge: sessionHours * 60 * 60
   });
   return { authenticated: true, mustChangePassword: Boolean(account.mustChangePassword) };
 }
