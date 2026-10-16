@@ -1,3 +1,5 @@
+import type { MeasurementComparator } from '../../shared/measurement-result';
+
 export type TrendAbnormalFlag = "high" | "low" | "abnormal" | "normal" | null;
 export type TrendAbnormalDirection = "high" | "low" | "abnormal" | "normal" | "unknown";
 export type TrendAbnormalContinuityStatus =
@@ -11,6 +13,7 @@ export type TrendAbnormalContinuityStatus =
 export type TrendAttentionPriority = "normal" | "notice" | "attention";
 
 export type TrendAbnormalContinuityPoint = {
+  resultComparator?: MeasurementComparator | null;
   numericValue: number;
   referenceLow?: number | null;
   referenceHigh?: number | null;
@@ -52,6 +55,7 @@ function reliablePointState(point: TrendAbnormalContinuityPoint): ReliablePointS
     return { kind: "abnormal", direction: flag };
   }
   if (flag === "normal") return { kind: "normal", direction: "normal" };
+  if (point.resultComparator) return { kind: 'unknown', direction: 'unknown' };
 
   const value = finiteNumber(point.numericValue);
   const low = finiteNumber(point.referenceLow);

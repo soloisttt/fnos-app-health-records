@@ -405,20 +405,22 @@ def load_engine():
             if candidate == "openvino":
                 from rapidocr_openvino import RapidOCR
                 import rapidocr_openvino
+                engine = RapidOCR()
 
                 return {
                     "name": "rapidocr-openvino",
                     "version": getattr(rapidocr_openvino, "__version__", "unknown"),
-                    "engine": RapidOCR(),
+                    "engine": lambda image, **kwargs: engine(image, **{"return_word_box": True, **kwargs}),
                 }
             if candidate in {"onnx", "onnxruntime"}:
                 from rapidocr_onnxruntime import RapidOCR
                 import rapidocr_onnxruntime
+                engine = RapidOCR(**onnx_engine_kwargs())
 
                 return {
                     "name": "rapidocr-onnxruntime",
                     "version": getattr(rapidocr_onnxruntime, "__version__", "unknown"),
-                    "engine": RapidOCR(**onnx_engine_kwargs()),
+                    "engine": lambda image, **kwargs: engine(image, **{"return_word_box": True, **kwargs}),
                 }
             errors.append(f"Unsupported OCR backend: {candidate}")
         except Exception as error:
@@ -551,6 +553,71 @@ def normalize_result(result: Any, start_index: int = 0, variant: str | None = No
         box, text, confidence = item[0], item[1], item[2]
         if hasattr(box, "tolist"):
             box = box.tolist()
+        # Word positions can separate columns which the text detector joined.
+        # Use real recognition positions, not a proportional split of values.
+        words = []
+        bounds = line_rect({'box': box})
+        if len(item) >= 6 and bounds and bounds[2]-bounds[0] > (bounds[3]-bounds[1])*1.5:
+            boxes, texts, scores = item[3:6]
+            if (isinstance(boxes, (list, tuple)) and isinstance(texts, (list, tuple))
+                    and isinstance(scores, (list, tuple)) and len(boxes) == len(texts) == len(scores)
+                    and ''.join(str(value) for value in texts).replace(' ', '') == str(text).replace(' ', '')):
+                for word_box, word, score in zip(boxes, texts, scores):
+                    word_bounds = line_rect({'box': word_box})
+                    if not word_bounds or not isinstance(score, (float, int)) or not math.isfinite(score):
+                        words = []
+                        break
+                    words.append((word_bounds, str(word), float(score)))
+        if any(words[index][0][0] < words[index-1][0][0] for index in range(1, len(words))):
+            words = []  # An unverified classifier flip cannot supply column positions.
+        groups = []
+        # Packed headings have known semantic boundaries. Use actual glyph
+        # positions rather than distributing their box evenly by text length.
+        compact = re.sub(r'\s+', '', str(text))
+        labels = re.findall(r'项目名称|检验项目|检测项目|测定项目|参考范围|参考区间|参考值|本次结果|检验结果|检查结果|结果|单位|序号|序|名称|项目', compact)
+        if words and len(labels) > 1 and ''.join(labels) == compact:
+            pending = []
+            label_index = 0
+            for word in words:
+                if not word[1].strip():
+                    continue
+                pending.append(word)
+                joined = ''.join(w[1] for w in pending)
+                if label_index >= len(labels) or not labels[label_index].startswith(joined):
+                    groups = []
+                    break
+                if joined == labels[label_index]:
+                    groups.append(pending)
+                    pending = []
+                    label_index += 1
+            if pending or label_index != len(labels):
+                groups = []
+        spacing = []
+        for word in ([] if groups else words):
+            if not word[1].strip():
+                # Space boxes fill the inter-column gap. Measure between the
+                # actual glyphs, retaining spaces only inside the same field.
+                spacing.append(word)
+                continue
+            b = word[0]
+            if groups and b[0] >= groups[-1][-1][0][0] and b[0]-groups[-1][-1][0][2] <= min(b[3]-b[1], groups[-1][-1][0][3]-groups[-1][-1][0][1])*.65:
+                groups[-1].extend(spacing)
+                groups[-1].append(word)
+            else:
+                groups.append([word])
+            spacing = []
+        if len(groups) > 1:
+            for group_index, group in enumerate(groups):
+                left, top = min(w[0][0] for w in group), min(w[0][1] for w in group)
+                right, bottom = max(w[0][2] for w in group), max(w[0][3] for w in group)
+                lines.append({'id': f'line_{start_index+index+1}_{group_index}',
+                    'text': ''.join(w[1] for w in group),
+                    # Match recognition's mean confidence for this field;
+                    # synthetic space scores must not veto a readable value.
+                    'confidence': sum(w[2]*len(w[1].strip()) for w in group) / sum(len(w[1].strip()) for w in group),
+                    'box': [[left,top],[right,top],[right,bottom],[left,bottom]],
+                    **({'variant': variant} if variant else {})})
+            continue
         line = {
             "id": f"line_{start_index + index + 1}",
             "text": str(text),
@@ -1046,7 +1113,7 @@ TABLE_RESULT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CORRUPTED_DECIMAL_PATTERN = re.compile(r"^\s*\d+[`'’]\d+\s*[↑↓▲▼⬆⬇]?\s*$")
-SUSPICIOUS_UNIT_PATTERN = re.compile(r"^(?:(?:9|q)\s*/\s*[lL]|\d+\s*/\s*\d+)$", re.IGNORECASE)
+SUSPICIOUS_UNIT_PATTERN = re.compile(r"^(?:(?:9|q)\s*/\s*[lL]|\d+\s*/\s*\d+|[A-Za-zµμ]+\s*/)$", re.IGNORECASE)
 
 
 def standalone_unit(text: str) -> bool:
@@ -1805,6 +1872,12 @@ def header_retry_regions(lines, width, height, limit=8):
                     # The unit column can follow the reference column. Even a
                     # high-confidence digit fraction requires pixel verification.
                     original = members[0]
+                    # Wrapped names can sit above/below the unit baseline.
+                    # Include the complete unit box rather than clipping it to
+                    # one fragment of the name.
+                    unit_box = line_rect(original)
+                    top = max(0, int(min(top, unit_box[1] - h * .2)))
+                    bottom = min(height, int(max(bottom, unit_box[3] + h * .2)))
                 elif members:
                     continue  # Existing ambiguous results go through row retry.
                 elif kind == 'unit':
@@ -1837,6 +1910,11 @@ def retry_missing_header_cells(engine, image_path, lines, budget=None, retry_con
     added=[]; attempts=[]; merged=list(lines)
     with tempfile.TemporaryDirectory(prefix='health-ocr-cell-') as temp:
         for index,region in enumerate(regions):
+            if region.get('original') is not None and region['original'] not in merged:
+                # Two wrapped name fragments may target the same unit. Once
+                # replaced, its second crop is redundant and must not abort the page.
+                budget['cellRemaining'] -= 1
+                continue
             left,top,right,bottom=region['crop']
             if not context.available((right-left)*(bottom-top)*9):
                 continue
@@ -1845,9 +1923,13 @@ def retry_missing_header_cells(engine, image_path, lines, budget=None, retry_con
             groups={}
             gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
             variants = [('cell_upscale',crop),('cell_gray',gray)]
-            if region['kind'] == 'reference':
+            if region['kind'] in ('reference', 'unit'):
+                # Thresholding separates thin unit glyphs from tinted table
+                # backgrounds. Keep the same two-view consensus and call budget.
                 variants = [('cell_binary',cv2.threshold(gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]),
                             ('cell_adaptive',cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,31,11))]
+                if region['kind'] == 'unit':
+                    variants += [('cell_upscale',crop),('cell_gray',gray)]
             for label,variant in variants:
                 path=Path(temp)/f'{index}-{label}.png'
                 if not cv2.imwrite(str(path),variant): continue
@@ -1894,10 +1976,17 @@ def retry_missing_header_cells(engine, image_path, lines, budget=None, retry_con
                            else table_result_value(text) is not None if region['kind']=='result'
                            else table_reference(text) is not None if region['kind']=='reference'
                            else bool(re.fullmatch(r'(?:[%‰]|(?:[×x*]?\s*)?10\s*\^?\s*\d+\s*/\s*[lL]|[A-Za-zµμ][A-Za-zµμ0-9/^²³·.*%×+-]*)',text)))
+                    if region['kind'] == 'unit' and SUSPICIOUS_UNIT_PATTERN.fullmatch(text):
+                        valid = False
+                    if region['kind'] == 'unit' and '/' in str(region.get('original', {}).get('text', '')) and '/' not in text:
+                        valid = False
                     if valid and float(line.get('confidence',0))>=.85: groups.setdefault(text,[]).append(line)
                 attempts.append({'field':region['kind'],'variant':label,'elapsedMs':round((time.perf_counter()-started)*1000)})
+                if region['kind'] == 'unit' and len(groups)==1 and len([items for items in groups.values()
+                        if len({line.get('variant') for line in items}) >= 2]) == 1:
+                    break
             agreed=[items for items in groups.values() if len({line.get('variant') for line in items})>=2]
-            if len(agreed)==1:
+            if len(agreed)==1 and (region['kind']!='unit' or len(groups)==1):
                 best=max(agreed[0],key=lambda line:float(line.get('confidence',0)))
                 if region.get('original') is not None:
                     merged[merged.index(region['original'])]=best
@@ -1925,6 +2014,40 @@ def annotate_retry_budget(lines, budget):
     return lines
 
 
+def sideways_table(lines):
+    boxes = [line_rect(line) for line in lines]
+    boxes = [box for box in boxes if box]
+    return (len(boxes) >= 6
+            and sum(b[3]-b[1] > (b[2]-b[0])*1.5 for b in boxes) >= len(boxes)*.6
+            and sum(bool(re.search(r'项目|名称|结果|参考范围', str(line.get('text', '')))) for line in lines) >= 2)
+
+
+def upright_table_score(lines, height):
+    names = [line_rect(line) for line in lines if re.fullmatch(r'项目名称|项目|名称|检验项目', str(line.get('text', '')).strip())]
+    results = [line_rect(line) for line in lines if str(line.get('text', '')).strip().startswith('结果')]
+    headers = sum(any(r and n and r[0] > n[2] and n[1] < height*.5
+                      and abs((r[1]+r[3]-n[1]-n[3])/2) < max(r[3]-r[1], n[3]-n[1])*2
+                      for r in results) for n in names)
+    readable = sum(len(str(line.get('text', ''))) * float(line.get('confidence', 0))
+                   for line in lines if (box := line_rect(line)) and box[2]-box[0] > (box[3]-box[1])*1.3)
+    return headers, readable
+
+
+def restore_quarter_turn(lines, angle, width, height):
+    restored = []
+    for line in lines:
+        box = line.get('box')
+        if not box:
+            restored.append(line)
+            continue
+        if not isinstance(box[0], (list, tuple)):
+            left, top, right, bottom = box
+            box = [[left,top],[right,top],[right,bottom],[left,bottom]]
+        points = [[y, height-x] if angle == 90 else [width-y, x] for x,y in box]
+        restored.append({**line, 'box': points})
+    return restored
+
+
 def recognize_image(engine: Any, image_path: Path, image_role: str | None, enhance_tables: bool = True,
                     retry_context=None, prepare_photo=True) -> tuple[list[dict[str, Any]], Any]:
     if image_role != "date":
@@ -1939,6 +2062,29 @@ def recognize_image(engine: Any, image_path: Path, image_role: str | None, enhan
                         'source':'photo_perspective','ocr':elapsed}
         result, engine_elapsed = engine(str(image_path))
         primary_lines = normalize_result(result)
+        if enhance_tables and sideways_table(primary_lines):
+            from PIL import Image
+            with Image.open(image_path) as image, tempfile.TemporaryDirectory(prefix='health-table-direction-') as temp_name:
+                width, height = image.size
+                best = None
+                for angle in (90, 270):
+                    path = Path(temp_name)/f'turn-{angle}.png'
+                    with image.rotate(-angle, expand=True) as turned:
+                        turned.save(path)
+                    try:
+                        candidate, elapsed = engine(str(path))
+                        lines = normalize_result(candidate)
+                        score = upright_table_score(lines, width)
+                        if not sideways_table(lines) and score[0] and (best is None or score > best[0]):
+                            best = score, angle, path, candidate, elapsed
+                    except Exception:
+                        continue  # A failed optional orientation cannot erase usable OCR.
+                if best:
+                    _, angle, path, candidate, elapsed = best
+                    cached = lambda value: (candidate, elapsed) if str(value) == str(path) else engine(value)
+                    lines, metadata = recognize_image(cached, path, image_role, enhance_tables, retry_context, prepare_photo=False)
+                    return restore_quarter_turn(lines, angle, width, height), {
+                        'source': 'quarter_turn_table', 'rotation': angle, 'ocr': metadata}
         context = retry_context or PageRetryContext()
         budget = context.budget
         lines, table_attempts = primary_lines, []

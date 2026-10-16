@@ -731,6 +731,8 @@ export type TrendExcludedPoint = {
 };
 
 export type TrendPoint = {
+  /** numericValue is a boundary when this qualifier is present, never an exact measurement. */
+  resultComparator?: '<' | '≤' | '>' | '≥' | null;
   duplicateSources?: Array<{observationId:string;reportId:string;reportTitle:string;examinationId:string|null;pageNumber:number|null}>;
   examinationConflict?: boolean;
   timeOrderAmbiguous?: boolean;

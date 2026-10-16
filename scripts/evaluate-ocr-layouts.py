@@ -22,7 +22,7 @@ def digest(path):
 
 def row(name, value, unit='U/L', reference='0-99', **extra):
     return dict(name=name, value=float(value.lstrip('<>≤≥')), resultText=value,
-                unit=unit, referenceText=reference, trendEligible=not value.startswith(('<', '>', '≤', '≥')), **extra)
+                unit=unit, referenceText=reference, trendEligible=True, **extra)
 
 
 def synthetic_cases(font_path):

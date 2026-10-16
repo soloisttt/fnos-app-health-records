@@ -93,6 +93,7 @@ const ocrDetailError = ref("");
 const showOcrOverlay = ref(false);
 const editOriginalImage = ref<HTMLImageElement | null>(null);
 const observationOriginalImage = ref<HTMLImageElement | null>(null);
+const observationSourceStage = ref<HTMLElement | null>(null);
 // 记录已完成加载的图片页 id：翻页后图片未就绪前不渲染 OCR 标记，避免标记先出现、
 // 图片后撑开造成的抖动。
 const loadedOriginalImagePageId = ref("");
@@ -370,7 +371,7 @@ const extractionNoticeText = computed(() => {
   const parts: string[] = [];
   const unmatched = job.unmatchedCandidates || 0;
   if (unmatched > 0) {
-    parts.push(`${unmatched} 个疑似指标未能通过原文核验，未入库`);
+    parts.push(`${unmatched} 个原文候选尚未完成核对，请对照原件确认`);
   }
   const gapPages = job.tableSerialGapPages || [];
   if (gapPages.length) {
@@ -2628,7 +2629,7 @@ onActivated(() => {
                 <button v-if="observationSourcePage" class="plain-icon-button" type="button" title="打开原件" @click="openOriginalViewer(observationSourcePageIndex)"><Maximize2 :size="16" /></button>
               </header>
               <ObservationTimeEditor v-if="selectedObservation" :key="selectedObservation.id" :report-id="reportId" :observation="selectedObservation" :can-manage="canManageReport" :busy="hasRunningJobs" @updated="loadDetail(reportId,true);emit('updated')" />
-              <div v-if="observationSourcePage" class="observation-source-stage">
+              <div v-if="observationSourcePage" ref="observationSourceStage" class="observation-source-stage">
                 <OriginalOrientation :image="observationOriginalImage" :page-key="observationSourcePage.id" :initial-rotation="savedViewRotation(observationSourcePage)">
                 <div class="observation-source-image-wrapper">
                   <img
@@ -2646,6 +2647,7 @@ onActivated(() => {
                     :coord-width="ocrDetailPage.coordWidth"
                     :coord-height="ocrDetailPage.coordHeight"
                     :highlight-line-ids="observationEvidenceLineIds"
+                    :scroll-container="observationSourceStage"
                     :interactive="false"
                   />
                 </div>

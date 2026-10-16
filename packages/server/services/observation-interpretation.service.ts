@@ -1,4 +1,5 @@
 import { assessObservationReference } from "./observation-reference.service";
+import { splitMeasurementBound } from '../../shared/measurement-result';
 
 export type ObservationAbnormalFlag = "high" | "low" | "abnormal" | "normal" | null;
 export type ObservationAbnormalSource =
@@ -145,7 +146,7 @@ export function assessObservationInterpretation(input: {
     ? { flag: input.storedFlag, source: "stored" as const }
     : inferReportedAbnormalFlag(input);
   const rawFlag = inferred.flag;
-  const numericValue = typeof input.numericValue === "number" && Number.isFinite(input.numericValue)
+  const numericValue = !splitMeasurementBound(input.resultText || '').comparator && typeof input.numericValue === "number" && Number.isFinite(input.numericValue)
     ? input.numericValue
     : null;
   const reportLow = typeof input.referenceLow === "number" && Number.isFinite(input.referenceLow)
@@ -247,7 +248,7 @@ export function assessObservationInterpretation(input: {
 /* 列表计数等 SQL 场景需要持久化的展示口径异常标记。
    推导逻辑必须与读取期保持一致：参考范围先经可信度治理，数值缺失时
    从结果文本解析，证据行作为辅助标记来源。版本号用于逻辑变更后触发回填。 */
-export const observationDisplayFlagDerivationVersion = 3;
+export const observationDisplayFlagDerivationVersion = 5;
 
 /* 解析指标字典 reference_range_json；无数值边界时返回 null，不参与兜底。 */
 export function parseDictionaryReferenceRange(value: string | null | undefined) {

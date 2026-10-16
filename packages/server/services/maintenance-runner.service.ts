@@ -7,13 +7,14 @@ import { purgeExpiredReports, recoverTimedOutDuplicateReportOperations } from ".
 import { runFileGarbageCollection, scanOrphanStorageFiles } from "./file-gc.service";
 import {
   activeIndicatorNormalizationVersion,
+  assessPersistedObservationReference,
+  dictionaryReferenceForUnit,
   backfillBuiltinIndicatorNormalizations
 } from "./indicator-normalization.service";
 import { startIndicatorNormalizationTaskRunner } from "./indicator-normalization-task.service";
 import {
   deriveObservationDisplayAbnormal,
-  observationDisplayFlagDerivationVersion,
-  parseDictionaryReferenceRange
+  observationDisplayFlagDerivationVersion
 } from "./observation-interpretation.service";
 
 const maintenanceIntervalMs = 6 * 60 * 60_000;
@@ -110,10 +111,12 @@ export function runObservationDisplayFlagBackfillIfNeeded() {
   if (previousVersion >= observationDisplayFlagDerivationVersion) return null;
   const db = getDatabase();
   const rows = db.prepare(`
-    SELECT observations.id, abnormal_flag AS abnormalFlag, result_text AS resultText,
+    SELECT observations.id, observations.unit, catalog.canonical_key AS canonicalKey, catalog.default_unit AS catalogDefaultUnit, abnormal_flag AS abnormalFlag, result_text AS resultText,
       numeric_value AS numericValue, reference_low AS referenceLow,
       reference_high AS referenceHigh, reference_text AS referenceText,
       evidence_json AS evidenceJson,
+      EXISTS (SELECT 1 FROM report_extractions e WHERE e.report_id = observations.report_id) AS hasAiExtraction,
+      EXISTS (SELECT 1 FROM observation_field_overrides v WHERE v.observation_id = observations.id) AS manualReviewed,
       catalog.reference_range_json AS dictionaryReferenceJson
     FROM observations
     LEFT JOIN observation_normalizations normalizations
@@ -125,10 +128,15 @@ export function runObservationDisplayFlagBackfillIfNeeded() {
     abnormalFlag: "high" | "low" | "abnormal" | "normal" | null;
     resultText: string;
     numericValue: number | null;
+    unit: string | null;
+    canonicalKey: string | null;
+    catalogDefaultUnit: string | null;
     referenceLow: number | null;
     referenceHigh: number | null;
     referenceText: string | null;
     evidenceJson: string;
+    hasAiExtraction: number;
+    manualReviewed: number;
     dictionaryReferenceJson: string | null;
   }>;
   const update = db.prepare(`
@@ -150,15 +158,17 @@ export function runObservationDisplayFlagBackfillIfNeeded() {
       } catch {
         supportingText = [];
       }
+      const reference = assessPersistedObservationReference(row);
       const derived = deriveObservationDisplayAbnormal({
         storedFlag: row.abnormalFlag,
         resultText: row.resultText,
         supportingText,
         numericValue: row.numericValue,
-        referenceLow: row.referenceLow,
-        referenceHigh: row.referenceHigh,
-        referenceText: row.referenceText,
-        dictionaryReference: parseDictionaryReferenceRange(row.dictionaryReferenceJson)
+        referenceLow: reference.low,
+        referenceHigh: reference.high,
+        referenceText: reference.text,
+        dictionaryReference: reference.status === "missing" && !reference.reason
+          ? dictionaryReferenceForUnit(row.dictionaryReferenceJson, row.canonicalKey, row.catalogDefaultUnit, row.unit) : null
       });
       update.run(derived.displayAbnormalFlag, derived.abnormalConflict ? 1 : 0, row.id);
     }

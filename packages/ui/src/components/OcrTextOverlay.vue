@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { OcrLineDetail } from "../types/api";
 import { copyTextToClipboard } from "../utils/clipboard";
 
@@ -15,11 +15,13 @@ const props = withDefaults(
     highlightLineIds?: string[];
     accentLineIds?: string[];
     interactive?: boolean;
+    scrollContainer?: HTMLElement | null;
   }>(),
   { interactive: true },
 );
 
 const imageSize = ref({ width: 0, height: 0, naturalWidth: 0, naturalHeight: 0 });
+const overlay = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 
 const sortedLines = computed(() =>
@@ -60,6 +62,33 @@ const highlightGroups = computed(() => {
   }
   return groups;
 });
+
+// 只移动核对原件的滚动区域，避免 scrollIntoView 连带滚动弹窗和指标列表。
+watch([highlightGroups, imageSize, () => props.scrollContainer], async () => {
+  await nextTick();
+  const container = props.scrollContainer;
+  if (!container?.clientWidth || !container.clientHeight) return;
+  const boxes = Array.from(overlay.value?.querySelectorAll(".ocr-highlight-group") || [])
+    .map(element => element.getBoundingClientRect()).filter(rect => rect.width && rect.height);
+  if (!boxes.length) return;
+  const bounds = container.getBoundingClientRect();
+  const left = bounds.left + container.clientLeft;
+  const top = bounds.top + container.clientTop;
+  // 使用渲染后的坐标，同时兼容缩放和原件方向变换。
+  const target = {
+    left: Math.min(...boxes.map(box => box.left)), right: Math.max(...boxes.map(box => box.right)),
+    top: Math.min(...boxes.map(box => box.top)), bottom: Math.max(...boxes.map(box => box.bottom)),
+  };
+  // 多行证据超过视口时先展示第一处，避免把中心定位在两段证据的空白处。
+  const box = target.bottom - target.top > container.clientHeight || target.right - target.left > container.clientWidth
+    ? boxes[0] : target;
+  if (box.left < left || box.right > left + container.clientWidth) {
+    container.scrollLeft += (box.left + box.right) / 2 - left - container.clientWidth / 2;
+  }
+  if (box.top < top || box.bottom > top + container.clientHeight) {
+    container.scrollTop += (box.top + box.bottom) / 2 - top - container.clientHeight / 2;
+  }
+}, { flush: "post", immediate: true });
 
 const copiedLineId = ref("");
 let copiedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -166,7 +195,7 @@ watch(() => props.image, (newImage, oldImage) => {
 </script>
 
 <template>
-  <div class="ocr-text-overlay" @click.stop>
+  <div ref="overlay" class="ocr-text-overlay" @click.stop>
     <span
       v-for="(group, index) in highlightGroups"
       :key="`group-${index}`"

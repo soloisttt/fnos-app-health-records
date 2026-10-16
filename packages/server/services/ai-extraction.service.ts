@@ -2708,16 +2708,6 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       tableOrdinal: observation.evidence.some(entry => Boolean(entry.table)),
     });
     const normalizedItemName = cleanedName.name;
-    /* 小结枚举回声（"3、血清总胆固醇测定增高:5.48…"）：名称带序号前缀、
-       结果却是建议类长文（真实测量值埋在名称里）。明细页的同名指标已存在，
-       这种回声行直接丢弃。 */
-    if (
-      /^\d+\s*[、.．]/.test(observation.itemName.normalize("NFKC").trim()) &&
-      observation.resultText.trim().length > 16 &&
-      /[，。；;]/.test(observation.resultText)
-    ) {
-      return [];
-    }
     const embeddedValue = normalizedItemName.match(
       /^(.+?)[：:]\s*(?:<=|>=|<|>|≤|≥)?\s*([-+]?\d+(?:\.\d+)?)(?:\s*[^\s]+)?$/,
     );
@@ -2753,7 +2743,7 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       invalidObservationNamePattern.test(itemName)
     )
       return [];
-    if (/^[a-z]$/i.test(itemName) || /^[^\p{L}\p{N}]+$/u.test(itemName))
+    if (/^[^\p{L}\p{N}]+$/u.test(itemName))
       return [];
 
     const rawUnit = observation.unit?.normalize("NFKC").trim() || null;
@@ -2781,17 +2771,8 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       high: observation.referenceHigh,
       text: observation.referenceText,
     });
-    const explicitHigh = /[↑▲⬆]|偏高/.test(resultText);
-    const explicitLow = /[↓▼⬇]|偏低/.test(resultText);
-    const inRange =
-      numericValue !== null &&
-      (reference.low === null || numericValue >= reference.low) &&
-      (reference.high === null || numericValue <= reference.high) &&
-      (reference.low !== null || reference.high !== null);
-    let abnormalFlag = observation.abnormalFlag;
-    if (inRange && abnormalFlag === "high" && !explicitHigh) abnormalFlag = null;
-    if (inRange && abnormalFlag === "low" && !explicitLow) abnormalFlag = null;
-
+    // Preserve report flags, including flags printed in a separate column.
+    // Conflicts with numeric interpretation are handled by the display service.
     return [
       {
         ...observation,
@@ -2806,7 +2787,6 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
         referenceLow: reference.low,
         referenceHigh: reference.high,
         referenceText: reference.text,
-        abnormalFlag,
         evidence: uniqueObservationEvidence(observation.evidence),
       },
     ];
@@ -3655,6 +3635,11 @@ export function persistAiExtraction(
       normalized.fields.observations,
     )),
   };
+  if (!fields.observations.length &&
+    (initial.fields.observations.length || result.evidenceValidation?.rejectedObservations)) {
+    throw Object.assign(new Error("未生成可核实的指标，已有结果已保留；请核对页面方向、清晰度和表格列后重试"),
+      { code: "AI_NO_VERIFIED_OBSERVATIONS" });
+  }
   const examinationPagesForOverrides=examinationSourcePages(reportId);
   const observationsWithOverrides = applyObservationFieldOverrides(
     reportId,

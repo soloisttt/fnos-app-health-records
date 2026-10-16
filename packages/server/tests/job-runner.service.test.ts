@@ -2817,3 +2817,28 @@ test("cancels queued and processing jobs on user request and reconciles report s
     );
   });
 });
+
+test('all rejected AI observations fail visibly and preserve existing report results', async () => {
+  await withDatabase(async () => {
+    saveAiSettings({enabled:true,baseUrl:'https://ai.example.test/v1',textModel:'synthetic',apiKey:'test-secret'});
+    const upload=createUpload(manager,'runner-member',[{originalName:'synthetic-unverified.png',data:pngBytes()}]);
+    const worker:WorkerExecutor=async request=>request.action==='thumbnail'?{ok:true,width:240,height:320}:
+      {ok:true,engine:'synthetic',lines:[{id:'source',text:'合成检验项目 参考范围 0-9',confidence:.99,box:[0,0,400,20]}]};
+    await processNextJob(worker);await processNextJob(worker);
+    const db=getDatabase();
+    db.prepare("INSERT INTO observations(id,report_id,item_name,result_text,numeric_value) VALUES('preserved',?,'既有合成指标','6',6)").run(upload.reportId);
+    const queued=db.prepare("SELECT id FROM processing_jobs WHERE report_id=? AND job_type='ai_extract'").get(upload.reportId) as {id:string};
+    db.prepare("UPDATE processing_jobs SET attempts=2 WHERE id=?").run(queued.id);
+    const ai:AiExecutor=async()=>({...normalizeAiExtraction({observations:[{
+      itemName:'合成检验项目',resultText:'123',numericValue:123,unit:'U/L',evidence:[{pageNumber:1,quote:'合成检验项目 123'}],
+    }]}),provider:'synthetic',model:'synthetic',promptVersion:'synthetic',rawResponseJson:'{}',promptTokens:1,completionTokens:1,elapsedMs:1});
+    await assert.rejects(processNextJob(worker,ai),error=>(error as {code:string}).code==='AI_NO_VERIFIED_OBSERVATIONS');
+    const job=db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(queued.id) as {status:string;error_code:string};
+    assert.equal(job.status,'failed');assert.equal(job.error_code,'AI_NO_VERIFIED_OBSERVATIONS');
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM report_extractions WHERE report_id=?').get(upload.reportId) as {count:number}).count,0);
+    assert.equal((db.prepare("SELECT numeric_value AS value FROM observations WHERE id='preserved'").get() as {value:number}).value,6);
+    const detail=getProcessingJobEventDetail(manager,queued.id);
+    assert.ok(detail.job.errorMessage?.includes('页面方向'));
+    assert.ok(detail.diagnostics.reasons.some(reason=>reason.code==='AI_INVALID_OUTPUT'));
+  });
+});

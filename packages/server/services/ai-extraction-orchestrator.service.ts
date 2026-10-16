@@ -1175,7 +1175,7 @@ function validatedObservation(
   const inferredContext =
     page && line ? nearestContext(plan, page, line.index) : null;
   const sectionName = inferredContext?.section || item.sectionName;
-  const local = line?.projectHeaderCells && !line.tableStructureUnsafe
+  const local = line?.tableHeaderText && line.sourceCells.length >= 2 && !line.tableStructureUnsafe
     ? localObservationsForLine(line) : [];
   if (local.length === 1) {
     // Once the name/result pair is verified, all printed fields in that same

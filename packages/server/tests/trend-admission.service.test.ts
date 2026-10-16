@@ -157,6 +157,55 @@ test('raw trend channel shares detail admission, isolates contexts, and responds
   }
 });
 
+test('limit records appear in details and time series without becoming exact values or anomaly evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'health-limit-trends-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = dir;
+  try {
+    const db = getDatabase();
+    db.prepare('INSERT INTO users(id,display_name) VALUES(?,?)').run(user.id, user.displayName);
+    db.prepare("INSERT INTO health_members(id,display_name,created_by) VALUES('limit-member','合成成员',?)").run(user.id);
+    db.prepare("INSERT INTO member_permissions(member_id,user_id,permission,granted_by) VALUES('limit-member',?,'manager',?)").run(user.id,user.id);
+    const inputs = ['3', '4', '<999', '5', '>=1000'];
+    inputs.forEach((text, index) => {
+      const id = `limit-${index}`;
+      db.prepare("INSERT INTO reports(id,member_id,created_by,title,report_type,status,report_issued_at) VALUES(?,'limit-member',?,'合成报告','laboratory','ready',?)").run(id,user.id,`2026-01-0${index+1}`);
+      for (const name of ['丙氨酸氨基转移酶', '合成测定项目甲']) {
+        db.prepare('INSERT INTO observations(id,report_id,item_name,result_text,numeric_value,unit,reference_low,reference_high,reference_text,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?)')
+          .run(`${id}-${name}`,id,name,text,Number(text.replace(/^[<>=]+/,'')),'U/L',2,8,'2-8',JSON.stringify([{pageNumber:1,quote:`${name} ${text} U/L`} ]));
+      }
+      normalizeReportObservations(id);
+    });
+    const series = listTrendSeries(user,'limit-member');
+    assert.equal(series.length,2);
+    for (const item of series) {
+      assert.equal(item.pointCount,5);
+      assert.deepEqual(item.points.map(p=>p.resultComparator),[null,null,'<',null,'≥']);
+      assert.equal(item.points.at(-1)?.resultText,'>=1000');
+      assert.equal(item.latestValue,null);
+      assert.equal(item.previousValue,5);
+      assert.equal(item.delta,null);
+      assert.equal(item.minValue,3);
+      assert.equal(item.maxValue,5);
+      assert.equal(item.analysisPointCount,3);
+      assert.equal(item.outlierCount,0);
+      assert.equal(item.trendConclusionAllowed,false);
+      assert.equal(item.latestChangeStatus,'not_comparable');
+      assert.equal(item.attentionLevel,null);
+      assert.equal(item.latestAbnormal,false);
+      assert.equal(item.recoveredFromAbnormal,false);
+    }
+    const detail = getReportDetail(user,'limit-4');
+    assert.ok(detail.observations.every(o=>o.displayTier==='primary'));
+    assert.ok(detail.observations.every(o=>o.displayReason?.includes('限值结果')));
+    assert.equal((db.prepare('SELECT result_text text FROM observations WHERE report_id=? LIMIT 1').get('limit-4') as {text:string}).text,'>=1000');
+  } finally {
+    closeDatabaseForTests();
+    if(previous===undefined)delete process.env.STORAGE_DIR;else process.env.STORAGE_DIR=previous;
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
+
 test('standard admission preserves detection limits and requires item identity, including trusted aliases', () => {
   const dir = mkdtempSync(join(tmpdir(), 'health-evidence-'));
   const previous = process.env.STORAGE_DIR;
@@ -167,13 +216,19 @@ test('standard admission preserves detection limits and requires item identity, 
     const evidence = (quote: string) => JSON.stringify([{ pageNumber: 1, quote }]);
     for (const bound of ['<', '>', '≤', '≥', '<=', '>=']) {
       assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence(`丙氨酸氨基转移酶 ${bound}2 U/L`) }).eligible, false);
-      assert.equal(assessTrendAdmission({ ...base, resultText: `${bound}2`, manualReviewed: true, evidenceJson: evidence(`丙氨酸氨基转移酶 ${bound}2 U/L`) }).eligible, false);
+      for (const manualReviewed of [false, true]) {
+        assert.equal(assessTrendAdmission({ ...base, resultText: `${bound}2`, manualReviewed, evidenceJson: evidence(`丙氨酸氨基转移酶 ${bound}2 U/L`) }).eligible, true);
+      }
+      assert.equal(assessTrendAdmission({...base, resultText: `${bound}2`, evidenceJson: evidence('ALT 2 U/L')}).eligible, false, 'a model cannot invent a limit');
     }
     assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('合成另一项目 2 U/L') }).eligible, false);
+    for (const resultText of ['↑ <2', '≤2 U/L', '<=２.０', '>=2e0']) {
+      assert.equal(assessTrendAdmission({...base, resultText, evidenceJson:evidence(`ALT ${resultText}${resultText.includes('U/L') ? '' : ' U/L'}`)}).eligible,true,resultText);
+    }
     assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('ALT 2 U/L') }).eligible, true);
     assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('SALT 2 U/L') }).eligible, false);
     assert.equal(assessTrendAdmission({ ...base, evidenceJson: evidence('丙氨酸氨基转移酶 2 U/L 参考范围 <2') }).eligible, true);
-    for (const resultText of ['2-3','2～3','2至3','2 ± 0.1','2/3','约2','2 (3)','2 (mg/L)']) {
+    for (const resultText of ['2-3','2～3','2至3','2 ± 0.1','2/3','约2','2 (3)','2 (mg/L)','<2-3','<约2','<2/3','<2 ± 1','<2.0.0']) {
       for (const manualReviewed of [false,true]) {
         assert.equal(assessTrendAdmission({...base,resultText,manualReviewed,evidenceJson:evidence(`ALT ${resultText} U/L`)}).eligible,false,resultText);
       }

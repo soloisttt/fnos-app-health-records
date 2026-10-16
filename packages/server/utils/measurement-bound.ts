@@ -4,7 +4,7 @@ const printedNumber = (value: string) => Number(value.replace(/,/g, ''));
 /** Compare result semantics without treating a printed detection limit as a measured point. */
 export function hasLostMeasurementBound(resultText: string, numericValue: number | null, quote: string) {
   const normalize = (value: string) => value.normalize('NFKC').replace(/≤/g, '<=').replace(/≥/g, '>=');
-  const result = normalize(resultText).trim();
+  const result = normalize(resultText).trim().replace(/^[↑↓▲▼⬆⬇]\s*/, '');
   const resultOperator = result.match(/^([<>]=?)/)?.[1];
   const value = numericValue ?? printedNumber(result);
   if (!Number.isFinite(value)) return false;

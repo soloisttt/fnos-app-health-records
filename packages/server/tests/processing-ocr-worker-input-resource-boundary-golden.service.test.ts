@@ -190,7 +190,7 @@ def open(path): return Source()
 from pathlib import Path
 Path(${JSON.stringify(engineLoadMarker)}).write_text("loaded")
 class RapidOCR:
-    def __call__(self, path): return ([], {})
+    def __call__(self, path, **kwargs): return ([], {})
 `,
       );
     }

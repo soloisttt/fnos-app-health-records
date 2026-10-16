@@ -23,6 +23,7 @@ import PullIndicator from "../components/PullIndicator.vue";
 import ReportDetailModal from "../components/ReportDetailModal.vue";
 import { apiUrl, request } from "../utils/api";
 import { matchTrendSearch, trendMeasurementTime, trendTimeSource } from "../utils/trends";
+import { splitMeasurementBound } from '../../../shared/measurement-result';
 import { describeObservationAbnormal, formatReferenceRange } from "../utils/indicator-display";
 import {
   canonicalNotation,
@@ -435,7 +436,20 @@ function formatDate(value: string | null) {
 }
 
 function pointValue(item: TrendSeries, point: TrendPoint) {
-  return [formatSeriesNumber(item, point.numericValue), item.unit].filter(Boolean).join(" ");
+  return [pointNumberText(item, point), item.unit].filter(Boolean).join(" ");
+}
+
+function pointComparator(point: TrendPoint) {
+  return point.resultComparator ?? splitMeasurementBound(point.resultText).comparator;
+}
+
+function pointNumberText(item: TrendSeries, point: TrendPoint) {
+  return `${pointComparator(point) || ''}${formatSeriesNumber(item, point.numericValue)}`;
+}
+
+function latestNumberText(item: TrendSeries) {
+  const point = item.points.at(-1);
+  return point && pointComparator(point) ? pointNumberText(item, point) : formatSeriesNumber(item, item.latestValue);
 }
 
 /* 部分报告的 resultText 已包含单位，避免 “89 mmHg mmHg” 重复展示 */
@@ -525,6 +539,7 @@ function trendValueRange(item: TrendSeries) {
 }
 
 function trendValueRangeLabel(item: TrendSeries) {
+  if (item.points.some(pointComparator)) return '精确结果区间';
   return item.outlierCount ? "常见区间" : "变化区间";
 }
 
@@ -678,8 +693,9 @@ function abnormalContinuityDetail(item: TrendSeries) {
 function trendChartPoints(item: TrendSeries) {
   const values = item.points.map((point) => point.numericValue);
   if (!values.length) return [];
-  const min = item.typicalMinValue ?? Math.min(...values);
-  const max = item.typicalMaxValue ?? Math.max(...values);
+  const boundaries = item.points.filter(pointComparator).map(point => point.numericValue);
+  const min = Math.min(item.typicalMinValue ?? Math.min(...values), ...boundaries);
+  const max = Math.max(item.typicalMaxValue ?? Math.max(...values), ...boundaries);
   const span = max - min || 1;
   return item.points.map((point, index) => {
     const ratio = Math.max(0, Math.min(1, (point.numericValue - min) / span));
@@ -691,10 +707,13 @@ function trendChartPoints(item: TrendSeries) {
   });
 }
 
-function trendChartPolyline(item: TrendSeries) {
-  return trendChartPoints(item)
-    .map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`)
-    .join(" ");
+function trendChartPolylines(item: TrendSeries) {
+  const segments: string[][] = [[]];
+  for (const point of trendChartPoints(item)) {
+    if (pointComparator(point.point)) segments.push([]);
+    else segments.at(-1)!.push(`${point.x.toFixed(1)},${point.y.toFixed(1)}`);
+  }
+  return segments.filter(segment => segment.length > 1).map(segment => segment.join(' '));
 }
 
 function trendChartMinWidth(item: TrendSeries) {
@@ -703,7 +722,8 @@ function trendChartMinWidth(item: TrendSeries) {
 
 function trendNodeLabel(point: TrendPoint, item: TrendSeries) {
   const review = point.examinationConflict ? "，同次检查结果冲突，需核对" : point.timeOrderAmbiguous ? "，同日检查先后不明" : point.trendOutlier ? "，该点与其余记录差异较大" : "";
-  return `${item.name} ${pointValue(item, point)}，${trendMeasurementTime(point)}，${trendTimeSource(point)}${review}，点击查看来源`;
+  const limit = pointComparator(point) ? '，限值记录，不参与精确变化计算' : '';
+  return `${item.name} ${pointValue(item, point)}，${trendMeasurementTime(point)}，${trendTimeSource(point)}${review}${limit}，点击查看来源`;
 }
 
 const expandedRecordKeys=ref<string[]>([]);
@@ -994,7 +1014,8 @@ onDeactivated(() => {
           <div class="trend-main">
             <div class="trend-latest">
               <span>最新值</span>
-              <strong>{{ item.points.at(-1)?.examinationConflict ? '结果冲突' : item.points.at(-1)?.timeOrderAmbiguous ? '同日多次检查' : formatSeriesNumber(item, item.latestValue) }}<small v-if="item.unit && !item.points.at(-1)?.examinationConflict && !item.points.at(-1)?.timeOrderAmbiguous">{{ item.unit }}</small></strong>
+              <strong>{{ item.points.at(-1)?.examinationConflict ? '结果冲突' : item.points.at(-1)?.timeOrderAmbiguous ? '同日多次检查' : latestNumberText(item) }}<small v-if="item.unit && !item.points.at(-1)?.examinationConflict && !item.points.at(-1)?.timeOrderAmbiguous">{{ item.unit }}</small></strong>
+              <small v-if="item.points.at(-1) && pointComparator(item.points.at(-1)!)">限值记录，不参与精确变化计算</small>
               <p>{{ formatDate(item.lastDate) }}<template v-if="item.pointCount === 1"> · 目前只有一次记录</template></p>
               <small v-if="showTrendChangeSummary(item)" class="trend-change-summary" :class="item.trendStatus">
                 {{ trendStatusLabel(item) }}<template v-if="item.latestIntervalDays !== null"> · {{ intervalLabel(item.latestIntervalDays) }}</template>
@@ -1034,7 +1055,7 @@ onDeactivated(() => {
                     <div>
                       <span>本次结果</span>
                       <p>
-                        {{ formatSeriesNumber(item, item.latestValue) }}{{ item.unit || "" }}
+                        {{ latestNumberText(item) }}{{ item.unit || "" }}
                         · {{ referenceSummary(latestPoint(item), item.unit) }}
                       </p>
                     </div>
@@ -1083,20 +1104,22 @@ onDeactivated(() => {
               <div class="trend-chart-canvas" :style="{ minWidth: trendChartMinWidth(item) }">
                 <svg class="trend-sparkline" viewBox="0 0 100 96" preserveAspectRatio="none" aria-hidden="true">
                   <line x1="4" y1="64" x2="96" y2="64" />
-                  <polyline v-if="item.kind !== 'institution' || item.comparable" :points="trendChartPolyline(item)" />
+                  <template v-if="item.kind !== 'institution' || item.comparable">
+                    <polyline v-for="(segment, index) in trendChartPolylines(item)" :key="index" :points="segment" />
+                  </template>
                 </svg>
                 <button
                   v-for="chartPoint in trendChartPoints(item)"
                   :key="chartPoint.point.observationId"
                   class="trend-chart-node"
-                  :class="{ latest: chartPoint.point === item.points[item.points.length - 1], outlier: chartPoint.point.trendOutlier }"
+                  :class="{ latest: chartPoint.point === item.points[item.points.length - 1], outlier: chartPoint.point.trendOutlier, limited: Boolean(pointComparator(chartPoint.point)) }"
                   type="button"
                   :style="{ left: `${chartPoint.x}%`, '--point-y': `${chartPoint.y}%` }"
                   :aria-label="trendNodeLabel(chartPoint.point, item)"
                   @click="openSourcePage(chartPoint.point, item)"
                 >
-                  <span class="trend-chart-value">{{ formatSeriesNumber(item, chartPoint.point.numericValue) }}</span>
-                  <i :class="pointFlagClass(chartPoint.point)"></i>
+                  <span class="trend-chart-value">{{ pointNumberText(item, chartPoint.point) }}</span>
+                  <i :class="pointFlagClass(chartPoint.point)" :data-direction="['<', '≤'].includes(pointComparator(chartPoint.point) || '') ? '↓' : '↑'"></i>
                   <time>{{ trendMeasurementTime(chartPoint.point) }}</time>
                 </button>
               </div>

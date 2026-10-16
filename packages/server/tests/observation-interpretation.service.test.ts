@@ -61,6 +61,18 @@ test("separates reported flags from effective display flags when numeric evidenc
   assert.equal(normalConflict.status, "conflict");
 });
 
+test('limit boundaries do not manufacture abnormal flags or conflicts with the report', () => {
+  for (const resultText of ['<999', '≤999', '>999', '≥999', '<=999', '>=999']) {
+    const input = {resultText, numericValue: 999, referenceLow: 2, referenceHigh: 5};
+    const inferred = assessObservationInterpretation(input);
+    assert.equal(inferred.effectiveFlag, null);
+    assert.equal(inferred.conflict, false);
+    const reported = assessObservationInterpretation({...input, storedFlag: 'low'});
+    assert.equal(reported.effectiveFlag, 'low');
+    assert.equal(reported.conflict, false);
+  }
+});
+
 test("computes directional display flags only from trusted numeric bounds when no report flag exists", () => {
   const high = assessObservationInterpretation({ numericValue: 11, referenceLow: 4, referenceHigh: 10 });
   assert.deepEqual(

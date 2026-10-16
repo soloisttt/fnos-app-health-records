@@ -2,7 +2,7 @@ import { wrappedTableNameGroups } from "../utils/wrapped-table-name";
 import { isCurrentResultColumn, isExplicitOcrTableHeader, normalizeOcrTableHeader } from './ocr-table-columns';
 
 export type OcrTableCell = { table: string; row: number; column: number; columns: number; headerRow?: number };
-type PositionedText = { id?: unknown; text?: unknown; box?: unknown; confidence?: unknown; tableUnsafe?: boolean; tableCell?: unknown };
+type PositionedText = { id?: unknown; sourceLineIds?: string[]; text?: unknown; box?: unknown; confidence?: unknown; tableUnsafe?: boolean; tableCell?: unknown };
 
 function geometry(box: unknown) {
   if (!Array.isArray(box)) return null;
@@ -20,7 +20,7 @@ const nameHeader = /^(项目名称|项目|名称|参数|检验项目|检测项�
 const prefixHeader = /^(序号|缩写|英文缩写|代码)$/;
 const headerLabel = /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目|序号|缩写|英文缩写|代码|结果|本次结果|检验结果|检查结果|测定值|实测值?|测量值|单位|异常|异常标志|标志|标记|参考范围|参考值|参考区间|历史结果|上次结果|前次结果|方法|方法学|检测方法)$/;
 const administrativeLabel = /(?:姓名|日期|时间|签名|审核|医生|标本|送检|检验者|备注|声明|报告单|报告编号|仅供|仅对)/;
-const recognitionMarker = /^[【[]\s*(?:深圳)?(?:HR|R)\s*[】\]]$/i;
+const recognitionMarker = /^(?:[【[]\s*(?:深圳|全国)?(?:HR|R)\s*[】\]]|(?:深圳|全国)\s*HR)$/i;
 const resultText = /^(?:[↑↓▲▼⬆⬇↗↘]?\s*(?:<=|>=|[<>≤≥])?\s*[-+]?\d+(?:\s*\.\s*\d+)?(?:[eE][-+]?\d+)?\s*[%‰↑↓▲▼⬆⬇↗↘]?|[-+]{1,3}|阴性|阳性|弱阳性|正常|异常|未见(?:异常)?|未检出|清亮|浑浊)$/;
 
 /** A single OCR box may contain the same code in both abbreviation/name columns. */
@@ -47,6 +47,26 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(
   lines: T[],
   canJoinName?: (first: string, second: string) => boolean,
 ): T[] {
+  // OCR sometimes joins adjacent headings into one box. Split only a complete
+  // sequence of known labels, never names, results or arbitrary prose. Estimated
+  // heading positions must still pass the existing unique row/column checks.
+  const originalLines = lines;
+  lines = lines.flatMap((line): T[] => {
+    const text = String(line.text || '').normalize('NFKC').replace(/\s+/g, '');
+    const labels = text.match(/项目名称|检验项目|检测项目|测定项目|参考范围|参考区间|参考值|本次结果|检验结果|检查结果|结果|单位|序号|序|名称|项目/g);
+    const box = geometry(line.box);
+    if (!labels || labels.length < 2 || labels.join('') !== text || !box
+      || box.right - box.left < box.height * 2 || validOcrTableCell(line.tableCell)) return [line];
+    let offset = 0;
+    return labels.map((label, index) => {
+      const left = box.left + (box.right - box.left) * offset / text.length;
+      offset += label.length;
+      return { ...line, id: `${line.id}:header:${index}`, text: label,
+        sourceLineIds: line.sourceLineIds || [String(line.id)],
+        box: [left, box.top, box.left + (box.right - box.left) * offset / text.length, box.bottom] };
+    });
+  });
+  if (lines.length === originalLines.length && lines.every((line, index) => line === originalLines[index])) lines = originalLines;
   // Retry OCR may repeat a value with different spacing. Only coalesce equal
   // text occupying the same area; equal values on other rows remain separate.
   const unique: T[] = [];
@@ -143,12 +163,19 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(
         && item.box.right < first.box.left).sort((a,b)=>b.box.right-a.box.right)[0];
       const firstEdge = nameCol === 0
         ? (previousPanelHeader ? (previousPanelHeader.box.right + first.box.left) / 2 : 0)
-        : first.box.left - height;
-      const edges = [firstEdge, ...headers.slice(1).map(item => item.box.left - height), last.box.right + height / 2];
+        : previousPanelHeader ? (previousPanelHeader.box.right + first.box.left) / 2 : first.box.left - height;
+      const edges = [firstEdge, ...headers.slice(1).map((item, index) =>
+        index + 1 === nameCol && prefixHeader.test(headers[index].text)
+          ? headers[index].box.right + height / 2
+          : item.text === '单位' && /^(参考范围|参考值|参考区间)$/.test(headers[index].text)
+            ? (headers[index].box.right + item.box.left) / 2
+            : item.box.left - height), nextPanel && prefixHeader.test(nextPanel.text)
+        ? nextPanel.box.left : last.box.right + height / 2];
       if (edges.some((edge, i) => i > 0 && edge <= edges[i - 1])) continue;
       const column = (item: typeof anchor) => {
         if (item.box.left >= edges[nameCol] && item.box.left < edges[nameCol + 1] && /\p{L}/u.test(item.text)) return nameCol;
-        return edges.findIndex((edge, i) => item.box.x >= edge && item.box.x < edges[i + 1]);
+        const index = edges.findIndex((edge, i) => item.box.x >= edge && item.box.x < edges[i + 1]);
+        return index === 0 && first.text === '序号' && !/^\d{1,3}$/.test(item.text) ? -1 : index;
       };
       const nextHeader = anchors.filter(item => y(item) > y(anchor) + height
         && item.box.x >= edges[0] && item.box.x < edges[edges.length - 1])
@@ -227,8 +254,9 @@ export function recoverHeaderAlignedTable<T extends PositionedText>(
           return (Math.min(item.box.right, edges[col + 1]) - Math.max(item.box.left, edges[col])) / (item.box.right - item.box.left) < .8;
         });
         const rowUnsafe = crossed || (!gluedCodeResult && (results.length !== 1 || !resultText.test(result?.text || '')))
-          || [name, ...results].some(item => item.line.confidence != null && Number(item.line.confidence) < .65)
-          || headers.some((header, col) => header.text === '单位' && sameRow.filter(item => column(item) === col).length > 1);
+          || [name, ...results].some(item => item.line.confidence != null && Number(item.line.confidence) < .65);
+        // Unit fragments are consumed and verified as one complete field by
+        // the planner. Their ambiguity cannot invalidate a unique name/result.
         const nextName = rowNames[rowIndex + 1];
         const bottom = Math.min(nextName ? y(nextName) - height / 2 : Infinity, y(name) + height * 3);
         for (const item of body) {

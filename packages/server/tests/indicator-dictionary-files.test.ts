@@ -175,6 +175,7 @@ test("keeps postprandial timing and unconverted unit boundaries in remote additi
   const remote = JSON.parse(readFileSync(resolve(rootDir, "dictionary/remote/indicators.json"), "utf8"));
   for (const [key, name, forbidden, units] of [
     ["lipid_non_hdl_c", "非高密度脂蛋白胆固醇", ["HDL-C", "LDL-C"], ["mmol/L", "mg/dL"]],
+    ["lipid_sdldl_c", "小而密低密度脂蛋白胆固醇", ["LDL-C", "sdLDL", "sdLDL-P", "sdLDL%", "sdLDL-C/LDL-C"], ["mmol/L", "mg/dL"]],
     ["c_peptide_postprandial_2h", "C肽餐后2小时", ["C肽", "空腹C肽", "餐后1小时C肽"], ["ng/mL", "μg/L", "nmol/L", "pmol/L"]],
     ["insulin_postprandial_2h", "胰岛素餐后2小时", ["胰岛素", "INS", "空腹胰岛素", "餐后1小时胰岛素"], ["μIU/mL", "mIU/L", "pmol/L"]]
   ] as const) {

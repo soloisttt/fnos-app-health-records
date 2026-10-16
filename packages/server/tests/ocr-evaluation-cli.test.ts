@@ -15,7 +15,7 @@ test('offline evaluation executes persistence and trend gates without claiming O
     const input = join(directory, 'input.json'), output = join(directory, 'scores.json');
     const cells = [['项目名称','结果','单位','参考范围'],['丙氨酸氨基转移酶','<0.2','U/L','0-40']];
     const lines = cells.flatMap((row,r)=>row.map((text,c)=>({id:`${r}-${c}`,text,confidence:.99,box:[c*350,r*70,c*350+240,r*70+30]})));
-    writeFileSync(input,JSON.stringify([{name:'bounded-synthetic',lines,expected:[{name:cells[1][0],value:.2,resultText:'<0.2',unit:'U/L',referenceText:'0-40',pageNumber:1,trendEligible:false}],elapsedMs:0}]));
+    writeFileSync(input,JSON.stringify([{name:'bounded-synthetic',lines,expected:[{name:cells[1][0],value:.2,resultText:'<0.2',unit:'U/L',referenceText:'0-40',pageNumber:1,trendEligible:true}],elapsedMs:0}]));
     const run = spawnSync(process.execPath,['--import','tsx',script,input,output,'--stage=pipeline','--ai=offline'],{cwd:root,encoding:'utf8',timeout:30_000});
     assert.equal(run.status,0,run.stderr);
     const [result] = JSON.parse(readFileSync(output,'utf8'));
@@ -26,10 +26,10 @@ test('offline evaluation executes persistence and trend gates without claiming O
     assert.equal(result.stages.persistence.status,'executed');
     assert.equal(result.stages.persistence.score.complete,1);
     assert.equal(result.stages.trend.status,'executed');
-    assert.equal(result.stages.trend.score.expected,0);
-    assert.equal(result.stages.trend.score.extracted,0);
-    assert.equal(result.stages.trend.admission.shouldExclude,1);
-    assert.equal(result.stages.trend.admission.excluded,1);
+    assert.equal(result.stages.trend.score.expected,1);
+    assert.equal(result.stages.trend.score.extracted,1);
+    assert.equal(result.stages.trend.admission.shouldAdmit,1);
+    assert.equal(result.stages.trend.admission.admitted,1);
     assert.equal(result.stages.persistence.score.fieldCoverage.referenceLow.status,'not_scored');
     assert.doesNotMatch(run.stdout,/丙氨酸|U\/L|0-40|0\.2/);
     const legacy = spawnSync(process.execPath,['--import','tsx',script,input,output],{cwd:root,encoding:'utf8',timeout:30_000});

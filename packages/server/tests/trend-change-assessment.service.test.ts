@@ -86,6 +86,28 @@ test("does not let a single extreme third point manufacture a sustained directio
   assert.equal(result.typicalMaxValue, 11);
 });
 
+test('limit boundaries never contribute to deltas, ranges, outliers or continuous directions', () => {
+  const limited = {...point('limit', 999, '2026-01-01'), resultComparator: '<' as const};
+  const result = assessTrendChange([point('a', 10, '2024-01-01'), point('b', 12, '2025-01-01'), limited]);
+  assert.equal(result.latestDelta, null);
+  assert.equal(result.latestChangeStatus, 'not_comparable');
+  assert.equal(result.latestChangeConclusionAllowed, false);
+  assert.equal(result.trendConclusionAllowed, false);
+  assert.equal(result.typicalMinValue, 10);
+  assert.equal(result.typicalMaxValue, 12);
+  assert.equal(result.analysisPointCount, 2);
+  assert.deepEqual(result.outlierPointIds, []);
+  const onlyLimits = assessTrendChange([limited, {...limited, observationId: 'next', numericValue: 123}]);
+  assert.equal(onlyLimits.latestDelta, null);
+  assert.equal(onlyLimits.typicalMinValue, null);
+  assert.equal(onlyLimits.analysisPointCount, 0);
+  assert.equal(assessTrendChange([limited, point('exact', 15, '2027-01-01')]).latestDelta, null);
+  const laterExact = assessTrendChange([{...limited, reportIssuedAt: '2023-01-01'}, point('a', 10, '2024-01-01'), point('b', 12, '2025-01-01')]);
+  assert.equal(laterExact.latestDelta, 2);
+  assert.equal(laterExact.latestChangeConclusionAllowed, true);
+  assert.equal(laterExact.trendConclusionAllowed, false);
+});
+
 test("known comparison conflicts preserve arithmetic values but pause conclusions", () => {
   const result = assessTrendChange([
     point("a", 10, "2025-01-01"),

@@ -1,4 +1,5 @@
 import { listFeedbackNotifications, updateFeedbackNotification } from './feedback-sync.service';
+import { splitMeasurementBound, type MeasurementComparator } from '../../shared/measurement-result';
 import { preserveFeedbackInstallation } from './feedback-installation.service';
 import { assertRestoreAdministrator, restoreAccessPolicy, type RestoreAccessPolicy } from './restore-access.service';
 import { evaluateDuplicatePair } from "./report-duplicate-evidence";
@@ -84,6 +85,7 @@ import {
   assessTrendAdmission,
   assessPersistedObservationReference,
   convertUnit,
+  dictionaryReferenceForUnit,
   ensureBuiltinIndicatorCatalog,
   isPolicyFilteredNormalization,
 } from "./indicator-normalization.service";
@@ -119,7 +121,6 @@ import {
 import { reportStructuredSectionLabels } from "./report-structured-section.service";
 import {
   assessObservationInterpretation,
-  parseDictionaryReferenceRange,
   type ObservationAbnormalSource,
   type ObservationAbnormalStatus,
 } from "./observation-interpretation.service";
@@ -1274,7 +1275,7 @@ export function getReportDetail(
       n.canonical_unit AS canonicalUnit, n.quality AS normalizationQuality,
       n.confidence AS normalizationConfidence, n.match_reason AS normalizationReason,
       n.excluded_reason AS normalizationExcludedReason, n.matched_by AS normalizationMatchedBy,
-      c.explanation AS canonicalExplanation, c.reference_range_json AS dictionaryReferenceJson,
+      c.explanation AS canonicalExplanation, c.default_unit AS catalogDefaultUnit, c.reference_range_json AS dictionaryReferenceJson,
       manual_override.id IS NOT NULL AS manualReviewed,
       EXISTS (SELECT 1 FROM report_extractions e WHERE e.report_id = o.report_id) AS hasAiExtraction,
       COALESCE(manual_override.is_manual_created, 0) AS manualCreated,
@@ -1295,6 +1296,7 @@ export function getReportDetail(
         normalizationMatchedBy: string | null;
         hasAiExtraction: number;
         dictionaryReferenceJson: string | null;
+        catalogDefaultUnit: string | null;
       };
       const evidence = parseJson<Array<{ pageNumber?: number; quote?: string; confidence?: number; imageOnly?: boolean; nameCorrected?: boolean; ocrLowConfidence?: boolean }> | null>(
         row.evidenceJson,
@@ -1330,7 +1332,7 @@ export function getReportDetail(
         referenceLow: reference.low,
         referenceHigh: reference.high,
         dictionaryReference: reference.status === "missing" && !reference.reason
-          ? parseDictionaryReferenceRange(row.dictionaryReferenceJson) : null,
+          ? dictionaryReferenceForUnit(row.dictionaryReferenceJson, row.canonicalKey, row.catalogDefaultUnit, row.unit) : null,
       });
       const firstEvidence = Array.isArray(evidence) && evidence.length
         ? evidence[0]
@@ -1368,6 +1370,7 @@ export function getReportDetail(
       const {
         normalizationMatchedBy: _normalizationMatchedBy,
         dictionaryReferenceJson: _dictionaryReferenceJson,
+        catalogDefaultUnit: _catalogDefaultUnit,
         hasAiExtraction: _hasAiExtraction,
         ...observation
       } = row;
@@ -4782,6 +4785,7 @@ type TrendAttentionLevel = "abnormal" | "near_boundary";
 type TrendAttentionBoundary = "upper" | "lower";
 
 export function classifyTrendAttention(point: {
+  resultComparator?: MeasurementComparator | null;
   numericValue: number;
   referenceLow: number | null;
   referenceHigh: number | null;
@@ -4847,6 +4851,7 @@ export function classifyTrendAttention(point: {
 
   const low = rawLow;
   const high = rawHigh;
+  if (point.resultComparator) return { level: null, boundary: null, reason: null, conflict: false };
   let boundary: TrendAttentionBoundary | null = null;
   if (
     low !== null &&
@@ -5200,7 +5205,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
       // 报告自带范围但单位换算失败时不混用，避免跨单位误判。
       dictionaryReference:
         reference.status === "missing" && !reference.reason
-          ? parseDictionaryReferenceRange(row.dictionaryReferenceJson)
+          ? dictionaryReferenceForUnit(row.dictionaryReferenceJson, row.canonicalKey, row.catalogDefaultUnit, usesCanonical ? row.canonicalUnit : row.unit)
           : null,
     });
     return {
@@ -5431,6 +5436,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
         sourceSectionName: string | null;
         itemName: string;
         resultText: string;
+        resultComparator: MeasurementComparator | null;
         numericValue: number;
         referenceLow: number | null;
         referenceHigh: number | null;
@@ -5541,6 +5547,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
       itemName: row.itemName,
       resultText: row.resultText,
       numericValue: row.trendNumericValue!,
+      resultComparator: splitMeasurementBound(row.resultText).comparator,
       referenceLow: row.trendReferenceLow,
       referenceHigh: row.trendReferenceHigh,
       referenceText: row.trendReferenceText,
@@ -5656,7 +5663,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
       const sameContext=(a:(typeof group.points)[number],b:(typeof group.points)[number])=>a.comparisonMethod===b.comparisonMethod && a.comparisonSpecimen===b.comparisonSpecimen;
       const candidates=[...pointByReport.values()];
       for(const point of candidates){
-        point.examinationConflict=Boolean(point.examinationId && candidates.some(other=>other.examinationId && other.numericValue!==point.numericValue && sameContext(point,other) && sameExamination(point.examinationId!,other.examinationId)));
+        point.examinationConflict=Boolean(point.examinationId && candidates.some(other=>other.examinationId && (other.numericValue!==point.numericValue || other.resultComparator!==point.resultComparator) && sameContext(point,other) && sameExamination(point.examinationId!,other.examinationId)));
       }
       const sortedPoints = [...pointByReport.values()].sort(
         (left, right) =>
@@ -5697,7 +5704,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
           return precision >= 10 && left.slice(0, precision) === right.slice(0, precision);
         }));
       }
-      const values = points.map((point) => point.numericValue);
+      const values = points.filter(point => !point.resultComparator).map((point) => point.numericValue);
       const metadataRepresentative =
         [...points].sort(
           (left, right) =>
@@ -5747,6 +5754,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
         points.map((point) => ({
           observationId: point.observationId,
           numericValue: point.numericValue,
+          resultComparator: point.resultComparator,
           reportIssuedAt: point.reportIssuedAt,
           referenceLow: point.referenceLow,
           referenceHigh: point.referenceHigh,
@@ -5763,6 +5771,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
       const attention = latest && !latest.timeOrderAmbiguous
         ? classifyTrendAttention({
             numericValue: latest.numericValue,
+            resultComparator: latest.resultComparator,
             referenceLow: latest.referenceLow,
             referenceHigh: latest.referenceHigh,
             abnormalFlag: latest.abnormalFlag,
@@ -5775,6 +5784,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
       const abnormalContinuity = assessTrendAbnormalContinuity(
         points.map((point) => ({
           numericValue: point.numericValue,
+          resultComparator: point.resultComparator,
           referenceLow: point.referenceLow,
           referenceHigh: point.referenceHigh,
           referenceStatus: point.referenceStatus,
@@ -5833,7 +5843,7 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
         referenceProfileKey: comparability.referenceProfileKey,
         referenceProfileCount: comparability.referenceProfileCount,
         latestPairComparabilityStatus: comparability.latestPairStatus,
-        changeAssessmentAllowed: chronologyReliable && comparability.changeAssessmentAllowed,
+        changeAssessmentAllowed: chronologyReliable && comparability.changeAssessmentAllowed && !latest?.resultComparator && !previous?.resultComparator,
         latestChangeStatus: changeAssessment.latestChangeStatus,
         latestChangeMagnitude: changeAssessment.latestChangeMagnitude,
         latestChangeReason: chronologyReason || changeAssessment.latestChangeReason,
@@ -5877,8 +5887,8 @@ export function listTrendSeries(user: RequestUser, memberId?: string) {
         pointCount: points.length,
         firstDate: points[0]?.reportIssuedAt || null,
         lastDate: latest?.reportIssuedAt || null,
-        latestValue: latest?.examinationConflict || latest?.timeOrderAmbiguous ? null : latest?.numericValue ?? null,
-        previousValue: previous?.examinationConflict || previous?.timeOrderAmbiguous ? null : previous?.numericValue ?? null,
+        latestValue: latest?.examinationConflict || latest?.timeOrderAmbiguous || latest?.resultComparator ? null : latest?.numericValue ?? null,
+        previousValue: previous?.examinationConflict || previous?.timeOrderAmbiguous || previous?.resultComparator ? null : previous?.numericValue ?? null,
         delta: !chronologyReliable ? null : changeAssessment.latestDelta,
         minValue: values.length ? Math.min(...values) : null,
         maxValue: values.length ? Math.max(...values) : null,
