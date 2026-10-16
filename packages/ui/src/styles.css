@@ -716,7 +716,7 @@ button.entry-row-open:disabled { cursor: default; }
 }
 .episode-last-hint button { border: 0; background: transparent; color: var(--brand-strong); font-size: 13px; text-decoration: underline; padding: 0; }
 .episode-last-hint-close { margin-left: auto; color: var(--muted) !important; }
-.episode-quick-input { display: grid; gap: 6px; margin-top: 10px; }
+.episode-quick-input { display: grid; gap: 8px; margin-top: 12px; }
 .episode-quick-input > span { font-size: 13px; color: var(--muted); }
 .episode-quick-input input {
   width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--line);
@@ -3505,6 +3505,15 @@ input[type="date"]::-webkit-calendar-picker-indicator { opacity: .5; cursor: poi
   /* 标题与顶栏重复时只保留操作按钮 */
   .page-intro.page-intro--keep.page-intro--actions-only { justify-content: flex-end; }
   .page-intro.page-intro--keep.page-intro--actions-only > div:first-child { display: none; }
+
+  /* 病程页的「时间轴」头：手机上把筛选按钮整块居中（桌面端仍保持靠右）。
+     ① 补回上边距 —— 上面那条 `margin: 0 0 14px` 把原本 .episode-timeline-intro 的 22px
+        抹成了 0，筛选排跟输入框几乎贴在一起，看着拥挤；
+     ② 让 actions 撑满宽度、内部居中，否则它只有内容宽、按钮会偏在一边。 */
+  .page-intro.page-intro--keep.episode-timeline-intro { margin-top: 18px; }
+  .episode-timeline-intro .episode-intro-actions { flex: 1; align-items: center; gap: 10px; }
+  .episode-timeline-intro .episode-filter { justify-content: center; }
+  .episode-timeline-intro .episode-icon-row { justify-content: center; }
   .overview-page { gap: 10px; }
   .overview-page > .page-intro { display: flex; min-height: 0; margin: 2px 0 0; }
   .overview-page > .page-intro h2 { font-size: 20px; }
