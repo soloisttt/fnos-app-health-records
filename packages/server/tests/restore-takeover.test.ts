@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { getDatabase, closeDatabaseForTests } from '../database/client';
 import { bootstrapLocalAdministrator, createLocalAccount } from '../services/auth.service';
 import { createMember, assertMemberAccess, assertMemberShare, setMemberPermission } from '../services/member.service';
-import { getAccountPreferences, setMemberHidden } from '../services/member-preferences.service';
+import { getAccountPreferences, setMemberHidden, updateAccountPreferences } from '../services/member-preferences.service';
 import { createFullBackup, preflightRestore, preflightStoredBackup, restoreBackup, restoreUploadedBackup, listMembers, getReportDetail } from '../services/records.service';
 import { getRestoreTakeoverRepairStatus, preflightRestoreTakeoverRepair, applyRestoreTakeoverRepair } from '../services/restore-takeover-repair.service';
 import { getRequestUser } from '../utils/request-user';
@@ -22,6 +22,9 @@ import storedPreflight from '../routes/api/backups/[id]/preflight.post';
 import errorHandler from '../error-handler';
 
 const status = (code: number) => (error: unknown) => (error as { status: number }).status === code;
+function gateway(uid = '2000', admin = true) {
+  return getRequestUser({ context: {}, node: { req: { healthAccessMode: 'gateway', headers: { 'x-trim-userid': uid, 'x-trim-username': 'synthetic', 'x-trim-isadmin': String(admin) } } } } as unknown as H3Event);
+}
 function rewriteArchive(root: string, path: string, name: string, edit: (manifest: any, db: DatabaseSync) => void) {
   const stage = join(root, name); mkdirSync(stage);
   execFileSync('tar', ['-xzf', path, '-C', stage]);
@@ -37,13 +40,20 @@ function rewriteArchive(root: string, path: string, name: string, edit: (manifes
   execFileSync('tar', ['-czf', output, '-C', stage, '.']);
   return output;
 }
-async function fixture(run: (f: { root: string; source: string; target: string; admin: RequestUser; owners: RequestUser[]; ids: string[]; backup: ReturnType<typeof createFullBackup> }) => void | Promise<void>) {
+async function fixture(run: (f: { root: string; source: string; target: string; admin: RequestUser; owners: RequestUser[]; ids: string[]; backup: ReturnType<typeof createFullBackup> }) => void | Promise<void>, reverse = false) {
   const root = mkdtempSync(join(tmpdir(), 'restore-takeover-'));
   const env = { ...process.env };
   const source = join(root, 'source'), target = join(root, 'target');
-  process.env.STORAGE_DIR = source; process.env.AUTH_MODE = 'fnos'; process.env.DISABLE_JOB_RUNNER = 'true';
+  process.env.STORAGE_DIR = source; process.env.AUTH_MODE = reverse ? 'local' : 'fnos'; process.env.DISABLE_JOB_RUNNER = 'true';
   try {
-    const owners = ['1000', '1001'].map(uid => getRequestUser({ context: {}, node: { req: { healthAccessMode: 'gateway', headers: { 'x-trim-userid': uid, 'x-trim-username': 'synthetic', 'x-trim-isadmin': 'true' } } } } as unknown as H3Event));
+    let owners: RequestUser[];
+    if (reverse) {
+      bootstrapLocalAdministrator();
+      const id = String(getDatabase().prepare('SELECT id FROM users').get()!.id);
+      const admin: RequestUser = { id, displayName: 'synthetic', provider: 'local', authenticated: true, isAdmin: true, isGatewayAdmin: true };
+      const other = createLocalAccount(admin, { username: 'synthetic-source', displayName: 'synthetic' });
+      owners = [admin, { ...admin, id: other.userId, isAdmin: false, isGatewayAdmin: false }];
+    } else owners = ['1000', '1001'].map(uid => gateway(uid));
     const ids = [createMember(owners[0], { displayName: 'synthetic-a', createSelf: true }).id,
       createMember(owners[1], { displayName: 'synthetic-b', createSelf: true }).id,
       createMember(owners[1], { displayName: 'synthetic-trash', relationship: 'other' }).id];
@@ -52,10 +62,14 @@ async function fixture(run: (f: { root: string; source: string; target: string; 
     getDatabase().prepare("INSERT INTO reports(id,member_id,created_by,report_type,title,status) VALUES('synthetic-report',?,?,'exam','synthetic','ready')").run(ids[0], owners[0].id);
     mkdirSync(join(source, 'reports'), { recursive: true }); writeFileSync(join(source, 'reports/synthetic.bin'), 'synthetic-original');
     const backup = createFullBackup(owners[0]);
-    closeDatabaseForTests(); process.env.STORAGE_DIR = target; process.env.AUTH_MODE = 'local';
-    bootstrapLocalAdministrator();
-    const id = String(getDatabase().prepare('SELECT id FROM users').get()!.id);
-    const admin: RequestUser = { id, displayName: 'synthetic-admin', provider: 'local', authenticated: true, isAdmin: true, isGatewayAdmin: true };
+    closeDatabaseForTests(); process.env.STORAGE_DIR = target; process.env.AUTH_MODE = reverse ? 'fnos' : 'local';
+    let admin: RequestUser;
+    if (reverse) admin = gateway();
+    else {
+      bootstrapLocalAdministrator();
+      const id = String(getDatabase().prepare('SELECT id FROM users').get()!.id);
+      admin = { id, displayName: 'synthetic-admin', provider: 'local', authenticated: true, isAdmin: true, isGatewayAdmin: true };
+    }
     await run({ root, source, target, admin, owners, ids, backup });
   } finally { closeDatabaseForTests(); process.env = env; rmSync(root, { recursive: true, force: true }); }
 }
@@ -228,19 +242,118 @@ test('expired restore and repair tokens and another administrator cannot confirm
   } finally { Date.now = now; }
 }));
 
-test('fnOS target never offers administrator takeover, including unknown-source archives', () => fixture(f => {
-  const local = createFullBackup(f.admin);
-  process.env.AUTH_MODE = 'fnos';
-  const gateway = getRequestUser({ context: {}, node: { req: { healthAccessMode: 'gateway', headers: { 'x-trim-userid': '2000', 'x-trim-username': 'synthetic', 'x-trim-isadmin': 'true' } } } } as unknown as H3Event);
-  const plan = preflightRestore(gateway, local.path);
-  assert.equal(plan.accessPolicy, 'isolate'); assert.equal(plan.canChooseTakeover, false);
-  assert.throws(() => preflightRestore(gateway, local.path, true), status(400));
-  const legacy = rewriteArchive(f.root, f.backup.path, 'unknown-on-fnos', manifest => { delete manifest.identity; });
-  assert.equal(preflightRestore(gateway, legacy).canChooseTakeover, false);
-  assert.throws(() => preflightRestore(gateway, legacy, true), status(400));
-}));
+for (const stored of [false, true]) test(`local to fnOS ${stored ? 'stored' : 'uploaded'} restore retains target gateway login and grants all restored archives`, () => fixture(f => {
+  const existing = createMember(f.admin, { displayName: 'target-only', createSelf: true });
+  const ordinaryBefore = gateway('2001', false);
+  if (stored) cpSync(join(f.source, 'backups/full'), join(f.target, 'backups/full'), { recursive: true });
+  const plan = stored ? preflightStoredBackup(f.admin, f.backup.id) : preflightRestore(f.admin, f.backup.path);
+  assert.equal(plan.accessPolicy, 'admin_takeover'); assert.equal(plan.sourceMode, 'local'); assert.equal(plan.targetMode, 'fnos');
+  assert.equal(plan.canChooseTakeover, false); assert.match(plan.warning, /已有档案设为本人/); assert.doesNotMatch(plan.warning, /分配给本地账号/);
+  const result = stored ? restoreBackup(f.admin, f.backup.id, plan.token) : restoreUploadedBackup(f.admin, f.backup.path, plan.token);
+  const login = gateway();
+  assert.equal(login.id, result.identityRebind.userId); assert.notEqual(login.id, f.admin.id);
+  assert.equal(result.identityRebind.memberPermissionCount, 3);
+  assert.deepEqual(listMembers(login).map(m => m.id).sort(), f.ids.slice(0, 2).sort());
+  assert.equal(getReportDetail(login, 'synthetic-report').id, 'synthetic-report');
+  assert.equal(readFileSync(join(f.target, 'reports/synthetic.bin'), 'utf8'), 'synthetic-original');
+  const db = getDatabase();
+  assert.equal(db.prepare('SELECT 1 FROM health_members WHERE id=?').get(existing.id), undefined);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM local_accounts WHERE disabled_at IS NULL').get()!.n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get()!.n, f.owners.length + 1, 'only target administrator identity is re-established');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM identity_recovery_pending WHERE mapped_at IS NOT NULL').get()!.n, 0);
+  assert.equal(getAccountPreferences(login)?.selfMemberId ?? null, null);
+  assert.equal(listMembers(login).find(m => m.id === f.ids[0])!.hidden, 0);
+  assert.equal(db.prepare('SELECT created_by FROM health_members WHERE id=?').get(f.ids[0])!.created_by, f.owners[0].id);
+  assert.ok(db.prepare('SELECT deleted_at FROM health_members WHERE id=?').get(f.ids[2])!.deleted_at);
+  for (const id of f.ids.slice(0, 2)) assertMemberShare(login, id);
+  assert.equal(db.prepare("SELECT can_manage_sharing FROM member_permissions WHERE member_id=? AND user_id=?").get(f.ids[2], login.id)!.can_manage_sharing, 1);
+  assert.throws(() => assertMemberAccess(f.owners[0], f.ids[0]), status(403));
+  assert.throws(() => assertMemberAccess(ordinaryBefore, f.ids[0]), status(403));
+  updateAccountPreferences(login, { selfMemberId: f.ids[0], defaultMemberId: f.ids[0] });
+  assert.equal(getAccountPreferences(login)!.selfMemberId, f.ids[0]);
+  const ordinary = gateway('2001', false); assert.equal(listMembers(ordinary).length, 0);
+  const version = Number(db.prepare('SELECT version FROM member_permission_versions WHERE member_id=?').get(f.ids[0])!.version);
+  setMemberPermission(login, f.ids[0], { userId: ordinary.id, permission: 'viewer', version });
+  assert.equal(assertMemberAccess(ordinary, f.ids[0]), 'viewer');
+  assert.throws(() => assertMemberAccess(ordinary, f.ids[1]), status(403));
+  assert.equal(getRestoreTakeoverRepairStatus(login).available, false);
+  assert.throws(() => restoreUploadedBackup(login, f.backup.path, plan.token), status(409));
+}, true));
 
-test('HTTP multipart restore binds policy to token and historical repair remains administrator-only', () => fixture(async f => {
+test('fnOS legacy takeover requires explicit choice; same-mode archives remain isolated', () => fixture(f => {
+  const legacy = rewriteArchive(f.root, f.backup.path, 'unknown-on-fnos', manifest => { delete manifest.identity; });
+  assert.equal(preflightRestore(f.admin, legacy).accessPolicy, 'isolate');
+  const chosen = preflightRestore(f.admin, legacy, true);
+  assert.equal(chosen.canChooseTakeover, true); assert.equal(chosen.accessPolicy, 'admin_takeover');
+  assert.throws(() => preflightRestore(f.admin, f.backup.path, true), status(400));
+  const own = createFullBackup(f.admin);
+  assert.equal(preflightRestore(f.admin, own.path).accessPolicy, 'preserve');
+  const foreign = rewriteArchive(f.root, own.path, 'foreign-fnos', manifest => { manifest.identity.id = 'other'; });
+  assert.equal(preflightRestore(f.admin, foreign).accessPolicy, 'isolate');
+  assert.throws(() => preflightRestore(f.admin, foreign, true), status(400));
+  restoreUploadedBackup(f.admin, legacy, chosen.token);
+  assert.equal(listMembers(gateway()).length, 2);
+}, true));
+
+test('fnOS restore rejects stale roles, pending identities, wrong providers and changed gateway subjects', () => fixture(f => {
+  assert.throws(() => preflightRestore({ ...f.admin, authenticated: false }, f.backup.path), status(403));
+  assert.throws(() => preflightRestore({ ...f.admin, provider: 'local' }, f.backup.path), status(403));
+  const plan = preflightRestore(f.admin, f.backup.path);
+  const db = getDatabase();
+  db.prepare('UPDATE users SET is_gateway_admin=0 WHERE id=?').run(f.admin.id);
+  assert.throws(() => restoreUploadedBackup(f.admin, f.backup.path, plan.token), status(403));
+  db.prepare('UPDATE users SET is_gateway_admin=1 WHERE id=?').run(f.admin.id);
+  db.prepare("UPDATE user_identities SET subject='unscoped' WHERE user_id=?").run(f.admin.id);
+  assert.throws(() => preflightRestore(f.admin, f.backup.path), status(403));
+  gateway(); // New validated target identity cannot execute another actor's plan.
+  assert.throws(() => restoreUploadedBackup(gateway(), f.backup.path, plan.token), status(409));
+  const admin = gateway();
+  db.prepare("INSERT INTO identity_recovery_pending(user_id,source_json) VALUES(?,'{}')").run(admin.id);
+  assert.throws(() => preflightRestore(admin, f.backup.path), status(403));
+}, true));
+
+for (const switched of [false, true]) test(`local to fnOS rollback ${switched ? 'after switching' : 'before switching'} preserves target files and gateway identity`, () => fixture(f => {
+  const member = createMember(f.admin, { displayName: 'target-only', createSelf: true });
+  mkdirSync(join(f.target, 'reports'), { recursive: true }); writeFileSync(join(f.target, 'reports/target.bin'), 'target-original');
+  const failing = rewriteArchive(f.root, f.backup.path, 'failure', (_manifest, db) => {
+    db.exec(switched ? "CREATE TRIGGER reject_restore_audit BEFORE INSERT ON audit_logs WHEN NEW.action='backup.restore' BEGIN SELECT RAISE(ABORT,'synthetic switch failure'); END"
+      : "CREATE TRIGGER reject_takeover BEFORE INSERT ON member_permissions BEGIN SELECT RAISE(ABORT,'synthetic grant failure'); END");
+  });
+  const plan = preflightRestore(f.admin, failing);
+  assert.throws(() => restoreUploadedBackup(f.admin, failing, plan.token), /synthetic (switch|grant) failure/);
+  assert.equal(gateway().id, f.admin.id);
+  assert.equal(assertMemberAccess(gateway(), member.id), 'manager');
+  assert.equal(readFileSync(join(f.target, 'reports/target.bin'), 'utf8'), 'target-original');
+  assert.equal(existsSync(join(f.target, 'reports/synthetic.bin')), false);
+  assert.equal(existsSync(join(f.target, 'restore-maintenance.json')), false);
+}, true));
+
+test('historical Docker to fnOS repair verifies source and grants only unmanaged archives once', () => fixture(f => {
+  const legacy = rewriteArchive(f.root, f.backup.path, 'historical-local', manifest => { delete manifest.identity; });
+  const plan = preflightRestore(f.admin, legacy);
+  restoreUploadedBackup(f.admin, legacy, plan.token);
+  const admin = gateway();
+  const ordinary = gateway('2001', false);
+  assert.throws(() => getRestoreTakeoverRepairStatus(ordinary), status(403));
+  assert.equal(getRestoreTakeoverRepairStatus(admin).available, true);
+  // Explicitly managed/mapped archives remain outside repair scope.
+  getDatabase().prepare("INSERT INTO member_permissions(member_id,user_id,permission,can_manage_sharing,granted_by) VALUES(?,?,'manager',1,?)").run(f.ids[1], ordinary.id, admin.id);
+  const wrong = rewriteArchive(f.root, f.backup.path, 'wrong-source-mode', manifest => { manifest.identity.authMode = 'fnos'; });
+  assert.throws(() => preflightRestoreTakeoverRepair(admin, wrong), status(409));
+  const repair = preflightRestoreTakeoverRepair(admin, f.backup.path); assert.equal(repair.memberCount, 2);
+  getDatabase().exec("CREATE TRIGGER reject_repair BEFORE INSERT ON member_permissions WHEN NEW.member_id='" + f.ids[2] + "' BEGIN SELECT RAISE(ABORT,'synthetic repair failure'); END");
+  const before = getDatabase().prepare('SELECT * FROM member_permissions ORDER BY member_id,user_id').all();
+  assert.throws(() => applyRestoreTakeoverRepair(admin, f.backup.path, repair.token), /synthetic repair failure/);
+  assert.deepEqual(getDatabase().prepare('SELECT * FROM member_permissions ORDER BY member_id,user_id').all(), before);
+  getDatabase().exec('DROP TRIGGER reject_repair');
+  assert.equal(applyRestoreTakeoverRepair(admin, f.backup.path, repair.token).memberCount, 2);
+  assert.equal(assertMemberAccess(admin, f.ids[0]), 'manager');
+  assert.throws(() => assertMemberAccess(admin, f.ids[1]), status(403));
+  assert.equal(getRestoreTakeoverRepairStatus(admin).available, false);
+  assert.throws(() => applyRestoreTakeoverRepair(admin, f.backup.path, repair.token), status(409));
+}, true));
+
+for (const reverse of [false, true]) test(`HTTP multipart ${reverse ? 'local to fnOS' : 'fnOS to local'} binds policy to token and historical repair remains administrator-only`, () => fixture(async f => {
   const app = new H3({ onError: errorHandler });
   let actor = f.admin;
   app.use(event => { event.context.requestUser = actor; });
@@ -277,4 +390,4 @@ test('HTTP multipart restore binds policy to token and historical repair remains
   assert.equal((await post('takeover-repair', body(f.backup.path, { token: repair.token }))).status, 409);
   const invalid = await app.request(`http://localhost/api/backups/${f.backup.id}/preflight`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ takeover: 'true' }) });
   assert.equal(invalid.status, 400);
-}));
+}, reverse));

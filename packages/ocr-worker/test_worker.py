@@ -24,6 +24,66 @@ def ocr_line(text, confidence, x1, y1, x2, y2, variant=None):
 
 
 class TableRetryTest(unittest.TestCase):
+    def test_pdf_append_bin_supports_inspection_thumbnail_and_ocr(self):
+        try:
+            import fitz
+            from PIL import Image
+        except ImportError:
+            self.skipTest('PyMuPDF/Pillow runtime is unavailable')
+        import io, json, os, tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'OCR_TABLE_ENHANCEMENT': 'off'}):
+            root = Path(root)
+            with fitz.open() as document:
+                document.new_page(width=600, height=800)
+                page = document.new_page(width=600, height=800)
+                for n in range(8):
+                    page.insert_text((20, 100+n*80), 'Synthetic append row '+str(n)+' '+('x'*45), fontsize=10)
+                data = document.tobytes()
+
+            def no_ocr(_):
+                self.fail('Complete PDF text should use the text layer')
+
+            outputs = []
+            for suffix in ('.pdf', '.bin'):
+                source = root / ('append'+suffix)
+                source.write_bytes(data)
+                thumbnail = root / ('preview'+suffix+'.jpg')
+                requests = [
+                    {'id': 'inspect', 'action': 'inspect_pdf', 'imagePath': str(source), 'mimeType': 'application/pdf'},
+                    {'id': 'thumbnail', 'action': 'thumbnail', 'imagePath': str(source), 'mimeType': 'application/pdf',
+                     'outputPath': str(thumbnail), 'pageNumber': 2, 'rotation': 90},
+                    {'id': 'ocr', 'action': 'ocr', 'imagePath': str(source), 'mimeType': 'application/pdf',
+                     'pageNumber': 2, 'rotation': 90},
+                ]
+                stdout = io.StringIO()
+                with patch.object(worker.sys, 'stdin', io.StringIO('\n'.join(map(json.dumps, requests)))), \
+                     patch.object(worker.sys, 'stdout', stdout), \
+                     patch.object(worker, 'load_engine', return_value={'engine': no_ocr, 'name': 'synthetic'}):
+                    self.assertEqual(worker.run_daemon(), 0)
+                responses = {item['id']: item for item in map(json.loads, stdout.getvalue().splitlines()) if 'id' in item}
+                for request in requests:
+                    self.assertTrue(responses[request['id']]['ok'], responses[request['id']])
+                self.assertEqual(responses['inspect']['pageCount'], 2)
+                with Image.open(thumbnail) as image:
+                    self.assertGreater(image.width, image.height)
+                self.assertEqual(responses['ocr']['coordWidth'], 800)
+                self.assertEqual(responses['ocr']['coordHeight'], 600)
+                self.assertEqual(len(responses['ocr']['lines']), 8)
+                outputs.append(responses['ocr']['lines'])
+            self.assertEqual(outputs[0], outputs[1])
+
+            # Scanned PDFs must also render through the PDF branch for OCR.
+            with patch.object(worker, 'should_ocr_pdf_page', return_value=True), \
+                 patch.object(worker, 'recognize_image', return_value=([], None)) as recognize:
+                lines, metadata, coord = worker.recognize_input(no_ocr, source, None, 2, 90)
+            recognize.assert_called_once()
+            self.assertEqual(metadata['source'], 'pdf_text_plus_render')
+            self.assertEqual([(line['text'], line['box']) for line in lines],
+                             [(line['text'], line['box']) for line in outputs[1]])
+            self.assertEqual(coord, {'coordWidth': 800., 'coordHeight': 600.})
+
     def test_small_skew_keeps_uncertain_results_in_their_own_rows(self):
         for angle in (-4,-2,0,2,4):
             with self.subTest(angle=angle):

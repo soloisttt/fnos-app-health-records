@@ -706,9 +706,12 @@ import {
   listTrendSeries,
 } from "../services/records.service";
 import { readdirSync } from "node:fs";
+import { getDeploymentIdentity } from "../utils/deployment-identity";
 test("backup and same-instance restore preserve draft files, owner and selected PDF pages", async () => {
   const env = setup();
   try {
+    env.db.prepare("UPDATE users SET is_gateway_admin=1 WHERE id=?").run(user.id);
+    env.db.prepare("UPDATE user_identities SET subject=? WHERE user_id=?").run(`${getDeploymentIdentity().identityDomain}:append-user`, user.id);
     const b = start(pdf);
     await processNextJob(worker());
     const ready = getPageAppend(user, "report", b.id);

@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { getDatabase } from '../database/client';
 import { isAdministrator, type RequestUser } from '../domain/request-user';
 import { getAppConfig } from '../utils/runtime-config';
+import { getDeploymentIdentity } from '../utils/deployment-identity';
 
 export type RestoreAccessPolicy = 'preserve' | 'isolate' | 'admin_takeover';
 
@@ -16,15 +17,26 @@ export function assertRestoreAdministrator(user: RequestUser) {
       AND NOT EXISTS(SELECT 1 FROM identity_recovery_pending p WHERE p.user_id=u.id)`).get(user.id)) {
       throw createError({ statusCode: 403, statusMessage: '当前管理员账号已失效，请重新登录' });
     }
+  } else if (getAppConfig().authMode === 'fnos') {
+    const identity = getDatabase().prepare(`SELECT i.subject FROM users u
+      JOIN user_identities i ON i.user_id=u.id AND i.provider='fnos_gateway'
+      WHERE u.id=? AND u.is_gateway_admin=1
+      AND NOT EXISTS(SELECT 1 FROM identity_recovery_pending p WHERE p.user_id=u.id)`).get(user.id) as { subject: string } | undefined;
+    const prefix = `${getDeploymentIdentity().identityDomain}:`;
+    if (user.provider !== 'fnos_gateway' || !identity?.subject.startsWith(prefix) || identity.subject.length <= prefix.length) {
+      throw createError({ statusCode: 403, statusMessage: '当前飞牛管理员身份已失效，请重新进入应用' });
+    }
   }
 }
 
 export function restoreAccessPolicy(sourceMode: string | undefined, strategy: 'same' | 'cross', takeover: boolean) {
-  const local = getAppConfig().authMode === 'local';
-  const canChooseTakeover = local && strategy === 'cross' && sourceMode === undefined;
+  const targetMode = getAppConfig().authMode;
+  const supportedTarget = targetMode === 'local' || targetMode === 'fnos';
+  const crossAuthentication = (targetMode === 'local' && sourceMode === 'fnos') || (targetMode === 'fnos' && sourceMode === 'local');
+  const canChooseTakeover = supportedTarget && strategy === 'cross' && sourceMode === undefined;
   if (takeover && !canChooseTakeover) throw createError({ statusCode: 400, statusMessage: '此备份不支持手动接管选项，请重新预检' });
   const accessPolicy: RestoreAccessPolicy = strategy === 'same' ? 'preserve'
-    : local && (sourceMode === 'fnos' || (canChooseTakeover && takeover)) ? 'admin_takeover' : 'isolate';
+    : supportedTarget && (crossAuthentication || (canChooseTakeover && takeover)) ? 'admin_takeover' : 'isolate';
   return { accessPolicy, canChooseTakeover };
 }
 

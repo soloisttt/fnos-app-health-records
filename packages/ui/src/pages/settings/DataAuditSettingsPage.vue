@@ -38,7 +38,7 @@ type RestoreResult = {
 };
 
 function restoreAccountNotice(result: RestoreResult) {
- if(result.identityRebind?.accessPolicy==='admin_takeover') return `已将 ${result.identityRebind.memberPermissionCount || 0} 个成员档案授权给当前管理员，请重新登录后查看和分配权限。`;
+ if(result.identityRebind?.accessPolicy==='admin_takeover') return `已将 ${result.identityRebind.memberPermissionCount || 0} 个成员档案授权给当前管理员，${app.session.value?.provider === 'fnos_gateway' ? '请重新进入应用' : '请重新登录'}后，可将已有档案设为本人或分配共享权限，无须新建成员。`;
  return result.identityRebind?.strategy==='cross'?'源账号处于待映射状态，请按备份恢复文档运行受控身份映射工具。':'授权已回到备份时点，请重新登录。';
 }
 
@@ -345,7 +345,7 @@ onMounted(() => {
           <button class="sharing-text-button" :disabled="checkingRepairStatus || backupBusy" @click="loadRepairStatus">重新检查</button>
         </div>
         <div v-else-if="repairAvailable" class="settings-form">
-          <p class="preview-hint">有尚未分配的飞牛恢复档案。选择当时使用的原始备份核对后，可由当前管理员接管，无需重新恢复数据。</p>
+          <p class="preview-hint">有尚未分配的跨账号体系恢复档案。选择当时使用的原始备份核对后，可由当前管理员接管，无需重新恢复数据。</p>
           <div class="backup-header-actions repair-actions">
             <label class="header-action native-file-action" :class="{ 'is-disabled': backupBusy }" :aria-disabled="backupBusy">
               <input type="file" accept=".tar.gz" aria-label="选择原始备份并接管档案" :disabled="backupBusy" @change="repairRestoredAccess" />

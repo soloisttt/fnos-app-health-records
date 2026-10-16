@@ -1989,7 +1989,7 @@ def recognize_input(
     page_number: int | None,
     rotation: int = 0,
 ) -> tuple[list[dict[str, Any]], Any, dict[str, float] | None]:
-    if input_path.suffix.lower() != ".pdf":
+    if detect_input_format(input_path) != "pdf":
         validate_image_dimensions(input_path)
         with tempfile.TemporaryDirectory(prefix="health-records-ocr-img-") as temp_name:
             ocr_path, coord_width, coord_height = prepare_ocr_image(
@@ -2191,7 +2191,7 @@ def create_thumbnail(
 ) -> dict[str, Any]:
     from PIL import Image
 
-    if input_path.suffix.lower() == ".pdf":
+    if detect_input_format(input_path) == "pdf":
         import fitz
 
         with open_pdf_document(input_path) as document:
@@ -2318,7 +2318,7 @@ def run_daemon() -> int:
             if action == "ocr":
                 ocr_request_count += 1
             validate_input_file(image_path)
-            validate_input_format(image_path, action, request.get("mimeType"))
+            input_format = validate_input_format(image_path, action, request.get("mimeType"))
 
             started = time.perf_counter()
             heartbeat = RequestHeartbeat(request_id, action, started)
@@ -2342,7 +2342,7 @@ def run_daemon() -> int:
                     float(request.get("renderScale") or 0) or None,
                 )
             elif action == "ocr":
-                if image_path.suffix.lower() == ".pdf":
+                if input_format == "pdf":
                     import fitz
 
                     with open_pdf_document(image_path) as document:

@@ -13,17 +13,17 @@
 | 项 | 当前值 | 来源 |
 | --- | --- | --- |
 | 应用 ID | `fnos-app-health-records` | `template.config.json` |
-| 应用版本 | `0.2.12` | `package.json` |
-| fnOS manifest 版本 | `0.2.12` | `scripts/prepare-package.mjs` 从 `package.json` 写入 |
-| fnOS sub_version | `0.2.12.0` | `scripts/prepare-package.mjs` 生成 |
-| Docker 镜像版本 | 精确版本 `0.2.12`，稳定版另提供 `latest` | GitHub Tag 工作流从 `package.json` 生成 |
+| 应用版本 | `0.2.13` | `package.json` |
+| fnOS manifest 版本 | `0.2.13` | `scripts/prepare-package.mjs` 从 `package.json` 写入 |
+| fnOS sub_version | `0.2.13.0` | `scripts/prepare-package.mjs` 生成 |
+| Docker 镜像版本 | 精确版本 `0.2.13`，稳定版另提供 `latest` | GitHub Tag 工作流从 `package.json` 生成 |
 | Docker 镜像仓库 | `docker.io/timorm/fnos-app-health-records` | Docker Hub，可通过 `DOCKERHUB_IMAGE` 覆盖 |
 | 数据库 schema | `v19` | `packages/server/database/migrations.ts` 最后一个迁移版本 |
 | 数据库记录表 | `schema_migrations`、`app_upgrade_history` | 服务端首次启动时初始化或迁移 |
 
 发布前必须确认：当前应用版本支持的目标 schema 版本明确、可初始化新库、可从上一发布版本迁移。
 
-0.2.12 已冻结发布内容，应用版本及构建统一为 0.2.12，目标数据库 schema 保持 v19，不新增编号迁移；成员合并记录通过备份后的幂等结构补齐提供。后续开发进入无编号 Unreleased。
+0.2.12 已冻结发布内容，目标数据库 schema 保持 v19，不新增编号迁移；成员合并记录通过备份后的幂等结构补齐提供。0.2.13 已封板，变更记录冻结在 `0.2.13`，包含飞牛与 Docker 双向备份恢复接管、PDF 补页修复和取消 Docker 镜像签名。相对 0.2.12 数据库结构未变，schema 保持 v19，无新增结构或迁移；实际发布状态以 GitHub Release 为准。后续开发记入无编号 `Unreleased`，不自动递增下一版本。
 
 上一正式版本 0.2.11 的目标数据库 schema 为 v19。保留原 v18 OCR 页面方向迁移，新增 v19 反馈状态、通知和管理员阅读记录；支持 0.2.10 的 v17、原 0.2.11 的 v18，以及已补齐反馈结构但仍记录 v18 的测试库，升级前自动备份，幂等保留数据。历史同号但不同内容的 v18 草案仍拒绝自动升级，保留数据并单独评审。0.2.11 撤回重发时保持同一应用版本，不改已发布迁移或清理旧安装数据；原镜像的已下载副本不会自动更新，需要主动拉取并重建容器。
 
@@ -244,7 +244,6 @@ npm run release:notes
 - `vX.Y.Z` Tag 先构建 fnOS `.fpk`，再通过 Buildx 发布 `linux/amd64`、`linux/arm64` 的 Docker Hub 多架构镜像，最后创建同时包含 `.fpk`、镜像地址和 digest 的 GitHub Release。
 - Docker 镜像仅发布精确版本 `X.Y.Z`；稳定版本额外更新 `latest`，预发布版本不更新 `latest`。不再生成 `vX.Y.Z`、`X.Y` 或短提交 SHA 镜像标签；Git Release tag 仍使用 `vX.Y.Z`。镜像版本与 `.fpk` 版本都只取自同一个 `package.json`。已有 Docker Hub 标签不会自动删除，使用旧标签的部署需先改为精确版本。
 - 镜像发布启用 OCI 源码、版本、许可证标签、SBOM 和 GitHub Actions provenance。发布前应确认 Docker Hub Access Token 和 GitHub Actions Secrets 配置正确。
-- Cosign v2.5.2 使用 `sign-blob` 对包含多架构镜像仓库与 digest 的声明签名，不把签名存入 Docker Hub。签名 `.sig`、证书 `.pem`、已签名的 digest 声明 `.json` 和透明日志凭证 `.bundle.json` 在发布作业中验证后，作为 GitHub Release 附件保存；不新增签名仓库或凭据。验证方法见 [Docker 部署](DOCKER_DEPLOYMENT.md#镜像签名验证)。
 
 本地完整发布：
 
