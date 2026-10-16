@@ -22,6 +22,7 @@ import {
   linkEpisodeFact,
   listDiseaseCatalog,
   listDiseaseRecords,
+  listRelatedEpisodes,
   listEpisodes,
   normalizeDiagnosisName,
   searchVisits,
@@ -382,6 +383,45 @@ test("疾病目录按标准病名合并诊断，并并列展示症状", () => {
     const symptoms = catalog.filter((entry) => entry.kind === "symptom");
     assert.equal(symptoms.length, 1);
     assert.equal(symptoms[0]!.name, "咳嗽");
+  } finally {
+    teardown(storageDir);
+  }
+});
+
+test("「相关病程」列出某个诊断 / 症状出现在哪几次生病里", () => {
+  const { storageDir, owner, db } = setup("related-episodes");
+  try {
+    db.exec(`
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, report_issued_at)
+        VALUES ('r1', 'member', 'owner', 'outpatient', '门诊1', 'ready', '2026-10-09');
+      INSERT INTO report_diagnoses (id, report_id, diagnosis_type, diagnosis_text)
+        VALUES ('d1', 'r1', 'outpatient', '支气管炎');
+    `);
+    /* 这次生病：挂了含该诊断的报告，并且记过两次咳嗽 */
+    const withReport = createEpisode(owner, "member", { title: "10月支气管炎", onsetAt: "2026-10-08" });
+    linkEpisodeFact(owner, withReport.episode.id, { factType: "report", factId: "r1" });
+    createSymptom(owner, withReport.episode.id, { name: "咳嗽" });
+    createSymptom(owner, withReport.episode.id, { name: "咳嗽" });
+
+    /* 这次生病：自己在家扛的，没去医院没报告，只在病程里记了症状 */
+    const homeOnly = createEpisode(owner, "member", { title: "3月咳嗽", onsetAt: "2026-03-02" });
+    createSymptom(owner, homeOnly.episode.id, { name: "咳嗽" });
+
+    const byDiagnosis = listRelatedEpisodes(owner, "member", "diagnosis", "支气管炎");
+    assert.equal(byDiagnosis.length, 1);
+    assert.equal(byDiagnosis[0]!.id, withReport.episode.id);
+    assert.equal(byDiagnosis[0]!.title, "10月支气管炎");
+    assert.match(byDiagnosis[0]!.evidence, /1 份/);
+
+    const bySymptom = listRelatedEpisodes(owner, "member", "symptom", "咳嗽");
+    assert.equal(bySymptom.length, 2, "没报告、只记了症状的那次也要算进来");
+    const home = bySymptom.find((item) => item.id === homeOnly.episode.id)!;
+    assert.equal(home.symptomCount, 1);
+    assert.match(home.evidence, /1 次/);
+    const full = bySymptom.find((item) => item.id === withReport.episode.id)!;
+    assert.match(full.evidence, /2 次/);
+
+    assert.deepEqual(listRelatedEpisodes(owner, "member", "symptom", "皮疹"), []);
   } finally {
     teardown(storageDir);
   }

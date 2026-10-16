@@ -1457,6 +1457,90 @@ export function listDiseaseRecords(
   return buildVisits(ids);
 }
 
+export type RelatedEpisode = {
+  id: string;
+  title: string;
+  status: string;
+  onsetAt: string | null;
+  resolvedAt: string | null;
+  symptomCount: number;
+  /** 跟当前条目相关的证据（一句话），让用户知道"凭什么说它相关" */
+  evidence: string;
+};
+
+/**
+ * 「相关病程」：某个诊断 / 症状出现在哪几次生病里。
+ *
+ * 为什么值得单独做：疾病页列的是**历次就诊（报告）**，而"这次生病"的完整过程在病程里 ——
+ * 没看医生、没报告的那几次只存在于病程，光看就诊记录是找不到的。
+ *
+ * 纯只读查询，不写库：
+ * - 诊断 → 这条病程挂了含该诊断的报告（跟挂没挂病程无关的那部分是报告自己的诊断）；
+ * - 症状 → 这条病程里记过同名症状。
+ */
+export function listRelatedEpisodes(
+  user: RequestUser,
+  memberId: string,
+  kind: "diagnosis" | "symptom",
+  name: string,
+): RelatedEpisode[] {
+  assertMemberAccess(user, memberId);
+  const db = getDatabase();
+  /* 病程 id → 命中条数（诊断走报告数，症状走记录次数） */
+  const hits = new Map<string, number>();
+
+  if (kind === "diagnosis") {
+    const reportIds = [...collectReportIdsByDiagnosis(memberId, (canonical) => canonical === name)];
+    if (reportIds.length) {
+      const placeholders = reportIds.map(() => "?").join(", ");
+      const rows = db
+        .prepare(
+          `SELECT episode_id AS episodeId, COUNT(DISTINCT fact_id) AS hits
+           FROM case_episode_links
+           WHERE fact_type = 'report' AND fact_id IN (${placeholders})
+           GROUP BY episode_id`,
+        )
+        .all(...reportIds) as Array<{ episodeId: string; hits: number }>;
+      for (const row of rows) hits.set(row.episodeId, Number(row.hits) || 0);
+    }
+  } else {
+    const rows = db
+      .prepare(
+        `SELECT s.episode_id AS episodeId, COUNT(*) AS hits
+         FROM case_symptoms s
+         JOIN case_episodes e ON e.id = s.episode_id
+         WHERE e.member_id = ? AND e.deleted_at IS NULL AND s.is_deleted = 0 AND s.name = ?
+         GROUP BY s.episode_id`,
+      )
+      .all(memberId, name) as Array<{ episodeId: string; hits: number }>;
+    for (const row of rows) hits.set(row.episodeId, Number(row.hits) || 0);
+  }
+
+  if (!hits.size) return [];
+  const ids = [...hits.keys()];
+  const placeholders = ids.map(() => "?").join(", ");
+  const episodes = db
+    .prepare(
+      `SELECT e.id, e.title, e.status, e.onset_at AS onsetAt, e.resolved_at AS resolvedAt,
+              (SELECT COUNT(*) FROM case_symptoms s WHERE s.episode_id = e.id AND s.is_deleted = 0) AS symptomCount
+       FROM case_episodes e
+       WHERE e.member_id = ? AND e.deleted_at IS NULL AND e.id IN (${placeholders})
+       ORDER BY COALESCE(e.onset_at, e.created_at) DESC, e.id DESC`,
+    )
+    .all(memberId, ...ids) as Array<Omit<RelatedEpisode, "evidence">>;
+
+  return episodes.map((episode) => {
+    const count = hits.get(episode.id) ?? 0;
+    return {
+      ...episode,
+      evidence:
+        kind === "diagnosis"
+          ? `挂了 ${count} 份含该诊断的报告`
+          : `记录过 ${count} 次`,
+    };
+  });
+}
+
 /**
  * A6 综合检索：输入一个关键词，跨「症状 / 病因 / 病程标题 / 诊断 / 用药」一起匹配，
  * 返回符合条件的历次就诊（什么时候、在哪家医院、开了什么药）。

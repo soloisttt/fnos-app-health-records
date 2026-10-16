@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { CalendarDays, ChevronRight, CircleAlert, LoaderCircle, RefreshCw, Search } from "@lucide/vue";
+import { Activity, CalendarDays, ChevronRight, CircleAlert, FileText, LoaderCircle, RefreshCw, Search } from "@lucide/vue";
 import BackToTop from "../components/BackToTop.vue";
+import CheckupCompareSheet from "../components/CheckupCompareSheet.vue";
 import DateTimePicker from "../components/DateTimePicker.vue";
 import EmptyState from "../components/EmptyState.vue";
 import FormSelect from "../components/FormSelect.vue";
@@ -40,6 +41,9 @@ const dateTo = ref("");
 const sortFilter = ref("report_date_desc");
 const selectedId = ref("");
 const mobileDetailOpen = ref(false);
+/* 「报告 / 体检」两个视角：体检是同一套项目反复做，单看一次没意义，要跟上次比 */
+const view = ref<"reports" | "checkup">("reports");
+const compareReportId = ref("");
 useScrollLock(computed(() => mobileDetailOpen.value));
 let listSeq = 0;
 let loadMoreObserver: IntersectionObserver | null = null;
@@ -48,12 +52,29 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const filtered = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
-  if (!keyword) return reports.value;
-  return reports.value.filter((report) =>
-    [report.title, report.hospitalName, report.departmentName, report.bodyPart]
-      .some((value) => value?.toLocaleLowerCase().includes(keyword))
-  );
+  return reports.value.filter((report) => {
+    /* 体检有自己的页签：两边互斥，一份报告只在一个页签里出现 */
+    const isCheckup = report.reportType === "checkup";
+    if (view.value === "checkup" ? !isCheckup : isCheckup) return false;
+    if (!keyword) return true;
+    return [report.title, report.hospitalName, report.departmentName, report.bodyPart]
+      .some((value) => value?.toLocaleLowerCase().includes(keyword));
+  });
 });
+/** 体检页签下点条目：直接看"跟上次比变了什么"，这是体检最该先看到的东西 */
+function onTimelineClick(report: ReportSummary) {
+  if (view.value === "checkup") {
+    compareReportId.value = report.id;
+    return;
+  }
+  selectReport(report);
+}
+function switchView(next: "reports" | "checkup") {
+  if (view.value === next) return;
+  view.value = next;
+  selectedId.value = "";
+  mobileDetailOpen.value = false;
+}
 const recordCountSubtitle = computed(() => {
   if (loading.value && !reports.value.length) return "";
   const totalReports = summaryStats.value?.totalReports ?? reports.value.length;
@@ -140,6 +161,12 @@ function selectReport(report: ReportSummary) {
   selectedId.value = report.id;
   syncSelectedReportInRoute(report.id);
   if (window.matchMedia("(max-width: 760px)").matches) mobileDetailOpen.value = true;
+}
+
+/** 从对比弹层点「查看这份报告」→ 选中它（桌面看右侧预览、手机弹详情） */
+function selectReportById(id: string) {
+  const report = reports.value.find((item) => item.id === id);
+  if (report) selectReport(report);
 }
 
 function openDuplicateCandidate(candidate: DuplicateCandidate) {
@@ -343,6 +370,25 @@ useRefreshOnActivate(() => { void reloadList(); });
         </button>
       </div>
     </section>
+    <!-- 看病报告 / 体检：体检是同一套项目反复做，价值在"跟上次比"，所以单开一个视角 -->
+    <nav class="case-view-tabs records-view-tabs" aria-label="报告分类">
+      <button
+        type="button"
+        class="case-view-tab"
+        :class="{ 'is-active': view === 'reports' }"
+        @click="switchView('reports')"
+      >
+        <FileText :size="16" />看病报告
+      </button>
+      <button
+        type="button"
+        class="case-view-tab"
+        :class="{ 'is-active': view === 'checkup' }"
+        @click="switchView('checkup')"
+      >
+        <Activity :size="16" />体检
+      </button>
+    </nav>
     <div class="filter-row records-filter-row">
       <label class="search-field records-search-field page-search-field"><Search :size="18" /><input v-model="query" placeholder="搜索医院、科室、部位或报告" @keydown.enter="applyFilters" /></label>
       <input v-model="ocrQuery" class="compact-filter advanced-filter" placeholder="OCR 全文" @keydown.enter="applyFilters" />
@@ -360,7 +406,13 @@ useRefreshOnActivate(() => { void reloadList(); });
         <p v-else-if="loadError" class="inline-panel-error">
           {{ loadError }}<button class="error-retry" type="button" @click="retryLoad">重试</button>
         </p>
-        <EmptyState v-else-if="!filtered.length" title="还没有健康报告" description="上传第一份报告后，会按报告日期出现在这里。">
+        <EmptyState
+          v-else-if="!filtered.length"
+          :title="view === 'checkup' ? '还没有体检报告' : '还没有健康报告'"
+          :description="view === 'checkup'
+            ? '上传体检报告后，这里会按时间列出来，点一份就能看它和上一次比变了什么。'
+            : '上传第一份报告后，会按报告日期出现在这里。'"
+        >
           <RouterLink class="primary-button" to="/upload">上传报告</RouterLink>
         </EmptyState>
         <template v-else>
@@ -370,7 +422,7 @@ useRefreshOnActivate(() => { void reloadList(); });
             class="timeline-item"
             :class="{ selected: report.id === selectedId }"
             type="button"
-            @click="selectReport(report)"
+            @click="onTimelineClick(report)"
           >
             <span class="timeline-date"><CalendarDays :size="14" />{{ report.reportIssuedAt || "日期待确认" }}</span>
             <strong>{{ report.title }}</strong>
@@ -419,6 +471,12 @@ useRefreshOnActivate(() => { void reloadList(); });
 
     <ReportDetailSheet v-if="mobileDetailOpen && selected" :report-id="selectedId" :summary="selected"
       @updated="reloadList" @close="closeMobileDetail" @open-candidate="openDuplicateCandidate" />
+    <CheckupCompareSheet
+      :open="Boolean(compareReportId)"
+      :report-id="compareReportId"
+      @close="compareReportId = ''"
+      @open-report="(id) => { compareReportId = ''; selectReportById(id); }"
+    />
     <BackToTop />
   </div>
 </template>

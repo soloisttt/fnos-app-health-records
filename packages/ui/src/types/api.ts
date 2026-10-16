@@ -1267,6 +1267,39 @@ export type DiseaseVisit = {
   medications: DiseaseVisitMedication[];
 };
 
+/** 某个诊断 / 症状出现在哪几次生病（病程）里 —— 疾病 ↔ 病程 双向跳转的另一半 */
+export type RelatedEpisode = {
+  id: string;
+  title: string;
+  status: CaseEpisodeStatus;
+  onsetAt: string | null;
+  resolvedAt: string | null;
+  symptomCount: number;
+  /** 凭什么说它相关：挂了 N 份含该诊断的报告 / 记录过 N 次 */
+  evidence: string;
+};
+
+/** 体检报告「与上次对比」里的单项 */
+export type CheckupComparisonItem = {
+  name: string;
+  unit: string | null;
+  current: string;
+  previous: string | null;
+  /** 数值方向；非数值项为 null */
+  direction: "up" | "down" | "same" | "new" | null;
+  abnormal: boolean;
+  previousAbnormal: boolean;
+  trend: "better" | "worse" | "flat" | "new";
+};
+
+/** 体检报告「与上次对比」 */
+export type CheckupComparison = {
+  report: { id: string; title: string; issuedAt: string | null };
+  previous: { id: string; title: string; issuedAt: string | null } | null;
+  summary: { total: number; better: number; worse: number; worseNames: string[] };
+  items: CheckupComparisonItem[];
+};
+
 export type CaseEpisodeStatus = "active" | "resolved" | "chronic" | "unknown";
 export type CaseSymptomStatus = "present" | "improved" | "worse" | "resolved" | "unknown";
 export type CaseEpisodeLinkFactType =

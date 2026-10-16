@@ -257,6 +257,36 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
   border-radius: 999px; color: var(--muted); font-size: 14px; font-weight: 600; text-decoration: none;
 }
 .case-view-tab.is-active { background: var(--surface); color: var(--brand-strong); box-shadow: var(--shadow-s); }
+/* 同一个切换条也有用在页内页签（档案页的报告 / 体检）上的，按钮形式要抹掉默认外观 */
+button.case-view-tab { border: 0; background: transparent; cursor: pointer; font-family: inherit; }
+.records-view-tabs { margin-bottom: 14px; }
+
+/* ---------- 体检「与上次对比」弹层 ---------- */
+.checkup-compare-sheet { max-height: 86vh; }
+.checkup-compare-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.checkup-compare-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.checkup-compare-vs { width: 100%; color: var(--muted); font-size: 13px; }
+.checkup-compare-summary b { border-radius: 999px; padding: 2px 10px; font-size: 13px; }
+.checkup-compare-summary .is-worse { background: var(--danger-soft); color: var(--danger); }
+.checkup-compare-summary .is-better { background: var(--green-ok-soft); color: var(--green-ok); }
+.checkup-compare-summary .is-flat { background: var(--fill-1); color: var(--muted); }
+.checkup-compare-list { display: grid; gap: 6px; }
+.checkup-compare-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--fill-2);
+}
+.checkup-compare-row.is-worse { border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: var(--danger-soft); }
+.checkup-compare-name { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.checkup-compare-values { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.checkup-compare-prev { font-style: normal; color: var(--muted); font-size: 13px; }
+.checkup-compare-arrow {
+  display: grid; place-items: center; width: 18px; height: 18px;
+  border-radius: 999px; background: var(--fill-1); color: var(--muted);
+}
+.checkup-compare-arrow.dir-up { color: var(--amber); }
+.checkup-compare-arrow.dir-down { color: var(--info); }
+.checkup-compare-cur { font-size: 14px; font-weight: 600; }
+.checkup-compare-cur.is-abnormal { color: var(--danger); }
 .page-intro h2 { font-size: 24px; line-height: 1.25; letter-spacing: -.01em; }
 .page-intro p { color: var(--muted); margin-top: 5px; font-size: 13px; }
 .page-intro-badge {
@@ -471,6 +501,9 @@ a.overview-row > .overview-row-go {
   color: inherit; font: inherit; text-align: left;
 }
 .entry-row--stacked { align-items: flex-start; }
+/* 「相关病程」整条可点：点了跳到那次生病的完整过程（/episodes?episode=xxx） */
+a.entry-row--link { cursor: pointer; text-decoration: none; transition: border-color .15s, background .15s; }
+a.entry-row--link:hover { border-color: var(--brand); background: var(--brand-softer); }
 button.entry-row { cursor: pointer; transition: border-color .15s, background .15s; }
 button.entry-row:hover:not(:disabled) { border-color: var(--brand); }
 button.entry-row:disabled { opacity: .6; cursor: default; }

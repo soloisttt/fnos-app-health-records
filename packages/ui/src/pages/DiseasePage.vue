@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowLeft, Activity, Search, X } from "@lucide/vue";
+import { ArrowLeft, Activity, ClipboardList, Search, X } from "@lucide/vue";
 import CaseViewTabs from "../components/CaseViewTabs.vue";
 import EmptyState from "../components/EmptyState.vue";
 import { request } from "../utils/api";
 import { withFrequencyNote } from "../utils/medication-frequency";
-import type { CatalogExclusion, DiseaseCatalogEntry, DiseaseVisit } from "../types/api";
+import type { CatalogExclusion, DiseaseCatalogEntry, DiseaseVisit, RelatedEpisode } from "../types/api";
 import { useAppContext } from "../composables/useAppContext";
 
 const app = useAppContext();
@@ -17,6 +17,8 @@ const entries = ref<DiseaseCatalogEntry[]>([]);
 const selected = ref<DiseaseCatalogEntry | null>(null);
 const records = ref<DiseaseVisit[]>([]);
 const recordsLoading = ref(false);
+/* 哪几次生病（病程）里出现过这个诊断 / 症状 */
+const related = ref<RelatedEpisode[]>([]);
 const searchResults = ref<DiseaseVisit[]>([]);
 const searching = ref(false);
 const hidden = ref<CatalogExclusion[]>([]);
@@ -171,22 +173,41 @@ async function openEntry(entry: DiseaseCatalogEntry) {
   selected.value = entry;
   recordsLoading.value = true;
   error.value = "";
+  related.value = [];
   try {
-    records.value = await request<DiseaseVisit[]>(
-      `disease-records?memberId=${encodeURIComponent(memberId)}&kind=${entry.kind}` +
-        `&name=${encodeURIComponent(entry.name)}`,
-    );
+    const query =
+      `memberId=${encodeURIComponent(memberId)}&kind=${entry.kind}&name=${encodeURIComponent(entry.name)}`;
+    /* 两个查询一起发：历次就诊（来自报告）和相关病程（哪几次生病），互不依赖 */
+    const [visits, episodes] = await Promise.all([
+      request<DiseaseVisit[]>(`disease-records?${query}`),
+      /* 相关病程拿不到不该让整个详情打不开：失败就退化成空 */
+      request<RelatedEpisode[]>(`disease-episodes?${query}`).catch(() => [] as RelatedEpisode[]),
+    ]);
+    records.value = visits;
+    related.value = episodes;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载就诊记录失败";
     records.value = [];
+    related.value = [];
   } finally {
     recordsLoading.value = false;
   }
 }
 
+/** 相关病程那一行：什么时候起、好了没、凭什么说它相关 */
+function episodeLine(item: RelatedEpisode) {
+  const parts: string[] = [];
+  const onset = formatDay(item.onsetAt);
+  if (onset) parts.push(`${onset} 起`);
+  parts.push(item.resolvedAt ? `已痊愈 ${formatDay(item.resolvedAt)}` : "进行中");
+  parts.push(item.evidence);
+  return parts.join(" · ");
+}
+
 function back() {
   selected.value = null;
   records.value = [];
+  related.value = [];
 }
 
 watch(
@@ -228,6 +249,29 @@ onActivated(() => {
         </button>
       </div>
       <p v-if="error" class="inline-panel-error">{{ error }}</p>
+
+      <!-- 相关病程：这个诊断 / 症状出现在哪几次生病里。
+           没看医生、没报告的那几次只存在于病程，光看下面的就诊记录是找不到的。 -->
+      <section v-if="related.length" class="settings-band entry-list-card">
+        <header>
+          <div><ClipboardList :size="18" /><h3>相关病程</h3></div>
+          <span class="count-label">共 {{ related.length }} 次</span>
+        </header>
+        <div class="entry-list-body">
+          <RouterLink
+            v-for="item in related"
+            :key="item.id"
+            class="entry-row entry-row--stacked entry-row--link"
+            :to="{ path: '/episodes', query: { episode: item.id } }"
+          >
+            <div class="entry-row-main">
+              <strong>{{ item.title }}</strong>
+              <span>{{ episodeLine(item) }}</span>
+            </div>
+          </RouterLink>
+        </div>
+      </section>
+
       <div v-if="recordsLoading" class="loading-list"><span v-for="index in 2" :key="index"></span></div>
       <EmptyState
         v-else-if="!records.length"
