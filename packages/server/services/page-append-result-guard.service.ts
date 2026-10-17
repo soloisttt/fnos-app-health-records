@@ -1,5 +1,8 @@
 import { createError } from "h3";
 import { getDatabase } from "../database/client";
+import { observationSourceCovered } from './extraction-review.service';
+import type { UnverifiedPreviousObservation } from '../domain/health-record';
+import type { AiEvidence, AiObservation } from './ai-extraction.service';
 // Compare the published records after all evidence filters and manual overrides, inside
 // the publication transaction. An incomplete candidate rolls back every structured table.
 const tables = [
@@ -14,6 +17,7 @@ const tables = [
   "morphology_findings",
 ] as const;
 const ignored = new Set([
+  "manual_protected",
   "id",
   "created_at",
   "updated_at",
@@ -55,7 +59,8 @@ export function snapshotPublishedRecords(reportId: string) {
   return tables.map((table) => ({
     table,
     rows: table === "observations"
-      ? db.prepare(`SELECT o.*,l.examination_id AS examination_id FROM observations o
+      ? db.prepare(`SELECT o.*,l.examination_id AS examination_id,
+          EXISTS(SELECT 1 FROM observation_field_overrides v WHERE v.observation_id=o.id) AS manual_protected FROM observations o
           LEFT JOIN observation_examinations l ON l.observation_id=o.id WHERE o.report_id=?`).all(reportId)
       : db.prepare(`SELECT * FROM ${table} WHERE report_id=?`).all(reportId),
   }));
@@ -63,6 +68,7 @@ export function snapshotPublishedRecords(reportId: string) {
 export function assertPublishedRecordsRetained(
   reportId: string,
   before: ReturnType<typeof snapshotPublishedRecords>,
+  reviewed?: {observations:AiObservation[];unverified:UnverifiedPreviousObservation[]},
 ) {
   const db = getDatabase();
   const compact = (v: unknown) =>
@@ -94,6 +100,17 @@ export function assertPublishedRecordsRetained(
         : [];
     };
     for (const old of rows) {
+      if (table === 'observations' && reviewed && !old.manual_protected) {
+        const sources = JSON.parse(String(old.evidence_json || '[]')) as AiEvidence[];
+        const prior = {itemName:String(old.item_name),itemCode:old.item_code as string|null,
+          method:old.method as string|null,evidence:sources};
+        const replaced = reviewed.observations.some(next => observationSourceCovered(prior,next));
+        const withdrawn = reviewed.unverified.some(item => item.itemName === old.item_name
+          && item.resultText === old.result_text && item.unit === old.unit
+          && (sources.length ? sources.some(source=>source.pageNumber===item.pageNumber && source.quote===item.sourceText)
+            : item.pageNumber === null && !item.sourceText));
+        if (replaced || withdrawn) continue;
+      }
       const match = after.findIndex(
         (next) =>
           (table !== "observations" ||

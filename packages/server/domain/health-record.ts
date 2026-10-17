@@ -72,6 +72,20 @@ export type Observation = {
   manualCanonicalKey?: string | null;
 };
 
+/** A comparison value from the previous extraction, never an active measurement. */
+export type UnverifiedPreviousObservation = {
+  itemName: string;
+  itemCode: string | null;
+  sectionName: string | null;
+  resultText: string;
+  unit: string | null;
+  pageNumber: number | null;
+  sourceLineIds: string[];
+  sourceText: string;
+  examinationSourceKey?: string | null;
+  reason: string;
+};
+
 export type MorphologyMeasurement = {
   key: string;
   value: number;
@@ -429,6 +443,7 @@ export type ReportDuplicateDecisionRecord = {
 };
 
 export type ReportDetail = ReportSummary & {
+  unverifiedPreviousObservations?: UnverifiedPreviousObservation[];
   pageAppend?: {originalRevision:number;recognizedRevision:number|null;state:string;reviewWarnings?:string[]};
   createdAt: string;
   updatedAt: string;

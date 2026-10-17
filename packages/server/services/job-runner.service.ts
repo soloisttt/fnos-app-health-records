@@ -1154,7 +1154,8 @@ function failJob(job: JobRow, error: unknown) {
     (error as { code?: string })?.code || "WORKER_TASK_FAILED",
   ).slice(0, 80);
   const permanentFailure = permanentSourceErrorCodes.has(code);
-  const finalFailure = permanentFailure || job.attempts >= maxAttempts;
+  // A completed quality review needs better evidence or user input, not the same job again.
+  const finalFailure = permanentFailure || ['AI_NO_VERIFIED_OBSERVATIONS','AI_RECOVERY_INCOMPLETE'].includes(code) || job.attempts >= maxAttempts;
   const delay = retryDelays[Math.min(job.attempts - 1, retryDelays.length - 1)];
   getDatabase()
     .prepare(

@@ -509,7 +509,7 @@ test("post-filter loss of old observation rolls back all candidate publication; 
       .run(job);
     assert.throws(
       () => persistAiExtraction("report", job, extraction([]), 30),
-      status(409),
+      error => (error as {code?:string}).code === 'AI_NO_VERIFIED_OBSERVATIONS',
     );
     assert.deepEqual(
       env.db.prepare("SELECT * FROM observations").all(),

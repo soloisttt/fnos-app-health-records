@@ -115,6 +115,7 @@ const clinicalFactEditor = ref<{
 const structuredSectionEditor = ref<ReportDetail["structuredSections"][number] | null | "create">(null);
 const allObservationsOpen = ref(false);
 const observationEditorOpen = ref(false);
+const previousObservationIndex = ref<number | null>(null);
 const editingObservationId = ref<string | null>(null);
 const selectedObservationId = ref<string | null>(null);
 const observationSourcePageIndex = ref(0);
@@ -786,6 +787,7 @@ function selectObservation(item: ReportDetail["observations"][number]) {
 }
 const observationEditVersion = ref<number>();
 function openObservationEditor(item?: ReportDetail["observations"][number]) {
+  previousObservationIndex.value = null;
   selectedObservationId.value = item?.id || null;
   const evidencePageIndex = item?.evidence?.pageId
     ? detail.value?.pages.findIndex((page) => page.id === item.evidence?.pageId) ?? -1
@@ -819,6 +821,17 @@ function openObservationEditor(item?: ReportDetail["observations"][number]) {
   if (item?.itemName) void searchObservationCatalog();
 }
 
+function reviewPreviousObservation(index: number) {
+  const item = detail.value?.unverifiedPreviousObservations?.[index];
+  if (!item) return;
+  allObservationsOpen.value = true;
+  openObservationEditor();
+  previousObservationIndex.value = index;
+  observationSourcePageIndex.value = Math.max(0,detail.value?.pages.findIndex(page=>page.pageNumber===item.pageNumber) ?? 0);
+  observationForm.value = {...observationForm.value,itemName:item.itemName,itemCode:item.itemCode || '',
+    sectionName:item.sectionName || '',resultText:item.resultText,unit:item.unit || ''};
+}
+
 function closeObservationEditor() {
   if (props.reviewObservationId) emit("close");
   observationEditorOpen.value = false;
@@ -844,7 +857,8 @@ async function saveObservation() {
       : `reports/${encodeURIComponent(props.reportId)}/observations`;
     detail.value = await request<ReportDetail>(path, {
       method: editingObservationId.value ? "PUT" : "POST",
-      body: JSON.stringify({ ...observationForm.value, expectedSourceVersion: observationEditVersion.value })
+      body: JSON.stringify({ ...observationForm.value, expectedSourceVersion: observationEditVersion.value,
+        ...(previousObservationIndex.value !== null ? {previousObservationIndex:previousObservationIndex.value} : {}) })
     });
     observationEditorOpen.value = false;
     emit("updated");
@@ -2311,7 +2325,7 @@ onActivated(() => {
             </article>
           </div>
         </section>
-        <section v-if="detail?.observations.length" class="observation-panel">
+        <section v-if="detail && (detail.observations.length || detail.unverifiedPreviousObservations?.length)" class="observation-panel">
           <header>
             <strong>指标总览</strong>
             <span>
@@ -2347,6 +2361,18 @@ onActivated(() => {
         <button type="button" @click="openUnmatchedCandidatesLog">查看整理日志</button>
       </p>
     </article>
+
+    <details v-if="detail?.unverifiedPreviousObservations?.length" class="panel-card extraction-comparison">
+      <summary>上次识别对照 · {{ detail.unverifiedPreviousObservations.length }} 项未能核实</summary>
+      <p>这些上次识别值已退出正常指标和趋势，仅供对照原件；核实后可补充录入。</p>
+      <article v-for="(item,index) in detail.unverifiedPreviousObservations" :key="index" class="observation-list-item">
+        <strong>{{ item.itemName }}</strong>
+        <span>上次识别：{{ item.resultText }} {{ item.unit }}</span>
+        <small>{{ item.reason }}</small>
+        <button v-if="item.pageNumber" class="soft-action-button" type="button" @click="openMorphologyEvidencePage(item.pageNumber)">查看原件第 {{ item.pageNumber }} 页</button>
+        <button v-if="canManageReport" class="soft-action-button" type="button" :disabled="hasRunningJobs" @click="reviewPreviousObservation(index)">对照后补录</button>
+      </article>
+    </details>
 
     <MorphologyFindingEditor
       :open="Boolean(morphologyEditItem)"
@@ -2672,7 +2698,7 @@ onActivated(() => {
             <section class="observation-edit-panel" :class="{ 'is-open': observationEditorOpen }">
               <span class="sheet-grabber observation-edit-grabber" aria-hidden="true"></span>
               <header>
-                <div><h4>{{ editingObservationId ? "编辑指标" : "补充指标" }}</h4><p>{{ editingObservationId ? "已提取内容已自动带入" : "填写后加入当前报告" }}</p></div>
+                <div><h4>{{ editingObservationId ? "编辑指标" : "补充指标" }}</h4><p>{{ previousObservationIndex !== null ? "仅带入上次识别原文，请对照原件确认后保存" : editingObservationId ? "已提取内容已自动带入" : "填写后加入当前报告" }}</p></div>
                 <button v-if="observationEditorOpen" class="plain-icon-button" type="button" title="取消编辑" @click="closeObservationEditor"><X :size="16" /></button>
               </header>
               <div v-if="!observationEditorOpen" class="observation-edit-empty">

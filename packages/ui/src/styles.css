@@ -1360,6 +1360,10 @@ h1, h2, h3, p, dl, dt, dd { margin: 0; }
   font-size: 10px; white-space: nowrap;
 }
 .observation-tier-section { display: grid; gap: 8px; }
+.extraction-comparison > summary { cursor: pointer; font-weight: 600; }
+.extraction-comparison > p { color: var(--muted); font-size: 12px; margin: 10px 0; }
+.extraction-comparison > article { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.extraction-comparison > article > small { flex-basis: 100%; color: var(--muted); }
 .observation-tier-section > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .observation-tier-section > header strong { color: var(--ink); font-size: 13px; }
 .observation-tier-section > header span { color: var(--muted); font-size: 11px; }

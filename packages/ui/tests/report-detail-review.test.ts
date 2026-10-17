@@ -397,3 +397,36 @@ describe('重复报告当前暂停状态',()=>{
   expect(wrapper.text()).not.toContain('与已有报告的完整原件一致');expect(wrapper.findAll('button').some(b=>b.text()==='仍然继续整理')).toBe(false);wrapper.unmount();
  });
 });
+
+it('keeps withdrawn values collapsed and requires explicit original review and save before reentry',async()=>{
+  const previous={itemName:'合成旧项',itemCode:null,sectionName:null,resultText:'12',unit:'U/L',pageNumber:null,sourceLineIds:[],sourceText:'合成旧项 12 U/L',reason:'本次未能核实'};
+  fetchMock.mockImplementation(async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const url=String(input);
+    if(url.endsWith('/api/reports/r1'))return jsonResponse({...detailPayload,observations:[],unverifiedPreviousObservations:[previous]});
+    if(url.endsWith('/observations')&&init?.method==='POST')return jsonResponse({...detailPayload,observations:[],unverifiedPreviousObservations:[]});
+    if(url.includes('jobs')||url.includes('indicator-catalog'))return jsonResponse([]);
+    return jsonResponse({});
+  });
+  const wrapper=mount(ReportDetail,{attachTo:document.body,props:{reportId:'r1',variant:'panel'},global:{stubs:{teleport:true,RouterLink:true,ReportNotesPanel:true,ReportPageAppend:true}}});
+  try{
+    await flushPromises();await flushPromises();
+    const comparison=wrapper.findAll('details').find(item=>item.text().includes('上次识别对照'))!;
+    expect(comparison.exists()).toBe(true);
+    expect(comparison.attributes('open')).toBeUndefined();
+    expect(wrapper.find('.observation-editor-form').exists()).toBe(false);
+    expect(fetchMock.mock.calls.some(([,init])=>init?.method==='POST')).toBe(false);
+    await comparison.findAll('button').find(button=>button.text()==='对照后补录')!.trigger('click');
+    await flushPromises();
+    const form=wrapper.get('.observation-editor-form');
+    expect(wrapper.text()).toContain('请对照原件确认后保存');
+    const inputs=form.findAll('.observation-core-fields input');
+    expect((inputs[0].element as HTMLInputElement).value).toBe('合成旧项');
+    expect((inputs[1].element as HTMLInputElement).value).toBe('12');
+    expect((inputs[2].element as HTMLInputElement).value).toBe('');
+    expect(fetchMock.mock.calls.some(([,init])=>init?.method==='POST')).toBe(false);
+    await form.trigger('submit');await flushPromises();
+    const call=fetchMock.mock.calls.find(([input,init])=>String(input).endsWith('/observations')&&init?.method==='POST')!;
+    expect(JSON.parse(call[1].body)).toMatchObject({previousObservationIndex:0,expectedSourceVersion:7,itemName:'合成旧项',numericValue:null});
+    expect(wrapper.text()).not.toContain('上次识别对照');
+  }finally{wrapper.unmount();}
+});

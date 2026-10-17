@@ -1,4 +1,5 @@
 import { assertNoPageAppend } from "./page-append-lock.service";
+import { consumeUnverifiedPreviousObservation } from './extraction-review.service';
 import type { ExaminationInput } from "../domain/examination";
 import { createHash } from "node:crypto";
 import { createError } from "h3";
@@ -231,11 +232,15 @@ export function createManualObservation(user: RequestUser, reportId: string, inp
   db.exec("BEGIN IMMEDIATE");
   try {
     insertObservation(reportId, observationId, fields);
+    const reviewed = input.previousObservationIndex === undefined || input.previousObservationIndex === null ? null
+      : consumeUnverifiedPreviousObservation(reportId,input.previousObservationIndex,input.expectedSourceVersion);
+    const reviewedEvidence = reviewed ? JSON.stringify([{pageNumber:reviewed.pageNumber || 1,quote:reviewed.sourceText}]) : '[]';
+    if (reviewed) db.prepare('UPDATE observations SET evidence_json=? WHERE id=?').run(reviewedEvidence,observationId);
     db.prepare(`
       INSERT INTO observation_field_overrides (
         id, report_id, source_key, observation_id, fields_json, canonical_key, is_manual_created, updated_by
       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(overrideId, reportId, `manual:${overrideId}`, observationId, JSON.stringify(fields), canonicalKey, user.id);
+    `).run(overrideId, reportId, `manual:${overrideId}`, observationId, JSON.stringify({...fields,...(reviewed ? {_sourceEvidence:JSON.parse(reviewedEvidence)} : {})}), canonicalKey, user.id);
     db.prepare("UPDATE reports SET source_version = source_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(reportId);
     db.prepare(`
       INSERT INTO audit_logs (id, actor_user_id, action, target_type, target_id, detail_json)
