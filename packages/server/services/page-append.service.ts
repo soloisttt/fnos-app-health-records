@@ -966,7 +966,7 @@ export async function processPageAppendJob(
     const preservedRecordConflict = Boolean(
       (error as { appendCandidateRejected?: boolean }).appendCandidateRejected,
     );
-    const emptyResult = ["AI_EMPTY_RESULT", "AI_EMPTY_RESPONSE"].includes(
+    const emptyResult = ["AI_EMPTY_RESULT", "AI_EMPTY_RESPONSE", "AI_NO_VERIFIED_OBSERVATIONS"].includes(
       String((error as { code?: string }).code || ""),
     );
     const failureMessage = revoked

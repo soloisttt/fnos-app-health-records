@@ -1,4 +1,7 @@
+import type { MeasurementComparator } from '../../shared/measurement-result';
+
 export type TrendChangePoint = {
+  resultComparator?: MeasurementComparator | null;
   observationId: string;
   numericValue: number;
   reportIssuedAt?: string | null;
@@ -221,17 +224,20 @@ export function assessTrendChange(
   inputPoints: TrendChangePoint[],
   options: TrendChangeAssessmentOptions = {}
 ): TrendChangeAssessment {
-  const points = inputPoints.filter((point) => Number.isFinite(point.numericValue));
+  const records = inputPoints.filter((point) => Number.isFinite(point.numericValue));
+  const points = records.filter(point => !point.resultComparator);
   const rawValues = points.map((point) => point.numericValue);
-  const latest = points.at(-1);
-  const previous = points.at(-2);
-  const latestDelta = latest && previous ? latest.numericValue - previous.numericValue : null;
+  const latest = records.at(-1);
+  const previous = records.at(-2);
+  const limitedPair = Boolean(latest?.resultComparator || previous?.resultComparator);
+  const hasLimits = records.length !== points.length;
+  const latestDelta = latest && previous && !limitedPair ? latest.numericValue - previous.numericValue : null;
   const latestIntervalDays = intervalDays(previous, latest);
   const outlierIndexes = detectOutlierIndexes(points);
   const outlierPointIds = [...outlierIndexes].map((index) => points[index].observationId);
   const analysisPoints = points.filter((_, index) => !outlierIndexes.has(index));
   const analysisValues = analysisPoints.map((point) => point.numericValue);
-  const latestIsOutlier = points.length > 0 && outlierIndexes.has(points.length - 1);
+  const latestIsOutlier = Boolean(latest && outlierPointIds.includes(latest.observationId));
   const latestComparisonAllowed = options.latestComparisonAllowed !== false;
   const seriesComparisonAllowed = options.seriesComparisonAllowed !== false;
   const regularity = intervalRegularity(analysisPoints);
@@ -241,7 +247,10 @@ export function assessTrendChange(
   let latestChangeReason: string | null = points.length === 1 ? "目前只有一次记录" : null;
   let latestChangeConclusionAllowed = false;
 
-  if (latestDelta !== null) {
+  if (limitedPair) {
+    latestChangeStatus = 'not_comparable';
+    latestChangeReason = '限值结果已保留，不参与精确差值或升降计算';
+  } else if (latestDelta !== null) {
     if (!latestComparisonAllowed) {
       latestChangeStatus = "not_comparable";
       latestChangeReason = "最近两次记录的参考条件不兼容，保留数值但暂停变化结论";
@@ -264,7 +273,10 @@ export function assessTrendChange(
   let trendStatus: TrendStatus;
   let trendReason: string;
   let trendConclusionAllowed = false;
-  if (!points.length || points.length === 1) {
+  if (hasLimits) {
+    trendStatus = 'insufficient_evidence';
+    trendReason = '包含限值结果，仅展示历次记录，不形成整段精确变化结论';
+  } else if (!points.length || points.length === 1) {
     trendStatus = "baseline";
     trendReason = "目前只有一次记录，作为后续比较基线";
   } else if (!seriesComparisonAllowed) {

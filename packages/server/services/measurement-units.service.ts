@@ -6,7 +6,7 @@ import { ensureCoreDictionaryMaterialized } from "./indicator-dictionary.service
  * 与 indicator_catalog 中的 default_unit / allowed_units_json 合并后生成最终匹配模式。
  */
 const fallbackUnits = [
-  "10\\^?\\d+\\/[L1]",
+  `10\\s*[\\^"'’~°˚]?\\s*\\d+\\/[L1]`,
   /* OCR 常丢斜杠（mmolL、mgdL）：mol 族和质量/体积族放行斜杠可选。
      g/L、U/L 保持严格——gl、ul 会误伤 globulin、result 等英文单词。
      单位尾的字母 l/I 常被误读为数字 1（fL→f1、mg/dL→mg/d1、IU/L→1U/L），统一放行 [L1]/[I1l]。 */

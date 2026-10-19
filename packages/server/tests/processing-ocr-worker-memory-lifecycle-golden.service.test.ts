@@ -179,7 +179,7 @@ class RapidOCR:
     def __init__(self):
         with Path(${JSON.stringify(engineMarker)}).open("a") as marker:
             marker.write("loaded\\n")
-    def __call__(self, path):
+    def __call__(self, path, **kwargs):
         return ([([[0, 0], [100, 0], [100, 12], [0, 12]], "匿名检查项目 5.0 mmol/L", 0.99)], {"elapsed": 1})
 `,
       );

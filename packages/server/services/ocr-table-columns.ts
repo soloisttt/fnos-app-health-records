@@ -11,7 +11,7 @@ export function normalizeOcrTableHeader(text: string): string {
     test:'项目名称',testname:'项目名称',item:'项目名称',itemname:'项目名称',parameter:'参数',
     result:'结果',results:'结果',value:'结果',unit:'单位',units:'单位',
     reference:'参考范围',referencerange:'参考范围',referenceinterval:'参考范围',
-    flag:'标志','提示':'标志',method:'方法',code:'代码',no:'序号','no.':'序号',
+    flag:'标志','提示':'标志',method:'方法',code:'代码',no:'序号','no.':'序号','序':'序号',
     '项目名称test':'项目名称','结果result':'结果','单位unit':'单位',
     '结杲':'结果','结呆':'结果','参考范国':'参考范围',
   };
@@ -134,5 +134,6 @@ export function mappedOcrUnit(text: string, header?: string | null): string | nu
   const candidates = [...new Set([...units, ...shared])];
   if (candidates.length !== 1) return null;
   const unit = candidates[0];
-  return /[A-Za-zµμ%‰]/.test(unit) && /^[A-Za-zµμ\d%‰/^²³·.*×+\-]+$/.test(unit) ? unit : null;
+  return (/^10[°˚~^"'’]\d{1,2}\/[lL]$/.test(unit)
+    || /[A-Za-zµμ%‰]/.test(unit) && /^[A-Za-zµμ\d%‰/^²³·.*×+\-]+$/.test(unit)) ? unit : null;
 }

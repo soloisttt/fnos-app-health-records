@@ -2817,3 +2817,76 @@ test("cancels queued and processing jobs on user request and reconciles report s
     );
   });
 });
+
+test('completed bounded recovery withdraws unverified old values without republishing them', async () => {
+  await withDatabase(async () => {
+    saveAiSettings({enabled:true,baseUrl:'https://ai.example.test/v1',textModel:'synthetic',apiKey:'test-secret'});
+    const upload=createUpload(manager,'runner-member',[{originalName:'synthetic-unverified.png',data:pngBytes()}]);
+    const worker:WorkerExecutor=async request=>request.action==='thumbnail'?{ok:true,width:240,height:320}:
+      {ok:true,engine:'synthetic',lines:[{id:'source',text:'合成检验项目 参考范围 0-9',confidence:.99,box:[0,0,400,20]}]};
+    await processNextJob(worker);await processNextJob(worker);
+    const db=getDatabase();
+    db.prepare("INSERT INTO observations(id,report_id,item_name,result_text,numeric_value) VALUES('preserved',?,'既有合成指标','6',6)").run(upload.reportId);
+    const queued=db.prepare("SELECT id FROM processing_jobs WHERE report_id=? AND job_type='ai_extract'").get(upload.reportId) as {id:string};
+    db.prepare("UPDATE processing_jobs SET attempts=2 WHERE id=?").run(queued.id);
+    const ai:AiExecutor=async()=>({...normalizeAiExtraction({observations:[{
+      itemName:'合成检验项目',resultText:'123',numericValue:123,unit:'U/L',evidence:[{pageNumber:1,quote:'合成检验项目 123'}],
+    }]}),provider:'synthetic',model:'synthetic',promptVersion:'synthetic',rawResponseJson:'{}',promptTokens:1,completionTokens:1,elapsedMs:1});
+    await processNextJob(worker,ai);
+    const job=db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(queued.id) as {status:string};
+    assert.equal(job.status,'completed');
+    assert.equal(db.prepare('SELECT count(*) n FROM observations WHERE report_id=?').get(upload.reportId)?.n,0);
+    const snapshot=db.prepare('SELECT fields_json AS fields FROM report_extractions WHERE job_id=?').get(queued.id) as {fields:string};
+    const comparison=JSON.parse(snapshot.fields).unverifiedPreviousObservations;
+    assert.equal(comparison.length,1);
+    assert.equal(comparison[0].resultText,'6');
+    const detail=getProcessingJobEventDetail(manager,queued.id);
+    assert.equal(detail.diagnostics.outcome,'warning');
+    assert.ok(detail.diagnostics.reasons.some(reason=>reason.code==='POSTPROCESS_UNVERIFIED' && reason.message.includes('上次识别值')));
+
+  });
+});
+
+test('completed quality review with no usable first result stops without automatically requeuing the task',async()=>{
+  await withDatabase(async()=>{
+    saveAiSettings({enabled:true,baseUrl:'https://ai.example.test/v1',textModel:'synthetic',apiKey:'test-secret'});
+    const upload=createUpload(manager,'runner-member',[{originalName:'synthetic-quality.png',data:pngBytes()}]);
+    const worker:WorkerExecutor=async request=>request.action==='thumbnail'?{ok:true,width:240,height:320}:
+      {ok:true,engine:'synthetic',lines:[{id:'source',text:'合成检验项目 参考范围 0-9',confidence:.99,box:[0,0,400,20]}]};
+    await processNextJob(worker);await processNextJob(worker);
+    const db=getDatabase();
+    const ai:AiExecutor=async()=>({...normalizeAiExtraction({observations:[{
+      itemName:'合成检验项目',resultText:'123',numericValue:123,unit:'U/L',evidence:[{pageNumber:1,quote:'合成检验项目 123'}]
+    }]}),provider:'synthetic',model:'synthetic',promptVersion:'synthetic',rawResponseJson:'{}',promptTokens:1,completionTokens:1,elapsedMs:1});
+    await assert.rejects(processNextJob(worker,ai),{code:'AI_NO_VERIFIED_OBSERVATIONS'});
+    const job=db.prepare("SELECT status,attempts,error_code,next_retry_at FROM processing_jobs WHERE report_id=? AND job_type='ai_extract'").get(upload.reportId);
+    assert.equal(job?.error_code,'AI_NO_VERIFIED_OBSERVATIONS');
+    assert.equal(job?.status,'failed');assert.equal(job?.attempts,1);assert.equal(job?.next_retry_at,null);
+    assert.equal(await processNextJob(worker,ai),false);
+  });
+});
+
+test('failed supplemental calls preserve old results and stop instead of repeating the whole task',async()=>{
+  await withDatabase(async()=>{
+    saveAiSettings({enabled:true,baseUrl:'https://ai.example.test/v1',textModel:'synthetic',apiKey:'test-secret'});
+    const upload=createUpload(manager,'runner-member',[{originalName:'synthetic-repair-failure.png',data:pngBytes()}]);
+    const worker:WorkerExecutor=async request=>request.action==='thumbnail'?{ok:true,width:240,height:320}:
+      {ok:true,engine:'synthetic',lines:[{id:'source',text:'合成指标甲 7 U/L 参考范围 1-9',confidence:.99,box:[0,0,400,20]}]};
+    await processNextJob(worker);await processNextJob(worker);
+    const db=getDatabase();
+    db.prepare("INSERT INTO observations(id,report_id,item_name,result_text,numeric_value) VALUES('old-before-repair',?,'合成旧项','6',6)").run(upload.reportId);
+    const modes:string[]=[];
+    const ai:AiExecutor=async input=>{
+      modes.push(input.promptMode || 'standard');
+      if(input.promptMode==='supplement')throw Object.assign(new Error('synthetic network failure'),{code:'AI_NETWORK_ERROR'});
+      return {...normalizeAiExtraction({observations:[]}),provider:'synthetic',model:'synthetic',promptVersion:'synthetic',rawResponseJson:'{}',promptTokens:1,completionTokens:1,elapsedMs:1};
+    };
+    await assert.rejects(processNextJob(worker,ai),{code:'AI_RECOVERY_INCOMPLETE'});
+    const job=db.prepare("SELECT status,attempts,next_retry_at FROM processing_jobs WHERE report_id=? AND job_type='ai_extract'").get(upload.reportId);
+    assert.deepEqual(modes,['standard','supplement']);
+    assert.equal(job?.status,'failed');assert.equal(job?.attempts,1);assert.equal(job?.next_retry_at,null);
+    assert.equal(db.prepare("SELECT numeric_value FROM observations WHERE id='old-before-repair'").get()?.numeric_value,6);
+    assert.equal(await processNextJob(worker,ai),false);
+    assert.equal(modes.length,2);
+  });
+});

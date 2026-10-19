@@ -67,3 +67,19 @@ test("AI observation sanitization never silently swaps reversed reference bounds
   assert.equal(observation.referenceHigh, null);
   assert.equal(observation.referenceText, "5-1");
 });
+
+test('sanitization preserves short metric names, unique numbered findings and separate report flags', () => {
+  const base = {sectionName: '检验', itemCode: null, normalizedName: null, itemName: '合成项目',
+    resultText: '7', numericValue: 7, unit: 'mmol/L', referenceLow: 4, referenceHigh: 10,
+    referenceText: '4-10', abnormalFlag: 'low' as const, method: null,
+    evidence: [{pageNumber: 1, quote: '合成项目 | 7 | L | 4-10 | mmol/L'}]};
+  const short = sanitizeReportObservations(['K', 'P', 'Na'].map(itemName => ({...base, itemName})));
+  assert.deepEqual(short.map(item => item.itemName), ['K', 'P', 'Na']);
+  const numbered = sanitizeReportObservations([{...base, itemName: '1、合成检测项目', numericValue: null,
+    resultText: '阳性，检出合成靶标，建议结合其他资料核实。'}]);
+  assert.equal(numbered.length, 1);
+  for (const resultText of ['7', '<7', '<7 ↓']) {
+    const [item] = sanitizeReportObservations([{...base, resultText}]);
+    assert.equal(item.abnormalFlag, 'low', resultText);
+  }
+});

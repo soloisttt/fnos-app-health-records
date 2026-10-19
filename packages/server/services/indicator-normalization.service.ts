@@ -1,5 +1,6 @@
 import { repairLegacyObservationUnitEvidence } from './observation-evidence-repair.service';
 import { hasLostMeasurementBound, hasLostMeasurementInterval, parseExactMeasurement, leadingMeasurementNumber, measurementEvidenceRegions } from '../utils/measurement-bound';
+import { splitMeasurementBound } from '../../shared/measurement-result';
 import { memberAccessSql } from "./member.service";
 import { rollbackAfterError, getDatabase } from "../database/client";
 import { createHash } from "node:crypto";
@@ -16,12 +17,12 @@ import {
   parseDictionaryReferenceRange
 } from "./observation-interpretation.service";
 import { assertMemberManage } from "./member.service";
-import { assessObservationReference } from "./observation-reference.service";
+import { assessObservationReference, referenceColumnRole } from "./observation-reference.service";
 import { linkedObservationUnitQuotes } from "./observation-unit-evidence.service";
 import { unitFromResultCell } from "./measurement-units.service";
 
 export function activeIndicatorNormalizationVersion() {
-  return `indicator-normalization-p13-field-confidence-width-identity-${activeIndicatorDictionaryVersion()}`;
+  return `indicator-normalization-p14-unit-scale-reference-expression-${activeIndicatorDictionaryVersion()}`;
 }
 
 function normalizationVersion() {
@@ -458,7 +459,7 @@ function normalizeUnit(value: string | null | undefined) {
     .replace(/﹪/g, "%")
     /* OCR 噪声：科学计数指数的上标或分隔符常丢失/误读（10⁹→109、10°9、10~6），
        在“10 + 指数 + /”的单位语境下统一补回 ^，如 ×109/L→×10^9/L、10~6/L→10^6/L */
-    .replace(/^(×?)10[°˚~^]([1-9]\d?)(?=\/)/, "$110^$2")
+    .replace(/^(×?)10[°˚~^"'’]([1-9]\d?)(?=\/)/, "$110^$2")
     .replace(/^(×)10([1-9]\d?)(?=\/)/, "$110^$2")
     .replace(/^10([1-9]\d?)(?=\/[lμ])/i, "10^$1");
   const lower = unit.toLocaleLowerCase();
@@ -850,6 +851,30 @@ function excludedObservationNoise(row: ObservationRow, reason: string): Normaliz
   };
 }
 
+/** Match both boundaries in the same printed expression, including one-sided limits. */
+function referenceEvidenceSupportsBounds(text: string, reference: {low: number | null; high: number | null}) {
+  const clean = text.normalize('NFKC').replace(/[−–—]/g, '-');
+  const number = '[-+]?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
+  const matches = (low: number | null, high: number | null) =>
+    (low === null ? reference.low === null : reference.low !== null && sameObservationEvidenceNumber(low, reference.low))
+    && (high === null ? reference.high === null : reference.high !== null && sameObservationEvidenceNumber(high, reference.high));
+  for (const match of clean.matchAll(/(?<![\d.+-])(\+?\d+(?:\.\d+)?)--+(\+?\d+(?:\.\d+)?)(?![\d.])/g)) {
+    if (matches(Number(match[1]), Number(match[2]))) return true;
+  }
+  for (const match of clean.matchAll(new RegExp(`(?<![\\d.+-])(${number})\\s*(?:-|~|～|至)\\s*(${number})(?![\\d.])`, 'g'))) {
+    if (matches(Number(match[1]), Number(match[2]))) return true;
+  }
+  // Spaced ranges are accepted only as a complete cell, never adjacent numbers
+  // gathered from a row's result and reference columns.
+  const spaced = clean.trim().match(new RegExp(`^(${number})\\s+(${number})$`));
+  if (spaced && matches(Number(spaced[1]), Number(spaced[2]))) return true;
+  for (const match of clean.matchAll(new RegExp(`(<=|>=|<|>|≤|≥|小于|不高于|大于|不低于)\\s*(${number})(?![\\d.])`, 'g'))) {
+    const upper = ['<', '<=', '≤', '小于', '不高于'].includes(match[1]);
+    if (matches(upper ? null : Number(match[2]), upper ? Number(match[2]) : null)) return true;
+  }
+  return false;
+}
+
 export function assessPersistedObservationReference(row: {
   referenceLow?: number | null;
   referenceHigh?: number | null;
@@ -870,17 +895,22 @@ export function assessPersistedObservationReference(row: {
     })) return { ...reference, low: null, high: null, status: 'raw_only' as const, reason: '参考范围 OCR 置信度不足，已停止用于自动判定' };
   } catch { /* Missing or malformed evidence is checked below. */ }
   const referenceSources: string[] = [];
+  let hasReferenceSource = false;
   try {
     const entries=JSON.parse(row.evidenceJson || '[]');
     if (Array.isArray(entries)) for (const entry of entries) {
       const source=entry?.table?.sourceMap?.reference;
-      if (typeof source?.text==='string' && /参考|正常范围/.test(source.headerText || '')
+      if (source) hasReferenceSource = true;
+      if (typeof source?.text==='string' && referenceColumnRole(source.headerText) === 'explicit'
         && Array.isArray(source.sourceLineIds) && source.sourceLineIds.length) referenceSources.push(source.text);
     }
   } catch { /* Fall back to quoted evidence. */ }
-  const numbers = [...observationEvidenceQuotes(row), ...referenceSources].flatMap(observationEvidenceNumbers);
-  if ([reference.low, reference.high].some((bound) => bound !== null
-    && !numbers.some((value) => sameObservationEvidenceNumber(value, bound)))) {
+  // Prefer the mapped reference cell. Legacy row evidence must contain a
+  // complete matching interval/limit, not just both numbers somewhere in the row.
+  const sources = hasReferenceSource ? referenceSources
+    : observationEvidenceQuotes(row).flatMap(quote => [quote, ...quote.split(/[|｜]/)]);
+  if ((reference.text && !referenceEvidenceSupportsBounds(reference.text, reference))
+    || !sources.some(source => referenceEvidenceSupportsBounds(source, reference))) {
     return {
       ...reference, low: null, high: null, status: "raw_only" as const,
       reason: "参考范围无法回指 OCR 证据，已停止用于自动判定"
@@ -982,7 +1012,8 @@ function observationEvidenceQualityIssue(row: ObservationRow) {
   const rawUnit = row.unit?.trim() || null;
   if (!anchorBypassed && rawUnit) {
     // A printed multiplication sign before a power-of-ten unit is notation, not a unit prefix.
-    const compactUnit = (text: string | null) => compactObservationEvidence(text)
+    const compactUnit = (text: string | null) => compactObservationEvidence((text || '')
+      .replace(/(?<![a-z0-9])([×x*]?)10[°˚~^"'’]([1-9]\d?)(?=\/)/gi, '$110^$2'))
       .replace(/(?<![a-z])x(?=10\^\d+\/)/gi, '');
     /* 矫正后的规范单位需容忍原文中的 OCR 变体（fL 被识别为 f1 等），
        否则矫正越成功、单位越无法回指证据。变体从单位别名表反向生成，新增别名自动生效；
@@ -1055,8 +1086,8 @@ export function assessTrendAdmission(input: {
     // Legacy standard records retain their existing admission; unknown records always require evidence or manual review.
     hasAiExtraction: standard ? input.hasAiExtraction : 1,
   };
-  if (/^[<>≤≥]/.test(input.resultText.normalize('NFKC').trim())) return deny('限值结果不能作为精确数值进入趋势');
-  const exactValue = parseExactMeasurement(input.resultText, input.unit || (standard ? input.canonicalUnit || null : null), normalizeUnit);
+  const bound = splitMeasurementBound(input.resultText);
+  const exactValue = parseExactMeasurement(bound.text, input.unit || (standard ? input.canonicalUnit || null : null), normalizeUnit);
   if (exactValue === null || !sameObservationEvidenceNumber(value, exactValue)) {
     return deny('结果不是明确的单个数值，区间或叙述结果不能进入数值趋势');
   }
@@ -1064,13 +1095,17 @@ export function assessTrendAdmission(input: {
     && !input.unit?.trim() && !unitFromResultCell(input.resultText)) return deny('缺少原始单位，请核对后进入趋势');
   const resultRegions = observationResultEvidence(row);
   const boundRegions = resultRegions.length ? resultRegions : observationEvidenceQuotes(row);
+  if (bound.comparator && row.hasAiExtraction && !input.manualReviewed && !resultRegions.some(quote =>
+    splitMeasurementBound(quote).comparator === bound.comparator && leadingMeasurementNumber(quote) === value)) {
+    return deny('限值符号无法回指 OCR 证据，请核对原文');
+  }
   if (!input.manualReviewed && boundRegions.some(quote =>
     hasLostMeasurementBound(input.resultText, value, quote))) return deny('OCR 证据包含同值的限值表达，需人工确认是否为实测数值');
   if (!input.manualReviewed && boundRegions.some(quote =>
     hasLostMeasurementInterval(value, quote))) return deny('OCR 证据包含同值的区间表达，需人工确认是否为实测数值');
   const issue = observationEvidenceQualityIssue(row);
   if (issue) return deny(issue);
-  if (standard) return { eligible: true, kind: 'standard', reason: null } as const;
+  if (standard) return { eligible: true, kind: 'standard', reason: bound.comparator ? '限值结果，已保留趋势记录，不参与精确变化计算' : null } as const;
   const noise = functionalDeviceObservationExclusionReason(row) || observationNoiseExclusionReason(row);
   if (noise) return deny(noise);
   // 纯指标型报告可能整单没有机构名称：缺失时不阻断趋势，进入“机构未确认”隔离分组；
@@ -1081,43 +1116,11 @@ export function assessTrendAdmission(input: {
   if (!input.manualReviewed && !observationEvidenceQuotes(row).some(quote => compactObservationEvidence(quote).includes(compactObservationEvidence(input.itemName)))) {
     return deny('未标准化项目名称无法回指 OCR 证据');
   }
-  if (!input.manualReviewed && boundRegions.some(quote => {
+  if (!bound.comparator && !input.manualReviewed && boundRegions.some(quote => {
     const bounds = quote.normalize('NFKC').matchAll(/[<>≤≥]\s*([-+]?\d+(?:\.\d+)?)/g);
     return [...bounds].some(match => Number(match[1]) === value);
   })) return deny('OCR 证据包含同值的限值表达，需人工确认是否为实测数值');
-  return { eligible: true, kind: 'institution', reason: '机构内原始数值，未匹配标准字典' } as const;
-}
-
-function canConvertIndicatorUnit(canonicalKey: string, fromUnit: string, toUnit: string) {
-  if (fromUnit === toUnit) return true;
-  const pair = `${fromUnit}->${toUnit}`;
-  if (["body_weight"].includes(canonicalKey) && ["g->kg", "kg->g"].includes(pair)) return true;
-  if (["body_height", "body_waist_circumference", "body_hip_circumference"].includes(canonicalKey)
-    && ["m->cm", "cm->m"].includes(pair)) return true;
-  if (["cm->mm", "mm->cm"].includes(pair)) return true;
-  if (["lipid_tc", "lipid_hdl_c", "lipid_ldl_c", "lipid_tg", "glucose_fasting",
-    "glucose_postprandial_2h", "glucose_random"].includes(canonicalKey)
-    && ["mg/dL->mmol/L", "mmol/L->mg/dL"].includes(pair)) return true;
-  if (["cbc_hgb", "cbc_mchc", "liver_total_protein", "liver_albumin", "liver_globulin"].includes(canonicalKey)
-    && ["g/dL->g/L", "g/L->g/dL"].includes(pair)) return true;
-  if (canonicalKey === "cbc_hct" && ["L/L->%", "%->L/L"].includes(pair)) return true;
-  if (["renal_creatinine", "renal_uric_acid", "liver_tbil", "liver_dbil", "liver_ibil"].includes(canonicalKey)
-    && ["mg/dL->μmol/L", "μmol/L->mg/dL"].includes(pair)) return true;
-  if (["renal_urea", "renal_bun"].includes(canonicalKey)
-    && ["mg/dL->mmol/L", "mmol/L->mg/dL"].includes(pair)) return true;
-  if (["pulmonary_vc", "pulmonary_ic", "pulmonary_tv", "pulmonary_irv", "pulmonary_erv",
-    "pulmonary_fvc", "pulmonary_fev1"].includes(canonicalKey)
-    && ["mL->L", "L->mL"].includes(pair)) return true;
-  if (["pulmonary_pef", "pulmonary_fef25", "pulmonary_fef50", "pulmonary_fef75", "pulmonary_mmef"].includes(canonicalKey)
-    && ["mL/s->L/s", "L/s->mL/s"].includes(pair)) return true;
-  if (["laboratory_testosterone", "laboratory_prolactin", "laboratory_pepsinogen_i", "laboratory_pepsinogen_ii"].includes(canonicalKey)
-    && ["μg/L->ng/mL", "ng/mL->μg/L"].includes(pair)) return true;
-  if (canonicalKey === "laboratory_testosterone"
-    && ["ng/dL->ng/mL", "ng/mL->ng/dL"].includes(pair)) return true;
-  if (canonicalKey === "c_peptide_postprandial_2h"
-    && ["μg/L->ng/mL", "ng/mL->μg/L", "ng/mL->nmol/L", "nmol/L->ng/mL",
-      "μg/L->nmol/L", "nmol/L->μg/L"].includes(pair)) return true;
-  return false;
+  return { eligible: true, kind: 'institution', reason: bound.comparator ? '限值结果，已保留趋势记录，不参与精确变化计算' : '机构内原始数值，未匹配标准字典' } as const;
 }
 
 function parseStringList(value: string | null | undefined) {
@@ -1151,15 +1154,22 @@ function resolveIndicatorUnitCompatibility(
   const compatible = !rawUnit
     || rawUnit === defaultUnit
     || allowedUnits.has(rawUnit)
-    || Boolean(defaultUnit && canConvertIndicatorUnit(canonicalKey, rawUnit, defaultUnit));
+    || Boolean(defaultUnit && convertUnit(canonicalKey, 1, rawUnit, defaultUnit) !== null);
   return {
     rawUnit,
     compatible,
-    canonicalUnit: compatible ? defaultUnit || rawUnit : null
+    // An accepted unit is not proof that a conversion exists. Existing trend
+    // grouping includes the unit, so unsupported scales remain separate.
+    canonicalUnit: compatible
+      ? defaultUnit && (!rawUnit || convertUnit(canonicalKey, 1, rawUnit, defaultUnit) !== null)
+        ? defaultUnit : rawUnit
+      : null
   };
 }
 
 export function convertUnit(canonicalKey: string, value: number, fromUnit: string | null, toUnit: string | null) {
+  fromUnit = normalizeUnit(fromUnit);
+  toUnit = normalizeUnit(toUnit);
   if (value === null || !fromUnit || !toUnit || fromUnit === toUnit) return value;
   const lipidKeys = new Set(["lipid_tc", "lipid_hdl_c", "lipid_ldl_c"]);
   if (lipidKeys.has(canonicalKey) && fromUnit === "mg/dL" && toUnit === "mmol/L") return value / 38.67;
@@ -1217,7 +1227,20 @@ export function convertUnit(canonicalKey: string, value: number, fromUnit: strin
     && fromUnit === "cm" && toUnit === "m") return value / 100;
   if (fromUnit === "cm" && toUnit === "mm") return value * 10;
   if (fromUnit === "mm" && toUnit === "cm") return value / 10;
-  return value;
+  return null;
+}
+
+/** Dictionary ranges use the catalog unit; never compare them against another scale. */
+export function dictionaryReferenceForUnit(json: string | null, key: string | null, fromUnit: string | null, toUnit: string | null) {
+  const reference = parseDictionaryReferenceRange(json);
+  if (!reference) return null;
+  const from = normalizeUnit(fromUnit), to = normalizeUnit(toUnit);
+  if (from === to) return reference;
+  if (!from || !to || !key) return null;
+  const low = reference.low === null ? null : convertUnit(key, reference.low, from, to);
+  const high = reference.high === null ? null : convertUnit(key, reference.high, from, to);
+  return (reference.low !== null && low === null) || (reference.high !== null && high === null)
+    ? null : {low, high};
 }
 
 function classifyQuality(score: number, row: ObservationRow, indicator: AliasRow): NormalizationResult["quality"] {
@@ -1872,6 +1895,7 @@ function refreshDisplayFlagWithDictionaryReference(observationId: string, indica
   const db = getDatabase();
   const row = db.prepare(`
     SELECT o.abnormal_flag AS abnormalFlag, o.result_text AS resultText,
+      o.unit, c.canonical_key AS canonicalKey, c.default_unit AS catalogDefaultUnit,
       o.numeric_value AS numericValue, o.reference_low AS referenceLow,
       o.reference_high AS referenceHigh, o.reference_text AS referenceText,
       o.evidence_json AS evidenceJson,
@@ -1885,6 +1909,9 @@ function refreshDisplayFlagWithDictionaryReference(observationId: string, indica
   `).get(indicatorId, observationId) as {
     abnormalFlag: "high" | "low" | "abnormal" | "normal" | null;
     resultText: string;
+    unit: string | null;
+    canonicalKey: string | null;
+    catalogDefaultUnit: string | null;
     numericValue: number | null;
     referenceLow: number | null;
     referenceHigh: number | null;
@@ -1899,7 +1926,7 @@ function refreshDisplayFlagWithDictionaryReference(observationId: string, indica
   if (!row) return;
   const reference = assessPersistedObservationReference(row);
   const dictionaryReference = reference.status === "missing" && !reference.reason
-    ? parseDictionaryReferenceRange(row.dictionaryReferenceJson) : null;
+    ? dictionaryReferenceForUnit(row.dictionaryReferenceJson, row.canonicalKey, row.catalogDefaultUnit, row.unit) : null;
   let supportingText: Array<string | null> = [];
   try {
     const evidence = JSON.parse(row.evidenceJson) as unknown;

@@ -8,12 +8,14 @@ import type { RequestUser } from "../domain/request-user.ts";
 import {
   assessPersistedObservationReference,
   convertUnit,
+  dictionaryReferenceForUnit,
   indicatorNameCandidates,
   listIndicatorNormalizationIssues,
   normalizeReportObservations,
   normalizeObservation
 } from "../services/indicator-normalization.service.ts";
 import { installRemoteDictionarySnapshotForTests } from "../services/indicator-dictionary.service.ts";
+import { runObservationDisplayFlagBackfillIfNeeded } from "../services/maintenance-runner.service.ts";
 import { getReportDetail, listTrendSeries } from "../services/records.service.ts";
 
 test('apolipoprotein ratios cannot match an individual protein through code or AI name', () => {
@@ -39,6 +41,55 @@ test('apolipoprotein ratios cannot match an individual protein through code or A
   }
 });
 
+test('reviewed lipid and fasting aliases preserve subtype and unit boundaries', () => {
+  const storageDir = mkdtempSync(join(tmpdir(), 'reviewed-lipid-aliases-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = storageDir;
+  try {
+    getDatabase();
+    installRemoteDictionarySnapshotForTests();
+    const base = {id: 'synthetic', reportId: 'synthetic', sectionName: '生化', itemCode: null,
+      normalizedName: null, resultText: '1.2', numericValue: 1.2, referenceText: null,
+      reportType: 'laboratory', hospitalName: null, performingDepartment: null, reportingDepartment: null};
+    for (const [itemName, key] of [
+      ['甘油三脂', 'lipid_tg'], ['空腹葡萄糖', 'glucose_fasting'],
+      ['小而密低密度脂蛋白胆固醇', 'lipid_sdldl_c'],
+      ['小而密低密度脂蛋白胆固醇测定', 'lipid_sdldl_c'],
+      ['sdLDL-C', 'lipid_sdldl_c'], ['sd LDL-C', 'lipid_sdldl_c'],
+      ['低密度脂蛋白胆固醇', 'lipid_ldl_c'],
+    ]) {
+      const result = normalizeObservation({...base, itemName, unit: 'mmol/L'});
+      assert.equal(result.canonicalKey, key, itemName);
+      assert.notEqual(result.quality, 'low', itemName);
+    }
+    for (const unit of ['mmol/L', 'mg/dL']) {
+      const result = normalizeObservation({...base, itemName: 'sdLDL-C', unit});
+      assert.equal(result.canonicalKey, 'lipid_sdldl_c');
+      assert.equal(result.canonicalUnit, unit);
+      assert.equal(result.canonicalValue, base.numericValue, 'preserve raw units without conversion');
+    }
+    for (const [itemName, unit] of [
+      ['sdLDL-C', 'nmol/L'], ['sdLDL-C', '%'], ['sdLDL-P', 'nmol/L'],
+      ['sdLDL-C/LDL-C', null], ['小而密低密度脂蛋白胆固醇百分比', '%'],
+      ['小而密低密度脂蛋白胆固醇/低密度脂蛋白胆固醇', null], ['sdLDL%', '%'],
+    ] as const) {
+      const result = normalizeObservation({...base, itemName, unit});
+      assert.ok(result.canonicalKey !== 'lipid_sdldl_c' || result.quality === 'low', `${itemName}: ${unit}`);
+      assert.notEqual(result.canonicalKey, 'lipid_ldl_c', 'do not fall back to ordinary LDL-C');
+    }
+    const fasting = normalizeObservation({...base, itemName: '空腹葡萄糖', unit: 'mmol/L'});
+    for (const itemName of ['餐后2小时血糖', '随机血糖']) {
+      assert.notEqual(normalizeObservation({...base, itemName, unit: 'mmol/L'}).canonicalKey, fasting.canonicalKey);
+    }
+    assert.equal(normalizeObservation({...base, itemName: '载脂蛋白A', unit: 'g/L'}).canonicalKey, null);
+    assert.equal(normalizeObservation({...base, itemName: '载脂蛋白A1', unit: 'g/L'}).canonicalKey, 'laboratory_apolipoprotein_a1');
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(storageDir, {recursive: true, force: true});
+  }
+});
+
 test("reference evidence is independent of manual confirmation and range validity", () => {
   const input = { referenceLow: 5, referenceHigh: 21, referenceText: "5-21",
     hasAiExtraction: 1, evidenceJson: '[{"pageNumber":1,"quote":"T-BIL 12.3 μmol/L"}]' };
@@ -47,6 +98,76 @@ test("reference evidence is independent of manual confirmation and range validit
   assert.equal(assessPersistedObservationReference({ ...input, manualReviewed: true }).status, "trusted");
   assert.equal(assessPersistedObservationReference({ ...input, manualReviewed: true, referenceLow: 30 }).low, null);
   assert.equal(assessPersistedObservationReference({ ...input, hasAiExtraction: 0 }).status, "trusted");
+});
+
+test('reference boundaries must match one printed reference expression, not other numbers in the row', () => {
+  const input = {referenceLow: 2, referenceHigh: 10, referenceText: '3-10', hasAiExtraction: 1,
+    evidenceJson: JSON.stringify([{pageNumber: 1, quote: '合成项目 | 2 | 3-10 | U/L'}])};
+  assert.equal(assessPersistedObservationReference(input).status, 'raw_only');
+  assert.equal(assessPersistedObservationReference({...input, referenceLow: 3}).status, 'trusted');
+  assert.equal(assessPersistedObservationReference({...input, referenceText: '2-10'}).status, 'raw_only');
+  const mapped = (text: string) => JSON.stringify([{pageNumber: 1, quote: '合成项目 | 2 | 2-10 | U/L',
+    table: {sourceMap: {reference: {text, headerText: '参考范围', sourceLineIds: ['reference-cell']}}}}]);
+  assert.equal(assessPersistedObservationReference({...input, referenceText: '2-10', evidenceJson: mapped('3-10')}).status, 'raw_only');
+  assert.equal(assessPersistedObservationReference({...input, referenceText: '2-10', evidenceJson: mapped('2-10 U/L')}).status, 'trusted');
+  for (const [text, low, high] of [['<=10', null, 10], ['≥2', 2, null], ['-2--1', -2, -1], ['0--10', 0, 10], ['2 10', 2, 10]] as const) {
+    assert.equal(assessPersistedObservationReference({...input, referenceText: text, referenceLow: low, referenceHigh: high,
+      evidenceJson: JSON.stringify([{pageNumber: 1, quote: `合成项目 | 7 | ${text} | U/L`}])}).status, 'trusted', text);
+  }
+});
+
+test('allowed units without a conversion retain the original scale and unit', () => {
+  const storageDir = mkdtempSync(join(tmpdir(), 'unconverted-unit-'));
+  const previous = process.env.STORAGE_DIR;
+  process.env.STORAGE_DIR = storageDir;
+  try {
+    getDatabase();
+    const base = {id: 'synthetic', reportId: 'synthetic', sectionName: '生化', itemCode: null,
+      normalizedName: null, resultText: '7', numericValue: 7, referenceText: null,
+      reportType: 'laboratory', hospitalName: null, performingDepartment: null, reportingDepartment: null};
+    for (const [itemName, unit, key] of [
+      ['游离甲状腺素', 'ng/dL', 'thyroid_ft4'], ['糖化血红蛋白', 'mmol/mol', 'glucose_hba1c'],
+      ['脂肪量', 'g', 'body_fat_mass'],
+    ]) {
+      const result = normalizeObservation({...base, itemName, unit});
+      assert.equal(result.canonicalKey, key);
+      assert.equal(result.canonicalUnit, unit, itemName);
+      assert.equal(result.canonicalValue, 7);
+      assert.equal(result.quality, 'high');
+    }
+    assert.equal(convertUnit('thyroid_ft4', 7, 'ng/dL', 'pmol/L'), null);
+    assert.equal(convertUnit('glucose_hba1c', 7, 'mmol/mol', '%'), null);
+    const range = JSON.stringify({low: 10, high: 20});
+    assert.equal(dictionaryReferenceForUnit(range, 'thyroid_ft4', 'pmol/L', 'ng/dL'), null);
+    assert.deepEqual(dictionaryReferenceForUnit(range, 'cbc_hgb', 'g/L', 'g/dL'), {low: 1, high: 2});
+    assert.deepEqual(dictionaryReferenceForUnit(range, 'ecg_rv5_amplitude', 'mV', 'mv'), {low: 10, high: 20});
+    assert.equal(dictionaryReferenceForUnit(range, 'cbc_hgb', 'g/L', null), null);
+    const db = getDatabase();
+    db.exec(`
+      INSERT INTO users (id, display_name) VALUES ('scale-user', '合成用户');
+      INSERT INTO health_members (id, display_name, relationship, created_by)
+        VALUES ('scale-member', '合成档案', 'self', 'scale-user');
+      INSERT INTO member_permissions (member_id, user_id, permission, granted_by)
+        VALUES ('scale-member', 'scale-user', 'manager', 'scale-user');
+      INSERT INTO reports (id, member_id, created_by, report_type, title, status, report_issued_at)
+        VALUES ('scale-report', 'scale-member', 'scale-user', 'laboratory', '合成检验', 'ready', '2026-08-01');
+    `);
+    const insert = db.prepare(`INSERT INTO observations
+      (id, report_id, section_name, item_name, result_text, numeric_value, unit, evidence_json)
+      VALUES (?, 'scale-report', '生化', '游离甲状腺素', '7', 7, ?, ?)`);
+    for (const unit of ['ng/dL', 'pmol/L']) {
+      insert.run(`scale-${unit}`, unit, JSON.stringify([{pageNumber: 1, quote: `游离甲状腺素 | 7 | ${unit}`} ]));
+    }
+    normalizeReportObservations('scale-report');
+    const user: RequestUser = {id: 'scale-user', displayName: '合成用户', provider: 'fnos_gateway', authenticated: true, isGatewayAdmin: false};
+    const series = listTrendSeries(user, 'scale-member');
+    assert.deepEqual(series.map(item => item.unit).sort(), ['ng/dL', 'pmol/L']);
+    assert.ok(series.every(item => item.points.length === 1 && item.points[0].numericValue === 7));
+  } finally {
+    closeDatabaseForTests();
+    if (previous === undefined) delete process.env.STORAGE_DIR; else process.env.STORAGE_DIR = previous;
+    rmSync(storageDir, {recursive: true, force: true});
+  }
 });
 
 test("splits report codes from names without removing medical qualifiers", () => {
@@ -212,6 +333,9 @@ test("accepts hyphenated canonical names when OCR evidence closes the same norma
       const detail = getReportDetail(user, 'evidence-report');
       assert.equal(detail.observations[0].referenceLow, null);
       assert.equal(detail.observations[0].displayAbnormalFlag, null);
+      runObservationDisplayFlagBackfillIfNeeded();
+      assert.equal(getDatabase().prepare('SELECT display_abnormal_flag AS flag FROM observations WHERE id=?')
+        .get('hyphen-evidence-observation')?.flag, null, 'maintenance uses the same reference evidence gate');
     }
     // Ablation: relaxing the reference gate must not relax value or unit evidence.
     for (const quote of ['T-BIL | 99 | μmol/L', 'T-BIL | 12.3']) {
@@ -422,10 +546,10 @@ test("standardizes audited laboratory and ophthalmology candidates without mergi
 
 test("converts units for newly covered common indicators", () => {
   assert.equal(convertUnit("cbc_mchc", 33, "g/dL", "g/L"), 330);
-  assert.ok(Math.abs(convertUnit("glucose_postprandial_2h", 180, "mg/dL", "mmol/L") - 9.99) < 0.01);
-  assert.ok(Math.abs(convertUnit("renal_creatinine", 1, "mg/dL", "μmol/L") - 88.4) < 0.001);
-  assert.ok(Math.abs(convertUnit("liver_dbil", 1, "mg/dL", "μmol/L") - 17.104) < 0.001);
-  assert.ok(Math.abs(convertUnit("laboratory_testosterone", 420, "ng/dL", "ng/mL") - 4.2) < 1e-9);
+  assert.ok(Math.abs(convertUnit("glucose_postprandial_2h", 180, "mg/dL", "mmol/L")! - 9.99) < 0.01);
+  assert.ok(Math.abs(convertUnit("renal_creatinine", 1, "mg/dL", "μmol/L")! - 88.4) < 0.001);
+  assert.ok(Math.abs(convertUnit("liver_dbil", 1, "mg/dL", "μmol/L")! - 17.104) < 0.001);
+  assert.ok(Math.abs(convertUnit("laboratory_testosterone", 420, "ng/dL", "ng/mL")! - 4.2) < 1e-9);
   assert.equal(convertUnit("laboratory_prolactin", 20, "μg/L", "ng/mL"), 20);
   assert.equal(convertUnit("laboratory_pepsinogen_i", 60, "ng/mL", "μg/L"), 60);
 });
@@ -870,5 +994,28 @@ test("ai suggestion duplicates of builtin indicators do not trigger ambiguity ga
     closeDatabaseForTests();
     delete process.env.STORAGE_DIR;
     rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
+test('power unit OCR delimiters preserve the printed exponent and still require matching source units', () => {
+  const storageDir=mkdtempSync(join(tmpdir(),'power-unit-delimiters-'));
+  const previous=process.env.STORAGE_DIR;process.env.STORAGE_DIR=storageDir;
+  try {
+    getDatabase();installRemoteDictionarySnapshotForTests();
+    const base={id:'synthetic',reportId:'synthetic',sectionName:'血常规',itemName:'白细胞',itemCode:'WBC',
+      normalizedName:null,resultText:'7.5',numericValue:7.5,referenceText:null,reportType:'laboratory',
+      hospitalName:null,performingDepartment:null,reportingDepartment:null,hasAiExtraction:1,manualReviewed:0};
+    for(const unit of ['10"9/L',"10'9/L",'10’9/L','10~9/L','10^9/L']) {
+      const result=normalizeObservation({...base,unit,evidenceJson:JSON.stringify([{pageNumber:1,quote:`白细胞 7.5 ${unit}`}])});
+      assert.equal(result.canonicalKey,'cbc_wbc');assert.equal(result.canonicalUnit,'10^9/L');
+      assert.notEqual(result.quality,'low');
+    }
+    const wrongScale=normalizeObservation({...base,unit:'10"12/L',evidenceJson:JSON.stringify([{pageNumber:1,quote:'白细胞 7.5 10"12/L'}])});
+    assert.equal(wrongScale.quality,'low','never turn exponent 12 into exponent 9');
+    const unverified=normalizeObservation({...base,unit:'10"9/L',evidenceJson:JSON.stringify([{pageNumber:1,quote:'白细胞 7.5 10"12/L'}])});
+    assert.equal(unverified.quality,'low','a supported spelling does not waive evidence validation');
+  } finally {
+    closeDatabaseForTests();if(previous===undefined)delete process.env.STORAGE_DIR;else process.env.STORAGE_DIR=previous;
+    rmSync(storageDir,{recursive:true,force:true});
   }
 });

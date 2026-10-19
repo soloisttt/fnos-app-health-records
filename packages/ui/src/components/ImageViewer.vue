@@ -69,6 +69,7 @@ async function downloadViewerPage() {
 }
 
 function resetViewerTransform() {
+  endViewerMousePan();
   viewerScale.value = 1;
   viewerRotation.value = 0;
   viewerPanX.value = 0;
@@ -126,6 +127,7 @@ function moveViewer(direction: -1 | 1) {
 
 function setViewerScale(next: number) {
   viewerScale.value = Math.min(3, Math.max(0.5, Number(next.toFixed(2))));
+  if (viewerScale.value <= 1) endViewerMousePan();
   if (viewerScale.value === 1) {
     viewerPanX.value = 0;
     viewerPanY.value = 0;
@@ -153,6 +155,45 @@ const viewerGesture = {
   startX: 0, startY: 0, startPanX: 0, startPanY: 0,
   startDist: 0, startScale: 1, moved: false
 };
+
+let viewerMousePointerId: number | null = null;
+let viewerMouseStartedOnBackground = false;
+let suppressViewerClick = false;
+
+function onViewerPointerDown(event: PointerEvent) {
+  if (event.pointerType !== "mouse" || event.button !== 0) return;
+  suppressViewerClick = false;
+  if (viewerScale.value <= 1 || viewerMousePointerId !== null ||
+      (event.target instanceof Element && event.target.closest("button"))) return;
+  viewerMousePointerId = event.pointerId;
+  viewerMouseStartedOnBackground = isViewerBackground(event.target);
+  viewerGesture.startX = event.clientX;
+  viewerGesture.startY = event.clientY;
+  viewerGesture.startPanX = viewerPanX.value;
+  viewerGesture.startPanY = viewerPanY.value;
+  viewerGesture.moved = false;
+  viewerGesturing.value = true;
+  viewerCanvasEl.value?.setPointerCapture(event.pointerId);
+  event.preventDefault();
+}
+
+function onViewerPointerMove(event: PointerEvent) {
+  if (event.pointerId !== viewerMousePointerId) return;
+  const dx = event.clientX - viewerGesture.startX;
+  const dy = event.clientY - viewerGesture.startY;
+  if (Math.abs(dx) > 4 || Math.abs(dy) > 4) viewerGesture.moved = true;
+  viewerPanX.value = viewerGesture.startPanX + dx;
+  viewerPanY.value = viewerGesture.startPanY + dy;
+}
+
+function endViewerMousePan(event?: PointerEvent) {
+  if (viewerMousePointerId === null || (event && event.pointerId !== viewerMousePointerId)) return;
+  const pointerId = viewerMousePointerId;
+  viewerMousePointerId = null;
+  suppressViewerClick = viewerGesture.moved || !viewerMouseStartedOnBackground;
+  viewerGesturing.value = false;
+  if (viewerCanvasEl.value?.hasPointerCapture(pointerId)) viewerCanvasEl.value.releasePointerCapture(pointerId);
+}
 
 function touchDistance(a: Touch, b: Touch) {
   return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
@@ -216,6 +257,10 @@ function onViewerTouchEnd(event: TouchEvent) {
 }
 
 function onViewerCanvasClick(event: MouseEvent) {
+  if (suppressViewerClick) {
+    suppressViewerClick = false;
+    return;
+  }
   if (viewerImmersive.value && isViewerBackground(event.target)) viewerImmersive.value = false;
 }
 
@@ -387,6 +432,7 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
+  endViewerMousePan();
   viewerCanvasObserver?.disconnect();
   window.removeEventListener("keydown", handleViewerKeydown);
 });
@@ -436,7 +482,12 @@ onBeforeUnmount(() => {
       <div
         ref="viewerCanvasEl"
         class="original-viewer-canvas"
-        :class="{ 'is-preview': viewerUsingPreview, gesturing: viewerGesturing, fit: viewerScale === 1 }"
+        :class="{ 'is-preview': viewerUsingPreview, gesturing: viewerGesturing, fit: viewerScale === 1, pannable: viewerScale > 1 }"
+        @pointerdown="onViewerPointerDown"
+        @pointermove="onViewerPointerMove"
+        @pointerup="endViewerMousePan"
+        @pointercancel="endViewerMousePan"
+        @lostpointercapture="endViewerMousePan"
         @touchstart="onViewerTouchStart"
         @touchmove.prevent="onViewerTouchMove"
         @touchend="onViewerTouchEnd"
@@ -459,6 +510,7 @@ onBeforeUnmount(() => {
             ref="viewerImgEl"
             :src="viewerDisplaySrc"
             :alt="viewerPage.label"
+            :draggable="false"
             @load="onViewerImageLoad"
             @error="onViewerImageError"
           />
@@ -498,7 +550,7 @@ onBeforeUnmount(() => {
       </button>
     </main>
     <footer class="original-viewer-footer">
-      <span class="viewer-hint-desktop">快捷键：←/→ 翻页，+/- 缩放，Esc 关闭</span>
+      <span class="viewer-hint-desktop">放大后按住鼠标拖动查看 · ←/→ 翻页，+/- 缩放，Esc 关闭</span>
       <span class="viewer-hint-touch">双指缩放 · 拖动查看 · 滑翻页 · 点黑边退出全屏</span>
     </footer>
   </div>

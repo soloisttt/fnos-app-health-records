@@ -36,7 +36,7 @@ import {
 } from "./report-content-classifier.service";
 
 export const aiInputPlanningPolicy = {
-  version: "ocr-unit-plan-v25-field-review",
+  version: "ocr-unit-plan-v26-oriented-tables",
   targetCharacters: 8_000,
   maxPagesPerUnit: 12,
   maxSparsePagesPerUnit: 24,
@@ -50,6 +50,7 @@ type RawOcrLine = {
   tableUnsafe?: boolean;
   tableCell?: unknown;
   id?: unknown;
+  sourceLineIds?: string[];
   text?: unknown;
   confidence?: unknown;
   box?: unknown;
@@ -359,7 +360,7 @@ const tableOfContentsRowPattern =
 const nonResultTechnicalPattern =
   /(?:^|[|｜])\s*(?:增益|走速|纸速|试剂名称|试剂纯度|纯度)\s*[:：]|^\*?\s*baPWV主要检测|^反映脑血管或心脏|^(?:异常区域|正常区域)(?:\s*[|｜]\s*(?:异常区域|正常区域))?$/i;
 const mutualRecognitionMarkerPattern =
-  /^[【[]\s*(?:深圳)?(?:HR|R)\s*[】\]]$/i;
+  /^(?:[【[]\s*(?:深圳|全国)?(?:HR|R)\s*[】\]]|(?:深圳|全国)\s*HR)$/i;
 const interpretationOnlyPattern = /(?:正常范围|未见异常)[。.]?$/;
 const narrativeSectionHeadingPattern =
   /^(?:检查所见|检查结论|影像所见|影像结论|诊断意见|总检结论|体检综述|阳性发现|异常汇总|异常结果与健康建议|本次体检的异常结果汇总及建议|建议|主诉|现病史|既往史|门诊诊断|处理意见|处置|入院诊断|出院诊断|住院经过|手术经过|出院用药|出院医嘱|病理诊断|肉眼所见|镜下所见|免疫组化|病理分级|病理分期)(?:[：:]|\s|$)/;
@@ -5865,7 +5866,7 @@ function parseLines(
           typeof line.id === "string" && line.id.trim()
             ? line.id.trim()
             : `page_${pageNumber}_line_${index + 1}`,
-        sourceLineIds: [
+        sourceLineIds: line.sourceLineIds || [
           typeof line.id === "string" && line.id.trim()
             ? line.id.trim()
             : `page_${pageNumber}_line_${index + 1}`,
@@ -5874,7 +5875,7 @@ function parseLines(
           {
             index: 0,
             text: plannedText,
-            sourceLineIds: [
+            sourceLineIds: line.sourceLineIds || [
               typeof line.id === "string" && line.id.trim()
                 ? line.id.trim()
                 : `page_${pageNumber}_line_${index + 1}`,
@@ -5949,19 +5950,33 @@ function parseLines(
           sourceCells[unitIndex] = { ...unit, text: split[1].trim() };
         }
       }
-      if (unitIndex >= 0 && referenceIndex >= 0 && !sourceCells[unitIndex].text) {
-        const reference = sourceCells[referenceIndex];
-        const suffix = reference.text.match(new RegExp(`(${unitPattern.source})\\s*$`, 'i'));
-        const range = suffix ? reference.text.slice(0, suffix.index).trim() : '';
-        if (suffix && /^(?:[-+]?\d+(?:\.\d+)?\s*(?:-|~|～|—|至)\s*[-+]?\d+(?:\.\d+)?|(?:<=|>=|[<>≤≥])\s*[-+]?\d+(?:\.\d+)?)$/.test(range)) {
-          sourceCells[unitIndex] = { ...reference, index: unitIndex, text: suffix[1] };
-          sourceCells[referenceIndex] = { ...reference, text: range };
+      if (unitIndex >= 0 && referenceIndex >= 0) {
+        const combined = sourceCells[unitIndex].text ? sourceCells[unitIndex] : sourceCells[referenceIndex];
+        const unitHeader = boxRect(headerCells[unitIndex].box), sourceBox = boxRect(combined.box);
+        const followingOrdinal = unitHeader && sourceBox && parsed.some(raw => {
+          const box = boxRect(raw.box);
+          return box && normalizeOcrTableHeader(String(raw.text || '')) === '序号'
+            && box.left > unitHeader.right && box.left-unitHeader.right < (unitHeader.bottom-unitHeader.top)*3
+            && verticalOverlap(box,unitHeader) > .5 && sourceBox.right >= box.left;
+        });
+        const suffix = combined.text.match(new RegExp(`(?<unit>${unitPattern.source})${followingOrdinal ? '(?<ordinal>\\d{1,3})?' : ''}\\s*$`, 'i'));
+        const range = suffix ? combined.text.slice(0, suffix.index).trim() : '';
+        if ((!sourceCells[unitIndex].text || !sourceCells[referenceIndex].text)
+          && suffix && (!suffix.groups?.ordinal || /[lL]$/.test(suffix.groups.unit))
+          && /^(?:[-+]?\d+(?:\.\d+)?\s*(?:-|~|～|—|至)\s*[-+]?\d+(?:\.\d+)?|(?:<=|>=|[<>≤≥])\s*[-+]?\d+(?:\.\d+)?)$/.test(range)) {
+          sourceCells[unitIndex] = { ...combined, index: unitIndex, text: suffix.groups!.unit };
+          sourceCells[referenceIndex] = { ...combined, index: referenceIndex, text: range };
+        } else if (followingOrdinal && sourceCells[unitIndex].text) {
+          const unitAndOrdinal = combined.text.match(new RegExp(`^(?<unit>${unitPattern.source})\\d{1,3}$`, 'i'));
+          if (unitAndOrdinal && /[lL]$/.test(unitAndOrdinal.groups!.unit)) sourceCells[unitIndex] = { ...combined, index:unitIndex, text:unitAndOrdinal.groups!.unit };
         }
       }
       // OCR occasionally emits both "项目名12.3" and an overlapping "12.3".
       // Remove only the duplicate suffix proved by that independent result box.
       const nameIndex = headerCells.findIndex(cell => /^(项目名称|项目|名称|参数|检验项目|检测项目|测定项目)$/.test(cell.text));
-      if (nameIndex >= 0) sourceCells[nameIndex].text = sourceCells[nameIndex].text.replace(/(?<=\p{Script=Han})\s+(?=\p{Script=Han})/gu, '');
+      if (nameIndex >= 0) sourceCells[nameIndex].text = sourceCells[nameIndex].text
+        .replace(/(?:[【[]\s*(?:深圳|全国)?(?:HR|R)\s*[】\]]|(?:深圳|全国)\s*HR)/gi,'')
+        .replace(/(?<=\p{Script=Han})\s+(?=\p{Script=Han})/gu, '').trim();
       const resultIndexes = headerCells.flatMap((cell, index) => isCurrentResultColumn(cell.text) ? [index] : []);
       if (nameIndex >= 0 && resultIndexes.length === 1) {
         const name = sourceCells[nameIndex], result = sourceCells[resultIndexes[0]];
@@ -6022,7 +6037,7 @@ function parseLines(
     // Recover field confidence by original OCR source IDs, including synthetic
     // body-composition/bone-score cells that were assembled before this stage.
     const withConfidence = (cell: PlannedOcrCell): PlannedOcrCell => ({ ...cell,
-      confidence: minimumKnownConfidence(lines.filter(raw => cell.sourceLineIds.includes(raw.id))),
+      confidence: minimumKnownConfidence(lines.filter(raw => raw.sourceLineIds.some(id => cell.sourceLineIds.includes(id)))),
     });
     const enriched = { ...line, sourceCells: line.sourceCells.map(withConfidence),
       ...(line.projectHeaderCells ? {projectHeaderCells: line.projectHeaderCells.map(withConfidence)} : {}),
@@ -6208,20 +6223,47 @@ export function rebuildOcrPages(
   const pages = rows.map((row): RebuiltOcrPage => {
     let rawCoverageLines: RawOcrLine[] = [];
     try { const raw = JSON.parse(row.linesJson); if (Array.isArray(raw)) rawCoverageLines = raw.filter(line=>line && typeof line === "object"); } catch { /* Invalid OCR already degrades to an empty page. */ }
-    const parsed = parseLines(
-      row.linesJson,
-      row.pageNumber,
-      aliases,
-      unitPattern,
+    rawCoverageLines = rawCoverageLines.map((line, index) => ({ ...line,
+      id: typeof line.id === 'string' && line.id.trim() ? line.id : `page_${row.pageNumber}_line_${index+1}` }));
+    const rebuild = (raw: RawOcrLine[]) => annotatePageLines(
+      parseLines(JSON.stringify(raw), row.pageNumber, aliases, unitPattern),
+      row.pageNumber, lineContext, aliases, unitPattern, options?.patientSex,
     );
-    const annotated = annotatePageLines(
-      parsed,
-      row.pageNumber,
-      lineContext,
-      aliases,
-      unitPattern,
-      options?.patientSex,
-    );
+    let annotated = rebuild(rawCoverageLines);
+    let layoutRotated = false;
+    const rects = rawCoverageLines.flatMap(line => {
+      const rect = boxRect(line.box);
+      return rect ? [rect] : [];
+    });
+    const tall = rects.filter(rect => rectHeight(rect) > (rect.right - rect.left) * 1.5).length;
+    const scalarCount = (lines: PlannedOcrLine[]) => lines.filter(line => line.candidateKind === 'scalar').length;
+    // Try quarter turns only for predominantly sideways text; consider 180°
+    // only when an apparent table has almost no usable rows. An explicit header
+    // and a material gain in verified rows are required to replace the baseline.
+    const hasHeadings = rawCoverageLines.filter(line => /项目|名称|结果|参考范围/.test(String(line.text || ''))).length >= 2;
+    if (rects.length >= 6 && hasHeadings && (tall >= rects.length * .6 || scalarCount(annotated.lines) < 3)) {
+      const width = Math.max(...rects.map(rect => rect.right));
+      const height = Math.max(...rects.map(rect => rect.bottom));
+      const score = (lines: PlannedOcrLine[]) => scalarCount(lines)
+        + lines.reduce((sum, line) => sum + localObservationsForLine(line).length * 4, 0);
+      const baselineScore = score(annotated.lines);
+      for (const angle of tall >= rects.length * .6 ? [90, 270] : [180]) {
+        const oriented = rawCoverageLines.map(line => {
+          const r = boxRect(line.box);
+          if (!r) return line;
+          const box = angle === 90 ? [height-r.bottom, r.left, height-r.top, r.right]
+            : angle === 270 ? [r.top, width-r.right, r.bottom, width-r.left]
+            : [width-r.right, height-r.bottom, width-r.left, height-r.top];
+          return { ...line, box };
+        });
+        const candidate = rebuild(oriented);
+        if (!candidate.lines.some(line => line.boundary === 'table_header')
+          || scalarCount(candidate.lines) < 2 || score(candidate.lines) < baselineScore + 2
+          || score(candidate.lines) <= score(annotated.lines)) continue;
+        annotated = candidate;
+        layoutRotated = true;
+      }
+    }
     const parsedLines = annotated.lines;
     lineContext = annotated.context;
     const startsEducation = isEducationPage(parsedLines);
@@ -6265,6 +6307,17 @@ export function rebuildOcrPages(
         ? []
         : localObservationsForLine(line),
     }));
+    if (layoutRotated) {
+      // Cells retain canonical table coordinates for column verification. The
+      // public line region stays in the original image space for OCR/vision
+      // highlighting; raw OCR boxes and the saved page rotation never change.
+      lines = lines.map(line => {
+        const source = rawCoverageLines.filter(raw => line.sourceLineIds.includes(String(raw.id)))
+          .flatMap(raw => { const rect = boxRect(raw.box); return rect ? [rect] : []; });
+        return source.length ? { ...line, box: [Math.min(...source.map(r => r.left)), Math.min(...source.map(r => r.top)),
+          Math.max(...source.map(r => r.right)), Math.max(...source.map(r => r.bottom))] } : line;
+      });
+    }
     const text = renderCompletePage({ pageNumber: row.pageNumber, lines });
     return {
       pageId: row.pageId,

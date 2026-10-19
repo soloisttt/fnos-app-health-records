@@ -64,7 +64,8 @@ export type AiExtractionUnitEvent = {
     | "unit_failed"
     | "vision_review_started"
     | "vision_review_completed"
-    | "vision_review_failed";
+    | "vision_review_failed"
+    | "vision_review_skipped";
   message: string;
   detail: Record<string, unknown>;
 };
@@ -1175,7 +1176,7 @@ function validatedObservation(
   const inferredContext =
     page && line ? nearestContext(plan, page, line.index) : null;
   const sectionName = inferredContext?.section || item.sectionName;
-  const local = line?.projectHeaderCells && !line.tableStructureUnsafe
+  const local = line?.tableHeaderText && line.sourceCells.length >= 2 && !line.tableStructureUnsafe
     ? localObservationsForLine(line) : [];
   if (local.length === 1) {
     // Once the name/result pair is verified, all printed fields in that same
@@ -1249,27 +1250,7 @@ function validatedObservation(
     resultCells,
     nameCellIndex,
   );
-  const currentResultCell =
-    nameCellIndex >= 0 && resultCells[nameCellIndex + 1]
-      ? resultCells[nameCellIndex + 1]
-      : firstEvidence?.quote || "";
-  const explicitHigh = /[↑▲⬆]|偏高/.test(currentResultCell);
-  const explicitLow = /[↓▼⬇]|偏低/.test(currentResultCell);
-  const value = corrected.numericValue;
-  const inRange =
-    value !== null &&
-    (corrected.referenceLow === null || value >= corrected.referenceLow) &&
-    (corrected.referenceHigh === null || value <= corrected.referenceHigh) &&
-    (corrected.referenceLow !== null || corrected.referenceHigh !== null);
-  const outOfRange =
-    value !== null &&
-    ((corrected.referenceLow !== null && value < corrected.referenceLow) ||
-      (corrected.referenceHigh !== null && value > corrected.referenceHigh));
-  let abnormalFlag = corrected.abnormalFlag;
-  if (abnormalFlag === "high" && inRange && !explicitHigh) abnormalFlag = null;
-  if (abnormalFlag === "low" && inRange && !explicitLow) abnormalFlag = null;
-  if (abnormalFlag === "normal" && outOfRange) abnormalFlag = null;
-  return { ...corrected, abnormalFlag, evidence };
+  return { ...corrected, evidence };
 }
 
 function morphologyMeasurements(item: AiMorphologyFinding) {
@@ -3935,6 +3916,7 @@ export async function executeAiExtractionPlan(
       ? []
       : supplementUnits(plan, merged);
   let effectivePlan = plan;
+  let technicalFailure = false;
   if (supplements.length) {
     const units = [...plan.units, ...supplements];
     effectivePlan = {
@@ -3969,6 +3951,8 @@ export async function executeAiExtractionPlan(
             options,
           );
         } catch (error) {
+          if ((error as {code?:string})?.code === "AI_TASK_CANCELLED") throw error;
+          technicalFailure = true;
           const failure = errorDetails(error);
           getDatabase()
             .prepare(
@@ -4022,13 +4006,24 @@ export async function executeAiExtractionPlan(
     || (['no_structure','failed','partial'].includes(page.tableStructureStatus || '')
       && page.lines.some(line => /阳性|阴性|未检出|检出|结果|results?/i.test(line.text)))
   ).map(page => ({pageId:page.pageId,pageNumber:page.pageNumber})) : [];
+  let visionStatus: NonNullable<AiExtractionResult['recovery']>['visionStatus'] = 'not_needed';
+  let unreviewedPages:number[] = [];
   if (visionCandidates.length || pageReviews.length) {
+    visionStatus = 'unavailable';
+    unreviewedPages = [...new Set([...visionCandidates,...pageReviews].map(page=>page.pageNumber))];
     const visionReview = options.visionReview ?? runVisionReview;
     const visionResult = await visionReview(
       { reportId, result: merged, candidates: visionCandidates, pageReviews },
-      options,
+      {...options,onEvent:event=>{
+        if(event.type==='vision_review_failed') { visionStatus='failed'; technicalFailure=true; }
+        if(event.type==='vision_review_completed' && Array.isArray(event.detail.failures) && event.detail.failures.length) technicalFailure=true;
+        if(event.type==='vision_review_skipped') visionStatus=event.detail.reason==='budget'?'budget':'not_configured';
+        options.onEvent?.(event);
+      }},
     );
     if (visionResult) {
+      unreviewedPages = visionResult.visionCoverage?.unreviewedPages || [];
+      visionStatus = unreviewedPages.length ? 'partial' : 'completed';
       results.push(visionResult);
       merged = withDeterministicMorphologyMeasurements(
         plan,
@@ -4046,6 +4041,10 @@ export async function executeAiExtractionPlan(
     }
   }
   const unmatchedCandidates = updateCandidateQuality(jobId, plan, merged);
+  merged.recovery = { completed: true, technicalFailure, visionStatus, unreviewedPages, supplementUnits: supplements.length,
+    visionRequested: Boolean(visionCandidates.length || pageReviews.length),
+    unresolvedCandidates: unmatchedCandidates,
+    measurementCandidates: plan.pages.reduce((count,page)=>count+page.lines.filter(line=>line.candidateKind==='scalar'||localObservationsForLine(line).length>0).length,0) };
   let warningUnits = results.filter((result) =>
     Boolean(
       (result.evidenceValidation?.rejectedObservations || 0) +

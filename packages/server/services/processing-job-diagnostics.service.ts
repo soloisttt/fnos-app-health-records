@@ -282,7 +282,7 @@ function addReason(
 
 function failureReasonCode(code: string | null) {
   if (!code) return "AI_CALL_FAILED" as const;
-  if (["AI_INVALID_JSON", "AI_EMPTY_RESPONSE", "AI_EMPTY_RESULT"].includes(code)) return "AI_INVALID_OUTPUT" as const;
+  if (["AI_INVALID_JSON", "AI_EMPTY_RESPONSE", "AI_EMPTY_RESULT", "AI_NO_VERIFIED_OBSERVATIONS"].includes(code)) return "AI_INVALID_OUTPUT" as const;
   if (code === "AI_OUTPUT_TRUNCATED") return "AI_TRUNCATED_OUTPUT" as const;
   return "AI_CALL_FAILED" as const;
 }
@@ -619,6 +619,26 @@ export function buildProcessingJobDiagnostics(
     });
   });
 
+  const reviewSnapshot = db.prepare('SELECT fields_json AS fields FROM report_extractions WHERE job_id=?').get(job.id) as {fields:string}|undefined;
+  try {
+    const fields = JSON.parse(reviewSnapshot?.fields || '{}');
+    const withdrawn = fields.unverifiedPreviousObservations;
+    const recoveryReasons: ProcessingDiagnosticReason[] = [];
+    if (Array.isArray(withdrawn) && withdrawn.length) recoveryReasons.push({code:'POSTPROCESS_UNVERIFIED',severity:'warning',message:
+      `${withdrawn.length} 项上次识别值本次未能核实，已退出正常指标和趋势，保留原件对照`,pages:uniquePages(withdrawn.map(item=>item.pageNumber))});
+    const vision = fields.recovery?.visionStatus;
+    if (['not_configured','budget','partial','failed'].includes(vision)) recoveryReasons.push({code:'POSTPROCESS_UNVERIFIED',severity:'warning',message:
+      vision === 'not_configured' ? '视觉增强未启用或未配置，本轮未复核原图'
+        : vision === 'budget' ? '原图复核预算为零，本轮未复核原图'
+        : vision === 'failed' ? '原图复核调用失败，未完成核实' : '部分页面未完成原图复核，请核对剩余页面',pages:fields.recovery?.unreviewedPages || []});
+    if (recoveryReasons.length) {
+      const previous = reasons.find(reason=>reason.code==='POSTPROCESS_UNVERIFIED');
+      const message = recoveryReasons.map(reason=>reason.message).join('；');
+      const pages = uniquePages(recoveryReasons.flatMap(reason=>reason.pages));
+      if (previous) { previous.message += '；' + message; previous.pages = uniquePages([...previous.pages,...pages]); }
+      else addReason(reasons,'POSTPROCESS_UNVERIFIED','warning',message,pages);
+    }
+  } catch { /* Legacy snapshots have no recovery metadata. */ }
   let stage = diagnosticStage(job, units);
   if (
     job.jobType === "ai_extract"

@@ -877,12 +877,13 @@ test("sanitizes metadata fragments and qualitative results stored as units", () 
     { ...base, itemName: "某定性检查", resultText: "-", unit: "阴性" },
     { ...base, itemName: "另一项定性检查", resultText: "未检出", unit: "未检出" }
   ]);
-  assert.equal(sanitized.length, 2);
+  assert.equal(sanitized.length, 3);
   assert.deepEqual(sanitized.map((item) => ({
     itemName: item.itemName,
     resultText: item.resultText,
     unit: item.unit
   })), [
+    { itemName: "P", resultText: "12", unit: null },
     { itemName: "某定性检查", resultText: "阴性", unit: null },
     { itemName: "另一项定性检查", resultText: "未检出", unit: null }
   ]);
@@ -1074,6 +1075,32 @@ test("repairs embedded numeric names and report-level qualitative headings safel
   assert.equal(sanitized[1].itemName, "ABC:99");
   assert.equal(sanitized[2].itemName, "某专项");
   assert.equal(sanitized[2].resultText, "阴性");
+});
+
+test("ordinary table rows retain printed references when AI omits their numeric bounds", async () => {
+  await withReport(1, async ({ reportId, jobId }) => {
+    let calls = 0;
+    const replay = await executeAiExtractionPlan(jobId, reportId, async () => {
+      calls++;
+      return {
+        ...normalizeAiExtraction({ observations: [
+          { itemName: '丙氨酸氨基转移酶', resultText: '8.4', numericValue: 8.4, unit: 'U/L',
+            referenceText: '2.0-12.0', evidence: [{pageNumber: 1, quote: '丙氨酸氨基转移酶 | 8.4 | 2.0-12.0 | U/L'}] },
+          { itemName: '合成项目乙', resultText: '<0.3', numericValue: 0.3, unit: 'mg/',
+            evidence: [{pageNumber: 1, quote: '合成项目乙 | <0.3 | ≤1.2 | mg/'}] },
+        ] }), provider: 'test', model: 'test', promptVersion: 'test',
+        rawResponseJson: '{}', promptTokens: 0, completionTokens: 0, elapsedMs: 0,
+      };
+    }, {visionReview: async () => null});
+    assert.ok(calls > 0);
+    const item = replay.result.fields.observations.find(o => o.itemName === '丙氨酸氨基转移酶')!;
+    assert.ok(item);
+    assert.equal(item.referenceLow, 2);
+    assert.equal(item.referenceHigh, 12);
+    persistAiExtraction(reportId, jobId, replay.result, replay.inputCharacters);
+    assert.deepEqual({...getDatabase().prepare('SELECT reference_low lo, reference_high hi FROM observations WHERE report_id=? AND item_name=?').get(reportId, '丙氨酸氨基转移酶')}, {lo: 2, hi: 12});
+  }, () => ['检验项目 | 结果 | 参考范围 | 单位',
+    '丙氨酸氨基转移酶 | 8.4 | 2.0-12.0 | U/L', '合成项目乙 | <0.3 | ≤1.2 | mg/']);
 });
 
 test("rejects unverified AI observations and downgrades fields that cannot close the OCR loop", async () => {

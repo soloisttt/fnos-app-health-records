@@ -38,7 +38,7 @@ import {
  * OCR 冲突时保留待人工核对，不直接放行默认趋势。
  *
  * 隐私边界：页面原图无法像文本一样自动脱敏，设置页开关旁有明确告知；
- * 只在"详细"解析程度下触发，单份报告默认最多 3 页。
+ * 按明确的候选或字段疑点触发，单份报告默认最多 3 页。
  */
 export const aiVisionReviewPolicy = {
   maxPagesPerReport: 3,
@@ -53,7 +53,7 @@ export const aiVisionReviewPolicy = {
 export const aiVisionReviewPromptVersion = "vision-review-v5-name-verification";
 
 export type AiVisionReviewEvent = {
-  type: "vision_review_started" | "vision_review_completed" | "vision_review_failed";
+  type: "vision_review_started" | "vision_review_completed" | "vision_review_failed" | "vision_review_skipped";
   message: string;
   detail: Record<string, unknown>;
 };
@@ -346,7 +346,9 @@ export function acceptVisionObservations(
       && matched.sourceLineIds?.length && Array.isArray(matched.box) && matched.box.length
       && matched.box.flat().every(Number.isFinite)
       && review.sourceLineIds.length && review.sourceLineIds.every(id => matched.sourceLineIds.includes(id)));
-    const anchored = name.length >= 2 && sourceName.includes(name)
+    const shortCellName = /^[a-z]$/i.test(name) && matched.sourceCells?.some(cell =>
+      compactNameText(cell.text) === name && cell.sourceLineIds?.length);
+    const anchored = (name.length >= 2 || shortCellName) && sourceName.includes(name)
       || code.length >= 2 && sourceName.includes(code) || nameCorrected;
     const time = observation.examination?.timeText;
     const scopedResults = measurementEvidenceRegions(matched.text, [nameCorrected ? review!.originalName : observation.itemName, observation.itemCode || '']);
@@ -416,6 +418,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
     !settings.baseUrl ||
     (aiProviderHasRequiredApiKey(settings.provider) && !settings.apiKey)
   ) {
+    options.onEvent?.({type:'vision_review_skipped',message:'当前未启用或未配置可用的视觉增强，本轮未发送原图',detail:{reason:'not_configured'}});
     return null;
   }
   const pages = groupVisionReviewPages(input.candidates, Number.MAX_SAFE_INTEGER);
@@ -424,10 +427,14 @@ export const runVisionReview: AiVisionReviewExecutor = async (
     if (group) group.pageReview = true;
     else pages.push({ ...page, lines: [], omittedCandidates: 0, pageReview: true });
   }
+  const requestedPages = [...new Set([...input.candidates,...(input.pageReviews || [])].map(page=>page.pageNumber))];
   pages.sort((a, b) => Number(Boolean(b.pageReview)) - Number(Boolean(a.pageReview)) || b.lines.length - a.lines.length || a.pageNumber - b.pageNumber);
   pages.splice(configuredMaxPages());
   pages.sort((a,b) => a.pageNumber-b.pageNumber);
-  if (!pages.length) return null;
+  if (!pages.length) {
+    options.onEvent?.({type:'vision_review_skipped',message:'本轮原图复核预算为零，未发送原图',detail:{reason:'budget',pageNumbers:requestedPages}});
+    return null;
+  }
   const loadImage = options.loadImage || loadVisionReviewImage;
   const chat = options.chat || executeAiChatCompletion;
   const emit = (event: AiVisionReviewEvent) => options.onEvent?.(event);
@@ -453,6 +460,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
   const acceptedAll: AiObservation[] = [];
   let rejectedAll = 0;
   let reviewedPages = 0;
+  const reviewedPageNumbers:number[] = [];
   let promptTokens = 0;
   let completionTokens = 0;
   let elapsedMs = 0;
@@ -528,6 +536,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
       acceptedAll.push(...accepted);
       rejectedAll += rejected;
       reviewedPages += 1;
+      reviewedPageNumbers.push(group.pageNumber);
     } catch (error) {
       if ((error as { code?: string })?.code === "AI_TASK_CANCELLED") throw error;
       const message = (error instanceof Error ? error.message : "视觉复核失败").slice(0, 200);
@@ -573,6 +582,7 @@ export const runVisionReview: AiVisionReviewExecutor = async (
     model: config.model,
     promptVersion: aiVisionReviewPromptVersion,
     ...normalizeAiExtraction({ observations: acceptedAll }),
+    visionCoverage:{reviewedPages:reviewedPageNumbers,unreviewedPages:requestedPages.filter(page=>!reviewedPageNumbers.includes(page))},
     rawResponseJson: JSON.stringify({ observations: acceptedAll }),
     promptTokens: tokensSeen ? promptTokens : null,
     completionTokens: tokensSeen ? completionTokens : null,

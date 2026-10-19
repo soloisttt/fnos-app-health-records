@@ -62,6 +62,19 @@ test("marks a reliable latest normal result as recovered from historical abnorma
   assert.equal(result.attentionPriority, "notice");
 });
 
+test('unflagged limit boundaries do not imply abnormality or recovery', () => {
+  for (const numericValue of [5, 99]) {
+    const result = assessTrendAbnormalContinuity([
+      point('high', {numericValue: 11}),
+      point(null, {numericValue, resultComparator: '<'}),
+    ]);
+    assert.equal(result.latestDirection, 'unknown');
+    assert.equal(result.latestAbnormal, false);
+    assert.equal(result.recoveredFromAbnormal, false);
+    assert.equal(result.totalAbnormalCount, 1);
+  }
+});
+
 test("does not claim recovery when the latest point lacks a trusted range", () => {
   const result = assessTrendAbnormalContinuity([
     point("high", { numericValue: 11 }),

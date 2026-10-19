@@ -66,7 +66,7 @@ test('cleans summary enumeration names and collapses doubled names', () => {
   }
 });
 
-test('sanitize drops summary echo rows whose result is advice prose and rejects section labels', () => {
+test('sanitize preserves unique numbered prose and rejects explicit section labels', () => {
   const observations = normalizeAiExtraction({
     observations: [
       {
@@ -87,7 +87,8 @@ test('sanitize drops summary echo rows whose result is advice prose and rejects 
     ],
   }).fields.observations;
   const cleaned = sanitizeReportObservations(observations);
-  assert.equal(cleaned.length, 1);
-  assert.equal(cleaned[0].itemName, '血清丙氨酸氨基转移酶');
-  assert.equal(cleaned[0].resultText, '48');
+  assert.equal(cleaned.length, 2);
+  assert.match(cleaned[0].resultText, /建议/);
+  assert.equal(cleaned[1].itemName, '血清丙氨酸氨基转移酶');
+  assert.equal(cleaned[1].resultText, '48');
 });

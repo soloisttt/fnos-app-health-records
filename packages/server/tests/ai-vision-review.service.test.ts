@@ -502,3 +502,19 @@ test('PDF vision cache uses the current rotation instead of an existing stale pr
     assert.equal(calls,1);
   });
 });
+
+test('dense candidate lists keep the existing review limit instead of escalating to a whole-page response',async()=>{
+  await withAiSettings(true,async()=>{
+    let calls=0;
+    const candidates=Array.from({length:13},(_,index)=>candidateLine('page-1',1,index,`合成指标${index} ${index+1} U/L`));
+    const output=await runVisionReview({reportId:'report',result:emptyResult(),candidates},{
+      loadImage:async()=>({dataUrl:'data:image/jpeg;base64,AAAA',bytes:4}),
+      chat:async(_config,request)=>{
+        calls++;assert.equal(request.maxOutputTokens,2048);
+        return chatResponse(JSON.stringify({observations:[{n:'合成指标12',r:'13',u:'U/L',p:1,q:'合成指标12 13 U/L'}]}));
+      }
+    });
+    assert.equal(calls,1);
+    assert.equal(output?.fields.observations.length,0,'rows outside the original candidate list are not expanded implicitly');
+  });
+});

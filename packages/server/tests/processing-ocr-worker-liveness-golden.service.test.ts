@@ -122,7 +122,7 @@ def open(path): return Source()
 import time
 __version__ = "liveness-golden"
 class RapidOCR:
-    def __call__(self, path):
+    def __call__(self, path, **kwargs):
         time.sleep(0.46)
         return ([([[0, 0], [100, 0], [100, 12], [0, 12]], "匿名检查项目 5.0 mmol/L", 0.99)], {"elapsed": 460})
 `,

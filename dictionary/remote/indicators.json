@@ -2,7 +2,7 @@
   "$schema": "../schemas/indicators.schema.json",
   "formatVersion": 1,
   "layer": "remote",
-  "revision": 22,
+  "revision": 23,
   "indicators": [
     {
       "canonicalKey": "lipid_ldl_hdl_ratio",
@@ -27,6 +27,32 @@
         "生化"
       ],
       "explanation": "原报告明确给出的 LDL-C 与 HDL-C 比值，无量纲；不同于总胆固醇/HDL-C 比值和动脉硬化指数，不由系统自行计算。"
+    },
+    {
+      "canonicalKey": "lipid_sdldl_c",
+      "displayName": "小而密低密度脂蛋白胆固醇",
+      "categoryKey": "lipids",
+      "order": 29,
+      "kind": "quantitative",
+      "valueType": "numeric",
+      "specimen": "serum",
+      "defaultUnit": null,
+      "unitDimension": "other",
+      "aliases": [
+        "小而密低密度脂蛋白胆固醇",
+        "小而密低密度脂蛋白胆固醇测定",
+        "sdLDL-C",
+        "sd LDL-C"
+      ],
+      "allowedUnits": [
+        "mmol/L",
+        "mg/dL"
+      ],
+      "sectionHints": [
+        "血脂",
+        "生化"
+      ],
+      "explanation": "小而密低密度脂蛋白胆固醇定量结果，独立于普通低密度脂蛋白胆固醇、颗粒数、百分比及相关比值；保留原报告单位，mmol/L 与 mg/dL 分开观察，参考范围以原报告为准。"
     },
     {
       "canonicalKey": "cardiac_lvidd",
@@ -4890,7 +4916,8 @@
     {
       "canonicalKey": "lipid_tg",
       "aliases": [
-        "血清甘油三酯"
+        "血清甘油三酯",
+        "甘油三脂"
       ],
       "sectionHints": [
         "血脂",
@@ -4978,7 +5005,8 @@
     {
       "canonicalKey": "glucose_fasting",
       "aliases": [
-        "血糖（空腹）"
+        "血糖（空腹）",
+        "空腹葡萄糖"
       ],
       "sectionHints": [
         "生化",

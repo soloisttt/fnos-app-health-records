@@ -42,6 +42,14 @@
 
 形态学发现、报告所见、结论和建议等内容不属于指标，不写入指标字典。
 
+### 血脂及空腹血糖名称兼容
+
+- `甘油三脂` 作为报告非规范写法，通过远程 `extensions` 匹配核心指标 `甘油三酯`；`空腹葡萄糖` 同样扩展到 `空腹血糖`，保留空腹条件及现有单位兼容规则。
+- `小而密低密度脂蛋白胆固醇`（`sdLDL-C`）使用独立的 `lipid_sdldl_c`，不与普通 LDL-C、颗粒数、百分比或比值合并。沿用现有保留原单位的机制，`mmol/L` 与 `mg/dL` 分开观察；不设统一参考范围。
+- `载脂蛋白A` 不作为 `载脂蛋白 A1` 的全局别名；项目代码或检验资料明确为 ApoA1 后再确认关联。
+
+名称与边界依据：[国家卫健委血脂知识要点](https://www.nhc.gov.cn/jkj/s10033/200706/ee3b3ad6fd0e4b44980a76d206ce182f.shtml)、[济南市精神卫生中心检验项目目录](https://qsy.jinan.gov.cn/colqsy11762/art/2023/art_qsy11762_qsy54228.html)、[艾迪康 sdLDL-C 项目说明](https://www.adicon.com.cn/project/9126.html)、[台大医院检验医学部说明](https://epaper.ntuh.gov.tw/health/202012/health_5.html)。单位依据：[sdLDL-C 试剂说明书](https://www.upingbio.com/uploads/20241206110917/YPD1109.pdf)。这些资料用于确认项目名称、含义和单位，不作为所有机构通用的参考范围。
+
 字段按功能保守保留：
 
 - `canonicalKey`、`displayName`：稳定标识与用户可见名称。

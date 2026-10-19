@@ -1,3 +1,4 @@
+import { collectUnverifiedPreviousObservations, readUnverifiedPreviousObservations } from './extraction-review.service';
 import type { ExaminationInput } from "../domain/examination";
 import { examinationSourcePages, inferObservationExamination, expandTemporalObservationColumns, publishExaminationAssignments, publishMorphologyExaminationAssignments } from "./report-examination-inference.service";
 import { snapshotExaminationAssignments, restoreExaminationAssignments } from "./report-examination.service";
@@ -52,7 +53,7 @@ import {
 } from "./observation-interpretation.service";
 import { assessObservationReference } from "./observation-reference.service";
 
-export const aiExtractionPromptVersion = "health-record-routed-v11-medication-layouts";
+export const aiExtractionPromptVersion = "health-record-routed-v12-result-review";
 const maxInputCharacters = 80_000;
 const reportTypeAliases: Record<string, string> = {
   physical_exam: "checkup",
@@ -381,6 +382,9 @@ export type AiExtractionInput = {
 };
 
 export type AiExtractionResult = {
+  visionCoverage?:{reviewedPages:number[];unreviewedPages:number[]};
+  /** Set only by the bounded orchestration cycle, never accepted from model JSON. */
+  recovery?: {completed:true;technicalFailure?:boolean;visionStatus?:'not_needed'|'completed'|'partial'|'failed'|'not_configured'|'budget'|'unavailable';unreviewedPages?:number[];supplementUnits:number;visionRequested:boolean;unresolvedCandidates:number;measurementCandidates:number};
   provider: string;
   model: string;
   promptVersion: string;
@@ -2708,16 +2712,6 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       tableOrdinal: observation.evidence.some(entry => Boolean(entry.table)),
     });
     const normalizedItemName = cleanedName.name;
-    /* 小结枚举回声（"3、血清总胆固醇测定增高:5.48…"）：名称带序号前缀、
-       结果却是建议类长文（真实测量值埋在名称里）。明细页的同名指标已存在，
-       这种回声行直接丢弃。 */
-    if (
-      /^\d+\s*[、.．]/.test(observation.itemName.normalize("NFKC").trim()) &&
-      observation.resultText.trim().length > 16 &&
-      /[，。；;]/.test(observation.resultText)
-    ) {
-      return [];
-    }
     const embeddedValue = normalizedItemName.match(
       /^(.+?)[：:]\s*(?:<=|>=|<|>|≤|≥)?\s*([-+]?\d+(?:\.\d+)?)(?:\s*[^\s]+)?$/,
     );
@@ -2753,7 +2747,7 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       invalidObservationNamePattern.test(itemName)
     )
       return [];
-    if (/^[a-z]$/i.test(itemName) || /^[^\p{L}\p{N}]+$/u.test(itemName))
+    if (/^[^\p{L}\p{N}]+$/u.test(itemName))
       return [];
 
     const rawUnit = observation.unit?.normalize("NFKC").trim() || null;
@@ -2781,17 +2775,8 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
       high: observation.referenceHigh,
       text: observation.referenceText,
     });
-    const explicitHigh = /[↑▲⬆]|偏高/.test(resultText);
-    const explicitLow = /[↓▼⬇]|偏低/.test(resultText);
-    const inRange =
-      numericValue !== null &&
-      (reference.low === null || numericValue >= reference.low) &&
-      (reference.high === null || numericValue <= reference.high) &&
-      (reference.low !== null || reference.high !== null);
-    let abnormalFlag = observation.abnormalFlag;
-    if (inRange && abnormalFlag === "high" && !explicitHigh) abnormalFlag = null;
-    if (inRange && abnormalFlag === "low" && !explicitLow) abnormalFlag = null;
-
+    // Preserve report flags, including flags printed in a separate column.
+    // Conflicts with numeric interpretation are handled by the display service.
     return [
       {
         ...observation,
@@ -2806,7 +2791,6 @@ export function sanitizeReportObservations(observations: AiObservation[]) {
         referenceLow: reference.low,
         referenceHigh: reference.high,
         referenceText: reference.text,
-        abnormalFlag,
         evidence: uniqueObservationEvidence(observation.evidence),
       },
     ];
@@ -3655,6 +3639,20 @@ export function persistAiExtraction(
       normalized.fields.observations,
     )),
   };
+  const hadPreviousObservations = Boolean(db.prepare('SELECT 1 FROM observations WHERE report_id=? LIMIT 1').get(reportId)) || readUnverifiedPreviousObservations(reportId).length > 0;
+  if (hadPreviousObservations && result.recovery?.technicalFailure) {
+    throw Object.assign(new Error('自动补救调用未完成，已有结果已保留；请检查服务连接后重试'), {code:'AI_RECOVERY_INCOMPLETE'});
+  }
+  if (!fields.observations.length && !result.recovery?.completed &&
+    (hadPreviousObservations || initial.fields.observations.length || result.evidenceValidation?.rejectedObservations)) {
+    throw Object.assign(new Error("未生成可核实的指标，已有结果已保留；请核对页面方向、清晰度和表格列后重试"),
+      { code: "AI_NO_VERIFIED_OBSERVATIONS" });
+  }
+  if (!fields.observations.length && result.recovery?.completed && result.recovery.measurementCandidates > 0 && !hadPreviousObservations
+    && ![fields.morphologyFindings,fields.diagnoses,fields.medications,fields.procedures,fields.vaccinations,fields.billingItems,fields.reportSections].some(items=>items.length)
+    && !fields.billingSummary) {
+    throw Object.assign(new Error('自动补救后仍未取得可核实结果，请核对原件清晰度或配置可用的视觉增强'), {code:'AI_NO_VERIFIED_OBSERVATIONS'});
+  }
   const examinationPagesForOverrides=examinationSourcePages(reportId);
   const observationsWithOverrides = applyObservationFieldOverrides(
     reportId,
@@ -3665,6 +3663,7 @@ export function persistAiExtraction(
       return {...observation,evidence:observation.evidence.map(evidence=>({...evidence,examinationSourceKey:inferred.sourceKey}))};
     }),
   );
+  const unverifiedPreviousObservations = collectUnverifiedPreviousObservations(reportId, fields.observations);
   const deterministicDates = deterministicReportDates(reportId);
   const protectedRows = protectedMorphologyRows(reportId);
   const protectedClinical = protectedClinicalFacts(reportId);
@@ -4196,7 +4195,7 @@ export function persistAiExtraction(
       result.provider,
       result.model,
       result.promptVersion,
-      JSON.stringify(fields),
+      JSON.stringify({...fields,unverifiedPreviousObservations,recovery:result.recovery}),
       JSON.stringify(normalized.evidence),
       JSON.stringify(normalized.confidence),
       JSON.stringify({
@@ -4210,7 +4209,8 @@ export function persistAiExtraction(
       result.elapsedMs,
     );
     if (appendSnapshot) {
-      assertPublishedRecordsRetained(reportId, appendSnapshot);
+      assertPublishedRecordsRetained(reportId, appendSnapshot, result.recovery?.completed
+        ? {observations:fields.observations,unverified:unverifiedPreviousObservations} : undefined);
       db.prepare("UPDATE report_page_appends SET state=CASE WHEN job_id=? THEN 'normalizing' ELSE state END,result_version=base_version WHERE job_id=? OR (report_id=? AND published=1 AND result_version IS NULL AND state='ocr_only')").run(jobId,jobId,reportId);
     }
     db.exec("COMMIT");

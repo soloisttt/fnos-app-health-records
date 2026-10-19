@@ -24,6 +24,97 @@ def ocr_line(text, confidence, x1, y1, x2, y2, variant=None):
 
 
 class TableRetryTest(unittest.TestCase):
+    def test_word_positions_split_fused_columns_but_do_not_invent_or_change_text(self):
+        boxes = [[[x,10],[x+20,10],[x+20,30],[x,30]] for x in (10,31,180,201,330,351)]
+        words = ['项','目','12','.5','单','位']
+        item = [[[10,10],[371,10],[371,30],[10,30]], ''.join(words), .99, boxes, words, [.98]*6]
+        lines = worker.normalize_result([item])
+        self.assertEqual([line['text'] for line in lines], ['项目','12.5','单位'])
+        self.assertEqual([worker.line_rect(line) for line in lines], [(10.,10.,51.,30.),(180.,10.,221.,30.),(330.,10.,371.,30.)])
+        self.assertEqual(len({line['id'] for line in lines}),3)
+        bad = [*item[:4], ['错',*words[1:]], item[5]]
+        self.assertEqual(worker.normalize_result([bad])[0]['text'],item[1])
+        self.assertEqual(len(worker.normalize_result([bad])),1)
+        self.assertEqual(worker.normalize_result([item[:3]])[0]['box'],item[0])
+        self.assertFalse(worker.sideways_table(lines))
+
+    def test_positioned_spaces_do_not_bridge_columns_or_reduce_field_confidence(self):
+        words = ['项','目',' ',' ','结','果']
+        boxes = [[[x,10],[x+20,10],[x+20,30],[x,30]] for x in (10,30,50,90,130,150)]
+        item = [[[10,10],[170,10],[170,30],[10,30]], ''.join(words), .96,
+                boxes, words, [.98,.94,0.,0.,.99,.97]]
+        lines = worker.normalize_result([item])
+        self.assertEqual([line['text'] for line in lines], ['项目','结果'])
+        self.assertEqual([worker.line_rect(line) for line in lines], [(10.,10.,50.,30.),(130.,10.,170.,30.)])
+        self.assertAlmostEqual(lines[0]['confidence'],.96)
+        self.assertAlmostEqual(lines[1]['confidence'],.98)
+        # Spaces inside a field are retained; a low confidence digit remains low.
+        ordinary_words = ['合','成',' ',' ','甲','乙']
+        narrow = [item[0], ''.join(ordinary_words), item[2],
+                  [[[x,10],[x+20,10],[x+20,30],[x,30]] for x in (10,30,50,55,60,80)], ordinary_words, item[5]]
+        self.assertEqual(worker.normalize_result([narrow])[0]['text'],narrow[1])
+        low = [*item[:5], [.98,.94,0.,0.,.2,.3]]
+        self.assertAlmostEqual(worker.normalize_result([low])[1]['confidence'],.25)
+        flipped = [*item[:3], list(reversed(boxes)), *item[4:]]
+        self.assertEqual(worker.normalize_result([flipped])[0]['box'],item[0])
+
+    def test_packed_headings_use_glyph_positions_without_splitting_values(self):
+        words = list('参考范围单位序')
+        xs = [10,30,50,70,115,135,180]
+        boxes = [[[x,10],[x+18,10],[x+18,30],[x,30]] for x in xs]
+        item = [[[10,10],[198,10],[198,30],[10,30]], ''.join(words), .99, boxes, words, [.99]*len(words)]
+        lines = worker.normalize_result([item])
+        self.assertEqual([l['text'] for l in lines], ['参考范围','单位','序'])
+        self.assertEqual([worker.line_rect(l) for l in lines],[(10.,10.,88.,30.),(115.,10.,153.,30.),(180.,10.,198.,30.)])
+        # A recognition token spanning the label boundary has no finer geometry.
+        joined = [*item[:3], [item[0]], [item[1]], [.99]]
+        self.assertEqual(worker.normalize_result([joined])[0]['box'],item[0])
+
+    def test_sideways_table_retry_is_bounded_and_restores_original_coordinates(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow runtime is unavailable')
+        import tempfile
+        from unittest.mock import patch
+        sideways = [ocr_line('项目名称' if i == 0 else '结果' if i == 1 else 'Synthetic', .99,
+                             10+i*30, 20, 28+i*30, 200) for i in range(8)]
+        upright = [ocr_line('项目名称', .99, 20, 10, 140, 30), ocr_line('结果', .99, 220, 10, 280, 30)]
+        upright += [ocr_line('Synthetic', .99, 20, 60+i*30, 140, 80+i*30) for i in range(4)]
+        def result(lines):
+            return [(line['box'], line['text'], line['confidence']) for line in lines], None
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'sideways.png'
+            Image.new('RGB', (300, 500), 'white').save(path)
+            for chosen in (90, 270):
+                calls = []
+                def engine(value):
+                    calls.append(Path(value).name)
+                    return result(upright if Path(value).name == f'turn-{chosen}.png' else sideways)
+                with patch.object(worker, 'photo_perspective_variant', return_value=None), \
+                     patch.object(worker, 'retry_missing_header_cells', side_effect=lambda e,p,l,**kw:(l,[])), \
+                     patch.object(worker, 'retry_suspicious_table_rows', side_effect=lambda e,p,l,**kw:(l,[])), \
+                     patch.object(worker, 'enhance_page_lines', side_effect=lambda p,l:l):
+                    lines, metadata = worker.recognize_image(engine,path,None)
+                self.assertEqual(len(calls),3, 'reuse the winning OCR response and bound direction retries')
+                self.assertEqual(metadata['rotation'],chosen)
+                self.assertEqual(lines[0]['text'],'项目名称')
+                for line in lines:
+                    self.assertTrue(all(0<=x<=300 and 0<=y<=500 for x,y in line['box']))
+                corrected = worker.rotate_point_box(worker.line_rect(lines[0]), chosen, 300, 500)
+                self.assertEqual(corrected, list(worker.line_rect(upright[0])))
+            def failed_retry(value):
+                if Path(value).name.startswith('turn-'):
+                    raise ValueError('synthetic failure')
+                return result(sideways)
+            with patch.object(worker, 'photo_perspective_variant', return_value=None), \
+                 patch.object(worker, 'retry_missing_header_cells', side_effect=lambda e,p,l,**kw:(l,[])), \
+                 patch.object(worker, 'retry_suspicious_table_rows', side_effect=lambda e,p,l,**kw:(l,[])), \
+                 patch.object(worker, 'enhance_page_lines', side_effect=lambda p,l:l):
+                lines, _ = worker.recognize_image(failed_retry,path,None)
+            self.assertEqual(len(lines),len(sideways))
+            self.assertEqual(lines[0]['box'],sideways[0]['box'])
+
     def test_pdf_append_bin_supports_inspection_thumbnail_and_ocr(self):
         try:
             import fitz
@@ -538,15 +629,74 @@ class TableRetryTest(unittest.TestCase):
                                       (('7/6', '7/6'), '7/6')]:
                 answers = iter(replies)
                 def engine(_):
-                    return [([[90,12],[240,12],[240,60],[90,60]], next(answers), .99)], None
+                    return [([[90,12],[240,12],[240,60],[90,60]], next(answers, ""), .99)], None
                 budget = worker.empty_retry_budget()
                 result, attempts = worker.retry_missing_header_cells(engine, path, lines, budget)
                 self.assertEqual([l['text'] for l in result], [l['text'] for l in lines[:-1]] + [expected])
-                self.assertEqual(len(attempts), 2)
+                self.assertEqual(len(attempts), 2 if expected == 'g/L' else 4)
                 self.assertEqual(budget['cellUnresolved'], 0 if expected == 'g/L' else 1)
         missing = [ocr_line('Another', .99, 0, 100, 90, 120)]
         first = worker.header_retry_regions(lines + missing, 900, 150, limit=1)
         self.assertIs(first[0]['original'], lines[-1])
+
+    def test_truncated_unit_requires_agreeing_complete_pixel_readings(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest('OpenCV runtime is unavailable')
+        import tempfile
+        lines = [ocr_line(text, .99, col * 200, y, col * 200 + 90, y + 20)
+                 for y, cells in [(10, ['Test', 'Result', 'Reference', 'Unit']),
+                                  (60, ['Synthetic', '8.4', '0-12', 'mg/'])]
+                 for col, text in enumerate(cells)]
+        # The wrapped name baseline must not clip the lower unit glyphs.
+        lines[-1]['box'] = [[x, y + 10] for x, y in lines[-1]['box']]
+        region = worker.header_retry_regions(lines, 900, 150)[0]
+        self.assertIs(region['original'], lines[-1])
+        self.assertGreaterEqual(region['crop'][3], 94)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'synthetic.png'
+            cv2.imwrite(str(path), np.full((150, 900, 3), 255, dtype=np.uint8))
+            for replies, expected in [(('mg/L', 'mg/L'), 'mg/L'),
+                                      (('mg/L', 'mg/dL'), 'mg/'),
+                                      (('mg/L', 'mg/dL', 'mg/L', 'mg/L'), 'mg/'),
+                                      (('mg/', 'mg/'), 'mg/'),
+                                      (('m', 'm'), 'mg/'),
+                                      (('mg/', 'mg/', 'mg/L', 'mg/L'), 'mg/L')]:
+                answers = iter(replies)
+                def engine(_):
+                    return [([[90,12],[240,12],[240,60],[90,60]], next(answers, ""), .99)], None
+                budget = worker.empty_retry_budget()
+                result, attempts = worker.retry_missing_header_cells(engine, path, lines, budget)
+                self.assertEqual(result[-1]['text'], expected)
+                self.assertEqual([a['variant'] for a in attempts], ['cell_binary', 'cell_adaptive'] + ([] if replies[:2] == ('mg/L', 'mg/L') else ['cell_upscale', 'cell_gray']))
+                self.assertEqual(budget['retryCalls'], 2 if replies[:2] == ('mg/L', 'mg/L') else 4)
+                self.assertEqual(budget['cellUnresolved'], 0 if expected == 'mg/L' else 1)
+
+    def test_wrapped_name_duplicate_unit_crops_do_not_discard_successful_retry(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest('OpenCV runtime is unavailable')
+        import tempfile
+        from unittest.mock import patch
+        original = ocr_line('mg/', .99, 210, 60, 260, 80)
+        region = {'kind': 'unit', 'original': original, 'crop': (190, 50, 280, 90)}
+        def engine(_):
+            return [([[60,30],[210,30],[210,90],[60,90]], 'mg/L', .99)], None
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'synthetic.png'
+            cv2.imwrite(str(path), np.full((150, 400, 3), 255, dtype=np.uint8))
+            # Distinct crops survive geometric deduplication but share one cell.
+            with patch.object(worker, 'header_retry_regions', return_value=[region, {**region, 'crop': (190, 35, 280, 75)}]):
+                budget = worker.empty_retry_budget()
+                result, attempts = worker.retry_missing_header_cells(engine, path, [original], budget)
+            self.assertEqual(result[0]['text'], 'mg/L')
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(budget['cellRemaining'], 0)
+            self.assertEqual(budget['cellUnresolved'], 0)
 
     def test_pdf_fusion_keeps_repeated_results_units_and_signs_at_distinct_positions(self):
         source = [ocr_line(text, 1, 10, index * 30, 50, index * 30 + 20)

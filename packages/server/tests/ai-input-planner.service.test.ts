@@ -4989,3 +4989,94 @@ test('recovers abbreviated name headers in two panels without borrowing adjacent
   const creatinine=facts.find(f=>f.itemName==='肌酐');
   assert.equal(creatinine?.unit,'μmol/L');
 });
+
+test('recovers quarter-turn and upside-down two-panel tables with packed headers without changing image evidence', () => {
+  const raw: Array<{id:string;text:string;confidence:number;box:number[]}> = [];
+  const add = (id:string, text:string, x:number, y:number, width=70) => raw.push({id,text,confidence:.99,box:[x,y,x+width,y+20]});
+  for (const [panel,offset] of [[0,0],[1,800]]) {
+    add(`h${panel}s`,'序',offset+20,20,30);
+    add(`h${panel}n`,'项目名称',offset+220,20,80);
+    add(`h${panel}v`,'结果参考范围单位',offset+360,20,320);
+  }
+  const names=[['白细胞','红细胞','血红蛋白'],['葡萄糖','甘油三酯','肌酐']];
+  const values=[['7.1','4.8','132'],['5.3','1.1','68']];
+  for(let panel=0;panel<2;panel++) for(let row=0;row<3;row++) {
+    const x=panel*800,y=70+row*45;
+    add(`p${panel}r${row}s`,String(panel*3+row+1),x+20,y,25);
+    add(`p${panel}r${row}n`,names[panel][row],x+140,y,150);
+    add(`p${panel}r${row}v`,values[panel][row],x+365,y,60);
+    add(`p${panel}r${row}ref`,'1-200',x+490,y,100);
+    add(`p${panel}r${row}u`,panel===0?'g/L':'mmol/L',x+620,y,70);
+  }
+  for(const angle of [0,90,180,270]) {
+    const input=raw.map(line=>{const [l,t,r,b]=line.box;return {...line,box:angle===90?[400-b,l,400-t,r]
+      :angle===270?[t,1600-r,b,1600-l]:angle===180?[1600-r,400-b,1600-l,400-t]:line.box};});
+    const before=JSON.stringify(input);
+    const [p]=rebuildOcrPages([{pageId:'synthetic-oriented',pageNumber:1,linesJson:before}]);
+    const facts=p.lines.flatMap(localObservationsForLine);
+    assert.equal(facts.length,6,`angle ${angle}`);
+    assert.deepEqual(facts.map(f=>f.numericValue).sort((a,b)=>Number(a)-Number(b)),[1.1,4.8,5.3,7.1,68,132]);
+    const ids=new Set(input.map(line=>line.id));
+    for(const fact of facts) {
+      assert.ok(fact.sourceMap.item.sourceLineIds.every(id=>ids.has(id)));
+      assert.ok(fact.sourceMap.result.sourceLineIds.every(id=>ids.has(id)));
+    }
+    const line=p.lines.find(l=>l.sourceLineIds.includes('p0r0n'))!;
+    const source=input.filter(i=>line.sourceLineIds.includes(i.id));
+    assert.ok(line.box);
+    if(angle) assert.deepEqual(line.box,[Math.min(...source.map(i=>i.box[0])),Math.min(...source.map(i=>i.box[1])),
+      Math.max(...source.map(i=>i.box[2])),Math.max(...source.map(i=>i.box[3]))]);
+    assert.equal(JSON.stringify(input),before,'raw OCR geometry must remain unchanged');
+  }
+  const missing=raw.filter(line=>line.id!=='p1r1v');
+  const [p]=rebuildOcrPages([{pageId:'synthetic-missing',pageNumber:1,linesJson:JSON.stringify(missing)}]);
+  assert.ok(!p.lines.flatMap(localObservationsForLine).some(f=>f.itemName==='甘油三酯'), 'a missing result must not borrow the reference or adjacent panel value');
+});
+
+test('keeps fused reference/unit fields and panel ordinals in their own columns', () => {
+  const raw:any[]=[];
+  const add=(id:string,text:string,x:number,y:number,w:number)=>raw.push({id,text,confidence:.99,box:[x,y,x+w,y+20]});
+  for(const [panel,x]of [[0,0],[1,850]]) {
+    add(`h${panel}s`,'序号',x+20,10,30);
+    add(`h${panel}n`,'项目名称',x+180,10,100);
+    add(`h${panel}v`,'结果',x+420,10,60);
+    add(`h${panel}r`,'参考范围',x+550,10,100);
+    add(`h${panel}u`,'单位',x+750,10,70);
+  }
+  add('n1','单核细胞绝对值',90,60,220);
+  add('marker','全国HR',300,60,90);add('v','7.5',420,60,60);
+  add('fused','1-9'+'10"9/L'+'18',540,60,350);
+  add('rn','葡萄糖',940,60,170);add('rv','5.1',1270,60,60);
+  add('rr','3.0-6.0',1400,60,100);add('ru','mmol/L',1600,60,80);
+  const [p]=rebuildOcrPages([{pageId:'unit-panels',pageNumber:1,linesJson:JSON.stringify(raw)}]);
+  const facts=p.lines.flatMap(localObservationsForLine);
+  const mono=facts.find(f=>f.itemName==='单核细胞绝对值')!;
+  assert.ok(mono);assert.equal(mono.unit,'10"9/L');
+  assert.equal(mono.referenceText,'1-9');assert.equal(mono.referenceHigh,9);
+  assert.deepEqual(mono.sourceMap.item.sourceLineIds.sort(),['n1']);
+  assert.deepEqual(mono.sourceMap.unit?.sourceLineIds,['fused']);
+  assert.deepEqual(mono.sourceMap.reference?.sourceLineIds,['fused']);
+  assert.ok(!facts.some(f=>/HR|心率/.test(f.itemName)));
+  assert.equal(facts.find(f=>f.itemName==='葡萄糖')?.unit,'mmol/L');
+  const withoutOrdinalHeader=raw.filter(l=>l.id!=='h1s');
+  const [uncertain]=rebuildOcrPages([{pageId:'no-ordinal',pageNumber:1,linesJson:JSON.stringify(withoutOrdinalHeader)}]);
+  assert.ok(!uncertain.lines.flatMap(localObservationsForLine).find(f=>f.itemName==='单核细胞绝对值')?.unit,
+    'trailing digits cannot be stripped without the adjacent serial heading');
+  const digitDenominator=raw.map(l=>l.id==='fused'?{...l,text:'1-9'+'10"9/1'+'18'}:l);
+  const [ambiguousUnit]=rebuildOcrPages([{pageId:'digit-denominator',pageNumber:1,linesJson:JSON.stringify(digitDenominator)}]);
+  assert.ok(!ambiguousUnit.lines.flatMap(localObservationsForLine).find(f=>f.itemName==='单核细胞绝对值')?.unit,
+    'a serial digit cannot supply a missing L');
+  const fragments=[...raw.filter(l=>l.id!=='fused'),
+    {id:'ref',text:'1-9',confidence:.99,box:[550,60,650,80]},
+    {id:'base',text:'10',confidence:.99,box:[750,60,780,80]},
+    {id:'broken',text:'12/19',confidence:.99,box:[800,60,840,80]}];
+  const [splitUnit]=rebuildOcrPages([{pageId:'split-unit',pageNumber:1,linesJson:JSON.stringify(fragments)}]);
+  const retained=splitUnit.lines.flatMap(localObservationsForLine).find(f=>f.itemName==='单核细胞绝对值');
+  assert.equal(retained?.numericValue,7.5,'uncertain units do not discard a verified measurement');
+  assert.equal(retained?.unit,null);
+  const sharedCodeName=fragments.map(l=>l.id==='n1'?{...l,text:'红细胞（RBC）'}:l);
+  const [rbcPage]=rebuildOcrPages([{pageId:'shared-code-name',pageNumber:1,linesJson:JSON.stringify(sharedCodeName)}]);
+  const rbc=rbcPage.lines.flatMap(localObservationsForLine).find(f=>f.itemName.includes('红细胞'));
+  assert.equal(rbc?.numericValue,7.5,'shared dictionary codes must not discard a verified measurement');
+  assert.equal(rbc?.unit,null,'a verified name does not resolve an ambiguous unit');
+});
